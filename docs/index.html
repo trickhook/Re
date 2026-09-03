@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Sako RE Studio — Mobile-first Interactive Disassembler &amp; Decompiler for Android | IDA Pro / Ghidra Alternative</title>
+<meta name="description" content="Sako RE Studio is a mobile-first interactive disassembler &amp; decompiler framework for Android. APK, DEX, ELF, PE analysis, ARM64 &amp; x86-64, IR decompiler, call graph, ptrace debugger &amp; SakoScript plugins — an IDA Pro / Ghidra mobile alternative made in Somalia."/>
+<meta name="keywords" content="disassembler, decompiler, reverse engineering, android security, ida pro alternative, ghidra mobile, apk analyzer, malware analysis, binary analysis, mobile security, sako re studio, somalia"/>
+<meta name="robots" content="index, follow, max-image-preview:large"/>
+<meta name="author" content="Maxamed Xasan Muse"/>
+<meta name="theme-color" content="#0A0F1C"/>
+<link rel="canonical" href="https://maxamedxasa.github.io/SakoREStudio/"/>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 5 L90 20 V55 C90 78 72 92 50 98 C28 92 10 78 10 55 V20 Z' fill='%2322D3EE'/%3E%3Ctext x='50' y='66' font-size='42' text-anchor='middle' fill='%230A0F1C' font-family='monospace' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E"/>
+<!-- Open Graph -->
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="Sako RE Studio"/>
+<meta property="og:title" content="Sako RE Studio — IDA Pro / Ghidra in your pocket (Android)"/>
+<meta property="og:description" content="Mobile-first Interactive Disassembler &amp; Decompiler Framework: APK · DEX · ELF · PE · ARM64 · x86-64 · IR decompiler · call graph · ptrace debugger · SakoScript plugins."/>
+<meta property="og:url" content="https://maxamedxasa.github.io/SakoREStudio/"/>
+<meta property="og:image" content="https://maxamedxasa.github.io/SakoREStudio/assets/demo.gif"/>
+<meta property="og:locale" content="en_US"/>
+<meta property="og:locale:alternate" content="so_SO"/>
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="Sako RE Studio — IDA Pro / Ghidra in your pocket (Android)"/>
+<meta name="twitter:description" content="Mobile-first disassembler &amp; decompiler framework for Android. Made in Somalia 🇸🇴 by Maxamed Xasan Muse."/>
+<meta name="twitter:image" content="https://maxamedxasa.github.io/SakoREStudio/assets/demo.gif"/>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Sako RE Studio",
+  "alternateName": "SakoRE",
+  "operatingSystem": "Android 8.0+",
+  "applicationCategory": "DeveloperApplication",
+  "softwareVersion": "2.0.3",
+  "fileSize": "10MB",
+  "description": "Mobile-first interactive disassembler and decompiler framework for Android. Analyze APK, DEX, ELF and PE binaries with an IR decompiler, interactive CFG graph, ptrace debugger and SakoScript plugin system.",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Maxamed Xasan Muse", "nationality": "Somalia" },
+  "downloadUrl": "https://github.com/Maxamedxasa/SakoREStudio/releases/latest",
+  "softwareRequirements": "Android 8.0 (arm64-v8a or x86_64)",
+  "keywords": "disassembler, decompiler, reverse engineering, android security, ida pro alternative, ghidra mobile, apk analyzer, malware analysis, binary analysis, mobile security",
+  "featureList": [
+    "Interactive disassembler (ARM64, x86-64, ARM via Capstone)",
+    "IR-based decompiler with pseudo-C output",
+    "Control-flow graph view with minimap",
+    "ptrace debugger with breakpoints, registers and memory",
+    "APK analyzer with binary AXML manifest parsing",
+    "SQLite project database for renames, comments, bookmarks",
+    "SakoScript plugin language with 20+ host API functions",
+    "Offline AI-assisted function explanation",
+    "Command palette, search-everywhere, goto-address"
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    { "@type": "Question", "name": "Is Sako RE Studio free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Sako RE Studio is free and open source under the MIT license. The signed APK is available on the GitHub Releases page." } },
+    { "@type": "Question", "name": "Does Sako RE Studio need root?", "acceptedAnswer": { "@type": "Answer", "text": "No. Static analysis (disassembly, decompilation, APK analysis, graphs) works without root. Only the ptrace debugger needs a rooted or debuggable device." } },
+    { "@type": "Question", "name": "Which file formats does it support?", "acceptedAnswer": { "@type": "Answer", "text": "APK (zip + manifest + DEX), DEX, ELF32/ELF64 and PE32+ binaries, targeting ARM64, x86-64 and ARM code." } },
+    { "@type": "Question", "name": "Is it an IDA Pro or Ghidra alternative for mobile?", "acceptedAnswer": { "@type": "Answer", "text": "Sako RE Studio is a mobile-first interactive disassembler and decompiler framework inspired by IDA Pro and Ghidra: function discovery, xrefs, call graph, IR decompiler, debugger and a plugin scripting language — all on your phone." } }
+  ]
+}
+</script>
+<style>
+:root{--bg:#0A0F1C;--bg2:#0D1424;--panel:#111A2E;--line:#1E2A44;--txt:#E5E7EB;--mut:#8B98B4;--cyan:#22D3EE;--green:#34D399;--amber:#FBBF24;--red:#F87171;}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,-apple-system,Roboto,sans-serif;line-height:1.6;overflow-x:hidden}
+a{color:var(--cyan);text-decoration:none}
+.mono{font-family:'JetBrains Mono','Fira Code',Consolas,monospace}
+/* ===== hero ===== */
+.hero{position:relative;padding:72px 20px 48px;text-align:center;background:radial-gradient(ellipse 80% 60% at 50% -10%,rgba(34,211,238,.14),transparent 60%),linear-gradient(180deg,#0A0F1C 0%,#0D1424 100%)}
+.scan{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(34,211,238,.025) 3px 4px);animation:scan 9s linear infinite}
+@keyframes scan{0%{background-position:0 0}100%{background-position:0 120px}}
+.hexfield{position:absolute;inset:0;pointer-events:none;opacity:.14;font-family:monospace;color:var(--cyan);font-size:13px;overflow:hidden}
+.hexfield span{position:absolute;animation:floaty linear infinite}
+@keyframes floaty{0%{transform:translateY(105vh)}100%{transform:translateY(-15vh)}}
+.badge{display:inline-block;padding:5px 14px;border:1px solid var(--line);border-radius:999px;background:rgba(17,26,46,.8);color:var(--mut);font-size:12.5px;margin:4px;backdrop-filter:blur(4px)}
+.badge b{color:var(--green)}
+h1{font-size:clamp(30px,6vw,52px);line-height:1.15;margin:18px 0 6px;background:linear-gradient(92deg,#22D3EE,#34D399 55%,#FBBF24);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
+.sub{font-size:clamp(15px,2.4vw,19px);color:var(--mut);max-width:760px;margin:0 auto}
+.type{color:var(--cyan);font-weight:700}
+.caret{display:inline-block;width:10px;background:var(--cyan);animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.cta{margin-top:26px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{padding:13px 26px;border-radius:12px;font-weight:700;font-size:15px;transition:transform .18s,box-shadow .18s;display:inline-flex;align-items:center;gap:8px}
+.btn:hover{transform:translateY(-2px)}
+.btn-p{background:linear-gradient(92deg,#22D3EE,#34D399);color:#062018;box-shadow:0 8px 26px rgba(34,211,238,.35);animation:pulseGlow 2.6s ease-in-out infinite}
+@keyframes pulseGlow{0%,100%{box-shadow:0 8px 26px rgba(34,211,238,.30)}50%{box-shadow:0 8px 40px rgba(52,211,153,.55)}}
+.btn-g{border:1px solid var(--line);color:var(--txt);background:var(--panel)}
+.heroimg{max-width:960px;width:100%;margin:34px auto 0;border-radius:14px;border:1px solid var(--line);box-shadow:0 18px 60px rgba(0,0,0,.5);display:block}
+/* ===== sections ===== */
+section{max-width:1060px;margin:0 auto;padding:56px 20px}
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .7s ease,transform .7s ease}
+.reveal.on{opacity:1;transform:none}
+.kicker{color:var(--cyan);font-size:13px;letter-spacing:2.5px;text-transform:uppercase;font-weight:700}
+h2{font-size:clamp(24px,4vw,34px);margin:6px 0 26px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;transition:transform .2s,border-color .2s,box-shadow .2s}
+.card:hover{transform:translateY(-4px);border-color:rgba(34,211,238,.5);box-shadow:0 12px 34px rgba(0,0,0,.45)}
+.card .ic{font-size:26px}
+.card h3{font-size:16.5px;margin:8px 0 6px;color:#fff}
+.card p{color:var(--mut);font-size:14px}
+.pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;justify-content:center;margin-top:10px}
+.step{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 18px;text-align:center;min-width:130px;flex:1;position:relative}
+.step b{display:block;color:var(--cyan);font-size:15px}
+.step small{color:var(--mut)}
+.arrow{align-self:center;color:var(--cyan);font-size:20px;animation:nudge 1.4s ease-in-out infinite}
+@keyframes nudge{0%,100%{transform:translateX(0)}50%{transform:translateX(5px)}}
+table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:12px;overflow:hidden;font-size:14.5px}
+th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left}
+th{background:#0E1730;color:var(--cyan);font-size:13px;letter-spacing:.6px;text-transform:uppercase}
+tr:last-child td{border-bottom:none}
+td code{background:#0A1122;padding:2px 8px;border-radius:6px;color:var(--green);font-family:monospace;font-size:13px}
+.faq details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:12px}
+.faq summary{cursor:pointer;font-weight:700;font-size:15.5px;color:#fff;list-style:none}
+.faq summary::before{content:"▸ ";color:var(--cyan)}
+.faq details[open] summary::before{content:"▾ "}
+.faq p{color:var(--mut);margin-top:10px;font-size:14.5px}
+.so{background:linear-gradient(135deg,rgba(65,137,221,.10),rgba(17,26,46,.6));border:1px solid rgba(65,137,221,.4)}
+.so h2 span{color:#4189DD}
+.author{text-align:center;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:34px 22px}
+.avatar{width:84px;height:84px;border-radius:50%;border:2px solid var(--cyan);box-shadow:0 0 0 4px rgba(34,211,238,.15),0 0 30px rgba(34,211,238,.35);background:linear-gradient(135deg,#22D3EE,#34D399);display:inline-flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#062018}
+.flag{font-size:26px;animation:wave 2.2s ease-in-out infinite;transform-origin:70% 70%}
+@keyframes wave{0%,100%{transform:rotate(0)}25%{transform:rotate(14deg)}75%{transform:rotate(-8deg)}}
+footer{border-top:1px solid var(--line);padding:26px 20px;text-align:center;color:var(--mut);font-size:13.5px;margin-top:30px}
+.footerlinks a{margin:0 10px}
+</style>
+</head>
+<body>
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="scan"></div>
+  <div class="hexfield" id="hexfield" aria-hidden="true"></div>
+  <span class="badge">🛡️ <b>FREE &amp; OPEN SOURCE</b> · MIT</span>
+  <span class="badge">🤖 <b>Android 8.0+</b> · arm64 &amp; x86_64</span>
+  <span class="badge">📦 <b>~10 MB</b> APK</span>
+  <span class="badge">🇸🇴 <b>MADE IN SOMALIA</b></span>
+  <h1>Sako RE Studio</h1>
+  <p class="sub">Mobile-first <strong>Interactive Disassembler &amp; Decompiler Framework</strong>.<br/>
+  <span class="type mono" id="typing"></span><span class="caret">&nbsp;</span></p>
+  <p class="sub" style="margin-top:10px">The IDA Pro / Ghidra experience — <strong style="color:var(--green)">in your pocket</strong>. Open any APK, DEX, ELF or PE and explore functions, call graphs, pseudo-C, xrefs and a live debugger — fully offline.</p>
+  <div class="cta">
+    <a class="btn btn-p" href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest" rel="noopener">⬇️ Download APK (v2.0.3)</a>
+    <a class="btn btn-g" href="https://github.com/Maxamedxasa/SakoREStudio" rel="noopener">⭐ GitHub Repository</a>
+  </div>
+  <img class="heroimg" src="assets/banner.svg" alt="Sako RE Studio — animated banner with scrolling ARM64 disassembly, made in Somalia by Maxamed Xasan Muse"/>
+</header>
+
+<!-- ================= DEMO ================= -->
+<section class="reveal" id="demo">
+  <div style="text-align:center"><span class="kicker">See it in action</span>
+  <h2>Real analysis. Real device. Zero cloud.</h2>
+  <img src="assets/demo.gif" alt="Sako RE Studio demo GIF: opening an APK, scrolling disassembly, control-flow graph with minimap, IR decompiler pseudo-C" width="330" style="border-radius:14px;border:1px solid var(--line);box-shadow:0 16px 50px rgba(0,0,0,.5)"/></div>
+</section>
+
+<!-- ================= FEATURES ================= -->
+<section class="reveal" id="features">
+  <span class="kicker">Feature Matrix</span>
+  <h2>9 pro modules, one pocket toolkit</h2>
+  <div class="grid">
+    <div class="card"><div class="ic">🗄️</div><h3>SQLite Project Database</h3><p>Every rename, comment, bookmark and note is persisted per project in SQLite. Close the app, come back tomorrow — nothing is lost.</p></div>
+    <div class="card"><div class="ic">🔍</div><h3>Deep Auto-Analysis</h3><p>Automatic function discovery, real call graph with PLT/GOT/IAT resolution, xrefs, C++ demangler (Itanium + MSVC) and auto-comments for string refs and dangerous APIs.</p></div>
+    <div class="card"><div class="ic">⚙️</div><h3>IR Decompiler</h3><p>ASM → IR → pseudo-C: expression trees, register propagation, dead-store elimination, while-loop reconstruction from back edges, if/else diamonds and typed call arguments.</p></div>
+    <div class="card"><div class="ic">🕸️</div><h3>Interactive Graph View</h3><p>Draggable CFG nodes, zoom &amp; pan, block coloring (entry/exit/branch), search jump and a live minimap with viewport.</p></div>
+    <div class="card"><div class="ic">🐞</div><h3>Real ptrace Debugger</h3><p>Spawn or attach to a PID, software breakpoints (BRK / 0xCC), full register read/write, memory &amp; stack dumps and a thread list.</p></div>
+    <div class="card"><div class="ic">📦</div><h3>APK Analyzer</h3><p>Binary AXML manifest parsing: package, permissions (risk-flagged ⚠), all components + intent filters, DEX classes, native libs and resources with image preview.</p></div>
+    <div class="card"><div class="ic">🧩</div><h3>SakoScript Plugins</h3><p>A full scripting language inside the app (vars, if/while/for, functions) with a 20+ function host API. 4 security plugins ship bundled.</p></div>
+    <div class="card"><div class="ic">🤖</div><h3>AI Assistant</h3><p>Offline heuristic <em>Explain</em> for any function, or plug in your own OpenAI / DeepSeek / Ollama endpoint for full LLM analysis.</p></div>
+    <div class="card"><div class="ic">📱</div><h3>Modern Mobile UI</h3><p>13 tabs, command palette (Ctrl+K), search-everywhere (Ctrl+F), goto address (Ctrl+G) and complete keyboard shortcuts — built with Jetpack Compose.</p></div>
+  </div>
+</section>
+
+<!-- ================= PIPELINE ================= -->
+<section class="reveal" id="pipeline">
+  <span class="kicker">Workflow</span>
+  <h2>From APK to pseudo-C in seconds</h2>
+  <div class="pipe">
+    <div class="step"><b>📂 Open</b><small>APK · DEX · ELF · PE</small></div><div class="arrow">➜</div>
+    <div class="step"><b>🔍 Analyze</b><small>functions · xrefs · strings</small></div><div class="arrow">➜</div>
+    <div class="step"><b>⚙️ Decompile</b><small>ASM → IR → pseudo-C</small></div><div class="arrow">➜</div>
+    <div class="step"><b>🕸️ Explore</b><small>CFG · call graph · minimap</small></div><div class="arrow">➜</div>
+    <div class="step"><b>🐞 Debug</b><small>breakpoints · regs · memory</small></div><div class="arrow">➜</div>
+    <div class="step"><b>💾 Save</b><small>SQLite project store</small></div>
+  </div>
+</section>
+
+<!-- ================= FORMATS ================= -->
+<section class="reveal" id="formats">
+  <span class="kicker">Supported Targets</span>
+  <h2>Formats &amp; architectures</h2>
+  <table>
+    <tr><th>Container / Format</th><th>What you get</th><th>Architectures</th></tr>
+    <tr><td><code>.apk</code></td><td>Manifest (AXML), permissions, components, DEX classes, native libs, resources</td><td>ARM64 · x86_64</td></tr>
+    <tr><td><code>.dex</code></td><td>Classes, methods as named functions, invoke-based call graph, strings</td><td>Dalvik</td></tr>
+    <tr><td><code>ELF32 / ELF64</code></td><td>Sections, segments, symbols, dynamic, RELA, GOT/PLT resolution</td><td>ARM64 · x86-64 · ARM</td></tr>
+    <tr><td><code>PE32+</code></td><td>Sections, imports/exports, IAT slot resolution, entry point</td><td>x86-64</td></tr>
+  </table>
+</section>
+
+<!-- ================= FAQ ================= -->
+<section class="reveal faq" id="faq">
+  <span class="kicker">FAQ</span>
+  <h2>Frequently asked questions</h2>
+  <details open><summary>Is Sako RE Studio free?</summary><p>Yes — free and open source under the MIT license. The signed APK is on the <a href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest">GitHub Releases</a> page.</p></details>
+  <details><summary>Does it need root?</summary><p>No. All static analysis (disassembly, decompilation, APK analysis, graphs, plugins) runs without root. Only the ptrace debugger needs a rooted or debuggable device.</p></details>
+  <details><summary>Which formats does it support?</summary><p>APK (manifest + DEX + libs + resources), DEX, ELF32/ELF64 and PE32+ — targeting ARM64, x86-64 and ARM code.</p></details>
+  <details><summary>Is it really an IDA Pro / Ghidra alternative on mobile?</summary><p>It is a mobile-first interactive disassembler &amp; decompiler framework inspired by IDA Pro and Ghidra: function discovery, xrefs, call graph, IR decompiler, debugger and a plugin language — all offline on your phone.</p></details>
+</section>
+
+<!-- ================= SOMALI ================= -->
+<section class="reveal so" id="soomaali" lang="so">
+  <h2><span>🇸🇴</span> Waa maxay Sako RE Studio?</h2>
+  <p style="color:var(--txt)">Sako RE Studio waa qalab <strong>reverse engineering</strong> oo buuxa oo mobile-ka lagu shaqeeyo: disassembler, decompiler (ASM → IR → pseudo-C), call graph, CFG graph, debugger (ptrace), APK analyzer iyo nidaam plugins (SakoScript) — dhammaantood isku hal app ku dhex jira, oo <strong>internet la'aan shaqeeya</strong>.</p>
+  <p style="color:var(--mut);margin-top:10px">Waa IDA Pro ama Ghidra — laakiin telefoonkaada gacanta ku jira. Waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed: <strong style="color:var(--cyan)">Maxamed Xasan Muse</strong> 🇸🇴 — waa qalabkii ugu horreeyay ee noocaan ah oo ka soo saarma Soomaaliya.</p>
+  <p style="margin-top:12px"><a class="btn btn-p" href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest">⬇️ Soo deji APK-ga (bilaash)</a></p>
+</section>
+
+<!-- ================= AUTHOR ================= -->
+<section class="reveal" id="author">
+  <div class="author">
+    <div class="avatar">MX</div>
+    <h2 style="margin-top:14px">Maxamed Xasan Muse <span class="flag">🇸🇴</span></h2>
+    <p class="kicker" style="letter-spacing:1px">Author &amp; Developer — Somalia</p>
+    <p style="color:var(--mut);max-width:620px;margin:14px auto 0">Designed, engineered and shipped entirely by a Somali developer. Sako RE Studio is the first mobile reverse-engineering framework of its kind built in Somalia — bringing IDA-class binary analysis to everyone with a phone.</p>
+    <div class="cta">
+      <a class="btn btn-g" href="https://github.com/Maxamedxasa" rel="noopener">GitHub: @Maxamedxasa</a>
+      <a class="btn btn-g" href="https://github.com/Maxamedxasa/SakoREStudio" rel="noopener">⭐ Star the project</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footerlinks">
+    <a href="https://github.com/Maxamedxasa/SakoREStudio">GitHub</a>
+    <a href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest">Download</a>
+    <a href="https://github.com/Maxamedxasa/SakoREStudio/blob/main/README.md">Documentation</a>
+    <a href="https://github.com/Maxamedxasa/SakoREStudio/blob/main/LICENSE">MIT License</a>
+  </div>
+  <p>© 2025 Maxamed Xasan Muse · Sako RE Studio — Mobile-first Interactive Disassembler &amp; Decompiler Framework · Made in Somalia 🇸🇴</p>
+</footer>
+
+<script>
+// typing animation
+(function(){
+  var words=["Disassembler ⚙️","Decompiler (ASM→IR→C) ⚙️","Call Graph Explorer 🕸️","ptrace Debugger 🐞","APK Analyzer 📦","SakoScript Plugin Host 🧩","AI-Assisted RE 🤖"];
+  var el=document.getElementById("typing"),w=0,c=0,del=false;
+  function tick(){
+    var word=words[w];
+    el.textContent=del?word.slice(0,c--):word.slice(0,c++);
+    if(!del&&c>word.length+8){del=true;}
+    else if(del&&c<1){del=false;w=(w+1)%words.length;}
+    setTimeout(tick,del?38:85);
+  }
+  tick();
+})();
+// floating hex bytes
+(function(){
+  var f=document.getElementById("hexfield"),html="";
+  for(var i=0;i<26;i++){
+    var v="0x"+Math.floor(Math.random()*0xFFFF).toString(16).padStart(4,"0").toUpperCase();
+    html+='<span style="left:'+(Math.random()*96)+'%;animation-duration:'+(14+Math.random()*22)+'s;animation-delay:-'+(Math.random()*30)+'s">'+v+" &nbsp;"+v+"</span>";
+  }
+  f.innerHTML=html;
+})();
+// scroll reveal
+(function(){
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting)e.target.classList.add("on")})},{threshold:.12});
+  document.querySelectorAll(".reveal").forEach(function(n){io.observe(n)});
+})();
+</script>
+</body>
+</html>

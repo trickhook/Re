@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://maxamedxasa.github.io/SakoREStudio/sitemap.xml

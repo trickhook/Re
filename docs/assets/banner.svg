@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" font-family="'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070B14"/>
+      <stop offset="0.55" stop-color="#0B1222"/>
+      <stop offset="1" stop-color="#0D1A33"/>
+    </linearGradient>
+    <radialGradient id="glowL" cx="0.22" cy="0.42" r="0.5">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowR" cx="0.78" cy="0.45" r="0.55">
+      <stop offset="0" stop-color="#3B82F6" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shieldStroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="scan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#22D3EE" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0A0F1D"/>
+      <stop offset="0.12" stop-color="#0A0F1D" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#0A0F1D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0A0F1D"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#1E293B" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="termClip"><rect x="622" y="122" width="516" height="202"/></clipPath>
+    <clipPath id="hexClip"><rect x="0" y="369" width="1200" height="50"/></clipPath>
+    <style>
+      .asmScroll { animation: scrollY 6s linear infinite; }
+      @keyframes scrollY { to { transform: translateY(-200px); } }
+      .hexScroll { animation: marquee 16s linear infinite; }
+      @keyframes marquee { to { transform: translateX(-800px); } }
+      .pulse { animation: pulse 2.4s ease-in-out infinite alternate; }
+      @keyframes pulse { from { opacity: 0.55; } to { opacity: 1; } }
+      .scanline { animation: scanmove 7s linear infinite; }
+      @keyframes scanmove { from { transform: translateY(-80px); } to { transform: translateY(440px); } }
+      .cursor { animation: blink 1s steps(2) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      .mono { font-family: ui-monospace,'JetBrains Mono','Fira Code','DejaVu Sans Mono',Consolas,monospace; }
+    </style>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="420" fill="url(#bg)"/>
+  <rect width="1200" height="420" fill="url(#grid)" opacity="0.45"/>
+  <rect width="1200" height="420" fill="url(#glowL)"/>
+  <rect width="1200" height="420" fill="url(#glowR)"/>
+  <rect x="0" y="0" width="3" height="420" fill="url(#shieldStroke)" opacity="0.9"/>
+  <rect class="scanline" x="0" y="0" width="1200" height="80" fill="url(#scan)"/>
+
+  <!-- shield logo -->
+  <g class="pulse" filter="url(#glow)">
+    <path d="M96 78 L138 94 V130 C138 162 118 180 96 188 C74 180 54 162 54 130 V94 Z"
+          fill="#0B1222" stroke="url(#shieldStroke)" stroke-width="4" stroke-linejoin="round"/>
+    <text x="96" y="152" text-anchor="middle" font-size="52" font-weight="800"
+          fill="url(#shieldStroke)" class="mono">S</text>
+  </g>
+
+  <!-- title block -->
+  <text x="170" y="128" font-size="15" font-weight="700" fill="#34D399" letter-spacing="6">REVERSE ENGINEERING · ANDROID</text>
+  <text x="166" y="190" font-size="47" font-weight="800" fill="#F1F5F9" letter-spacing="2" filter="url(#glow)">SAKO RE STUDIO</text>
+  <text x="168" y="232" font-size="19" fill="#7DD3FC" font-weight="600">Mobile-first Interactive Disassembler &amp; Decompiler</text>
+  <text x="168" y="262" font-size="16" fill="#94A3B8">IDA Pro &amp; Ghidra — gacantaada ku jira · APK · ELF · DEX · PE</text>
+
+  <!-- made in somalia -->
+  <g transform="translate(168,296)">
+    <rect x="0" y="4" width="30" height="20" rx="2.5" fill="#4189DD"/>
+    <polygon fill="#FFFFFF" transform="translate(15,14) scale(0.95)"
+      points="0,-10 2.25,-3.09 9.51,-3.09 3.63,1.18 5.88,8.09 0,3.82 -5.88,8.09 -3.63,1.18 -9.51,-3.09 -2.25,-3.09"/>
+    <text x="42" y="19" font-size="15" font-weight="800" fill="#F1F5F9" letter-spacing="3">MADE IN SOMALIA</text>
+    <text x="212" y="19" font-size="14" fill="#475569">|</text>
+    <text x="228" y="19" font-size="14.5" fill="#94A3B8">by <tspan fill="#34D399" font-weight="700">Maxamed Xasan Muse</tspan></text>
+  </g>
+
+  <!-- version chip -->
+  <g>
+    <rect x="1022" y="30" width="148" height="28" rx="14" fill="#0F1E38" stroke="#22D3EE" stroke-opacity="0.45"/>
+    <circle cx="1040" cy="44" r="4" fill="#34D399"/>
+    <text x="1052" y="48.5" font-size="13" fill="#A5F3FC" class="mono">v2.0.3 · Android 8+</text>
+  </g>
+
+  <!-- terminal panel -->
+  <g>
+    <rect x="610" y="84" width="540" height="252" rx="12" fill="#0A0F1D" stroke="#1F2C46"/>
+    <rect x="610" y="84" width="540" height="26" rx="12" fill="#101A30"/>
+    <rect x="610" y="98" width="540" height="12" fill="#101A30"/>
+    <circle cx="630" cy="97" r="5" fill="#F87171"/>
+    <circle cx="646" cy="97" r="5" fill="#FBBF24"/>
+    <circle cx="662" cy="97" r="5" fill="#34D399"/>
+    <text x="880" y="101" font-size="12.5" fill="#64748B" text-anchor="middle" class="mono">sub_1F4A0 — ARM64 · Capstone</text>
+
+    <g clip-path="url(#termClip)">
+      <g class="asmScroll mono" font-size="13">
+        <g transform="translate(0,0)">
+          <text x="626" y="140"><tspan fill="#5B6B85">0x0001F4A0</tspan><tspan fill="#38BDF8">  stp  </tspan><tspan fill="#E2E8F0">x29, x30, [sp, #-0x20]!</tspan></text>
+          <text x="626" y="160"><tspan fill="#5B6B85">0x0001F4A4</tspan><tspan fill="#38BDF8">  mov  </tspan><tspan fill="#E2E8F0">x29, sp</tspan></text>
+          <text x="626" y="180"><tspan fill="#5B6B85">0x0001F4A8</tspan><tspan fill="#38BDF8">  adrp </tspan><tspan fill="#E2E8F0">x0, #0x4B000</tspan><tspan fill="#34D399">  ; "AES key"</tspan></text>
+          <text x="626" y="200"><tspan fill="#5B6B85">0x0001F4AC</tspan><tspan fill="#38BDF8">  add  </tspan><tspan fill="#E2E8F0">x0, x0, #0x120</tspan></text>
+          <text x="626" y="220"><tspan fill="#5B6B85">0x0001F4B0</tspan><tspan fill="#38BDF8">  bl   </tspan><tspan fill="#FBBF24">#0x1F3C0</tspan><tspan fill="#34D399">  ; aes_init</tspan></text>
+          <text x="626" y="240"><tspan fill="#5B6B85">0x0001F4B4</tspan><tspan fill="#38BDF8">  cbz  </tspan><tspan fill="#E2E8F0">w0, #0x1F4E0</tspan></text>
+          <text x="626" y="260"><tspan fill="#5B6B85">0x0001F4B8</tspan><tspan fill="#38BDF8">  ldr  </tspan><tspan fill="#E2E8F0">x8, [x19, #0x10]</tspan></text>
+          <text x="626" y="280"><tspan fill="#5B6B85">0x0001F4BC</tspan><tspan fill="#38BDF8">  str  </tspan><tspan fill="#E2E8F0">x8, [sp, #0x18]</tspan></text>
+          <text x="626" y="300"><tspan fill="#5B6B85">0x0001F4C0</tspan><tspan fill="#38BDF8">  mov  </tspan><tspan fill="#E2E8F0">w2, #0x100</tspan></text>
+          <text x="626" y="320"><tspan fill="#5B6B85">0x0001F4C4</tspan><tspan fill="#38BDF8">  bl   </tspan><tspan fill="#FBBF24">#0x1F200</tspan><tspan fill="#34D399">  ; memcpy</tspan></text>
+        </g>
+        <g transform="translate(0,200)">
+          <text x="626" y="140"><tspan fill="#5B6B85">0x0001F4A0</tspan><tspan fill="#38BDF8">  stp  </tspan><tspan fill="#E2E8F0">x29, x30, [sp, #-0x20]!</tspan></text>
+          <text x="626" y="160"><tspan fill="#5B6B85">0x0001F4A4</tspan><tspan fill="#38BDF8">  mov  </tspan><tspan fill="#E2E8F0">x29, sp</tspan></text>
+          <text x="626" y="180"><tspan fill="#5B6B85">0x0001F4A8</tspan><tspan fill="#38BDF8">  adrp </tspan><tspan fill="#E2E8F0">x0, #0x4B000</tspan><tspan fill="#34D399">  ; "AES key"</tspan></text>
+          <text x="626" y="200"><tspan fill="#5B6B85">0x0001F4AC</tspan><tspan fill="#38BDF8">  add  </tspan><tspan fill="#E2E8F0">x0, x0, #0x120</tspan></text>
+          <text x="626" y="220"><tspan fill="#5B6B85">0x0001F4B0</tspan><tspan fill="#38BDF8">  bl   </tspan><tspan fill="#FBBF24">#0x1F3C0</tspan><tspan fill="#34D399">  ; aes_init</tspan></text>
+          <text x="626" y="240"><tspan fill="#5B6B85">0x0001F4B4</tspan><tspan fill="#38BDF8">  cbz  </tspan><tspan fill="#E2E8F0">w0, #0x1F4E0</tspan></text>
+          <text x="626" y="260"><tspan fill="#5B6B85">0x0001F4B8</tspan><tspan fill="#38BDF8">  ldr  </tspan><tspan fill="#E2E8F0">x8, [x19, #0x10]</tspan></text>
+          <text x="626" y="280"><tspan fill="#5B6B85">0x0001F4BC</tspan><tspan fill="#38BDF8">  str  </tspan><tspan fill="#E2E8F0">x8, [sp, #0x18]</tspan></text>
+          <text x="626" y="300"><tspan fill="#5B6B85">0x0001F4C0</tspan><tspan fill="#38BDF8">  mov  </tspan><tspan fill="#E2E8F0">w2, #0x100</tspan></text>
+          <text x="626" y="320"><tspan fill="#5B6B85">0x0001F4C4</tspan><tspan fill="#38BDF8">  bl   </tspan><tspan fill="#FBBF24">#0x1F200</tspan><tspan fill="#34D399">  ; memcpy</tspan></text>
+        </g>
+      </g>
+    </g>
+    <rect x="622" y="122" width="516" height="202" fill="url(#fade)"/>
+    <rect class="cursor" x="626" y="308" width="8" height="14" fill="#22D3EE"/>
+  </g>
+
+  <!-- hex marquee strip -->
+  <rect x="0" y="368" width="1200" height="52" fill="#060A12" stroke="#141F36" stroke-width="1"/>
+  <g clip-path="url(#hexClip)">
+    <g class="hexScroll mono" font-size="15" fill="#3F5578">
+      <text x="20" y="400">55 48 89 E5 53 0F 10 05 E8 4A FE FF FF 48 8D 3D C8 45 0B 00 1F 44 00 00 C3 66 0F 1F 84 00 00 00 00 00 41 57 41 56 41 55 41 54 55 48 8D 6C 24 C9 B8 0A 00 00 00 E8 12 FB FF FF 31 F6 48 8D 3D 76 32 0C 00 89 44 24 08 31 C9 48 8D 54 24 08 E8</text>
+      <text x="820" y="400">55 48 89 E5 53 0F 10 05 E8 4A FE FF FF 48 8D 3D C8 45 0B 00 1F 44 00 00 C3 66 0F 1F 84 00 00 00 00 00 41 57 41 56 41 55 41 54 55 48 8D 6C 24 C9 B8 0A 00 00 00 E8 12 FB FF FF 31 F6 48 8D 3D 76 32 0C 00 89 44 24 08 31 C9 48 8D 54 24 08 E8</text>
+    </g>
+  </g>
+</svg>
