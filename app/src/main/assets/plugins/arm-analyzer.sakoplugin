@@ -1,0 +1,8 @@
+{
+  "id": "arm-analyzer",
+  "name": "ARM Function Annotator",
+  "version": "1.0",
+  "author": "SakoRE",
+  "description": "Annotates leaf functions, thunks and multi-call helpers in the current binary.",
+  "script": "## ARM/ARM64 function annotator\nlog(\"=== ARM Analyzer ===\")\nn = count_functions()\nleafs = 0\nhubs = 0\nfor i in 0..n-1 {\n    f = func_at(i)\n    nx = count_xrefs_to(f.addr)\n    if nx == 0 {\n        comment(f.addr, \"leaf / unreferenced (maybe callback or export)\")\n        leafs = leafs + 1\n    }\n    if nx > 4 {\n        comment(f.addr, \"hot function \u2014 called from \" + str(nx) + \" sites\")\n        hubs = hubs + 1\n    }\n}\nlog(\"annotated:\", leafs, \"leafs \u00b7\", hubs, \"hot functions\")\n"
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sako RE Studio</string>
+    <string name="so_hint_open">Fur APK / ELF / EXE / DEX</string>
+</resources>

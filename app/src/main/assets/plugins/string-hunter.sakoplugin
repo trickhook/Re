@@ -1,0 +1,8 @@
+{
+  "id": "string-hunter",
+  "name": "String Hunter",
+  "version": "1.0",
+  "author": "SakoRE",
+  "description": "Adds comments at functions referencing long/high-entropy-like strings.",
+  "script": "## string hunter\nlog(\"=== String Hunter ===\")\nns = count_strings()\nn = count_functions()\nlog(ns, \"strings across\", n, \"functions\")\nfound = 0\nfor i in 0..ns-1 {\n    s = string_at(i)\n    if strlen(s.value) > 24 {\n        nx = count_xrefs_to(s.addr)\n        if nx > 0 {\n            x = xref_to_at(s.addr, 0)\n            comment(s.addr, \"long string referenced \" + str(nx) + \"x\")\n            found = found + 1\n            if found > 40 { break }\n        }\n    }\n}\nlog(\"annotated strings:\", found)\n"
+}

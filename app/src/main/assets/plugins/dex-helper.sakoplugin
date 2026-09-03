@@ -1,0 +1,8 @@
+{
+  "id": "dex-helper",
+  "name": "DEX Class Explorer",
+  "version": "1.0",
+  "author": "SakoRE",
+  "description": "Bookmarks interesting DEX string-table entries (crypto/native/JNI hints).",
+  "script": "## DEX explorer (runs on .dex files)\nlog(\"=== DEX Helper ===\")\nns = count_strings()\nlog(\"strings in table:\", ns)\nmarks = 0\nfor i in 0..ns-1 {\n    s = string_at(i)\n    v = s.value\n    if strlen(v) > 3 {\n        ## look for Ldroid/Ljava class descriptors and JNI-ish names\n        if charat(v, 0) == 76 {\n            if marks < 12 {\n                bookmark(s.addr, \"class-ref: \" + v)\n            }\n            marks = marks + 1\n        }\n    }\n}\nlog(\"bookmarked first class descriptors:\", marks)\n"
+}
