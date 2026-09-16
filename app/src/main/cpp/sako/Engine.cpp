@@ -8,6 +8,7 @@
 #include "Script.h"
 #include "Demangle.h"
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
@@ -56,6 +57,102 @@ static std::string q(const std::string& s) { return "\"" + jsonEscape(s) + "\"";
 static std::string hq(u64 v) { return q(hexAddr(v)); }
 static std::string num(u64 v) {
     std::ostringstream os; os << v; return os.str();
+}
+
+// ------------------------------------------------------------ data xrefs --
+// buildXrefs() records branch targets and nothing else, so on AArch64 the
+// answer to "what references this string" was zero for every string in every
+// binary. That is not a small gap: the shipped string-hunter plugin gates its
+// whole body on `count_xrefs_to(s.addr) > 0` and has therefore never annotated
+// a single string on the architecture this tool is built for, and the xrefs
+// panel was empty for every piece of data.
+//
+// A data reference on AArch64 is two instructions — ADRP puts a 4 KiB page in
+// a register, then ADD or LDR adds the offset — so it takes a register table
+// to see one at all. The table is cleared at every RET, which keeps a page
+// from leaking across a function boundary into a wrong answer.
+//
+// Type "data", never "call": buildCallGraph filters on "call", so the call
+// graph is unchanged by this and stays a graph of calls.
+static void addDataXrefs(const std::string& arch, const u8* code, size_t size, u64 va,
+                         u64 mapLo, u64 mapHi,
+                         std::map<u64, std::vector<Xref>>& out, size_t cap = 200000) {
+    size_t total = 0;
+    for (auto& kv : out) total += kv.second.size();
+    auto push = [&](u64 from, u64 to) {
+        if (to < mapLo || to >= mapHi || total >= cap) return;
+        out[to].push_back(Xref{from, to, "data"});
+        ++total;
+    };
+
+    if (arch == "ARM64") {
+        u64 page[32];
+        bool have[32];
+        for (int i = 0; i < 32; ++i) { page[i] = 0; have[i] = false; }
+        for (size_t i = 0; i + 4 <= size; i += 4) {
+            u32 w = rd32(code + i);
+            u64 pc = va + i;
+            if (w == 0xD65F03C0) {                         // RET
+                for (int k = 0; k < 32; ++k) have[k] = false;
+                continue;
+            }
+            if ((w & 0x9F000000) == 0x90000000) {          // ADRP Rd, page
+                u32 rd = w & 0x1F;
+                i64 imm = i64(((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3));
+                page[rd] = u64(i64(pc & ~u64(0xFFF)) + (sext(imm, 21) << 12));
+                have[rd] = true;
+                continue;
+            }
+            if ((w & 0x9F000000) == 0x10000000) {          // ADR Rd, label
+                u32 rd = w & 0x1F;
+                i64 imm = i64(((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3));
+                page[rd] = u64(i64(pc) + sext(imm, 21));
+                have[rd] = true;
+                push(pc, page[rd]);
+                continue;
+            }
+            if ((w & 0xFF800000) == 0x91000000) {          // ADD Xd, Xn, #imm12
+                u32 rd = w & 0x1F, rn = (w >> 5) & 0x1F, imm12 = (w >> 10) & 0xFFF;
+                if (have[rn]) {
+                    u64 t = page[rn] + imm12;
+                    push(pc, t);
+                    page[rd] = t; have[rd] = true;
+                } else if (rd != rn) have[rd] = false;
+                continue;
+            }
+            if ((w & 0xFFC00000) == 0xF9400000) {          // LDR Xt, [Xn, #imm12*8]
+                u32 rt = w & 0x1F, rn = (w >> 5) & 0x1F, imm12 = (w >> 10) & 0xFFF;
+                if (have[rn]) push(pc, page[rn] + u64(imm12) * 8);
+                have[rt] = false;
+                continue;
+            }
+            if ((w & 0xFFC00000) == 0xB9400000) {          // LDR Wt, [Xn, #imm12*4]
+                u32 rt = w & 0x1F, rn = (w >> 5) & 0x1F, imm12 = (w >> 10) & 0xFFF;
+                if (have[rn]) push(pc, page[rn] + u64(imm12) * 4);
+                have[rt] = false;
+                continue;
+            }
+            // Anything else that writes Rd invalidates whatever page it held.
+            // Only the common register-destination shapes are decoded here;
+            // being conservative costs a missed reference, never a wrong one.
+            // logical / add-sub shifted register, and MOVZ/MOVN/MOVK — the
+            // 0x12800000 opcode field covers both widths of the move, so
+            // there is no separate 32-bit case to test.
+            if ((w & 0x1F000000) == 0x0A000000 || (w & 0x1F000000) == 0x0B000000 ||
+                (w & 0x1F800000) == 0x12800000)
+                have[w & 0x1F] = false;
+        }
+    } else if (arch == "X86_64") {
+        // lea r64, [rip + disp32] — 48 8D /r with ModRM mod=00 rm=101.
+        for (size_t i = 0; i + 7 <= size; ++i) {
+            if ((code[i] & 0xF8) != 0x48 || code[i + 1] != 0x8D) continue;
+            u8 modrm = code[i + 2];
+            if ((modrm & 0xC7) != 0x05) continue;
+            i64 d = i64(i32(rd32(code + i + 3)));
+            push(va + i, u64(i64(va + i + 7) + d));
+            i += 6;
+        }
+    }
 }
 
 // ------------------------------------------------ decompiler selection --
@@ -527,6 +624,15 @@ bool Engine::ensureCtx(const std::string& path) {
                 u64 off = elfVaToOff(c.elf, va);
                 if (off != ~u64(0) && off + size <= n) {
                     c.xrefs = buildXrefs(c.arch, p + off, size, va);
+                    // Data references too, so "what reads this string" has an
+                    // answer. Bounded to the addresses the file actually maps.
+                    u64 lo = ~u64(0), hi = 0;
+                    for (auto& sg : c.elf.segments)
+                        if (sg.type == "LOAD" && sg.memsz) {
+                            lo = std::min(lo, sg.vaddr);
+                            hi = std::max(hi, sg.vaddr + sg.memsz);
+                        }
+                    if (lo < hi) addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs);
                 }
             }
             c.names = buildAddrNamesElf(c.bin, c.elf);
@@ -575,6 +681,13 @@ bool Engine::ensureCtx(const std::string& path) {
                 u64 off = peVaToOff(c.pe, va);
                 if (off != ~u64(0) && off + size <= n) {
                     c.xrefs = buildXrefs(c.arch, p + off, size, va);
+                    u64 lo = ~u64(0), hi = 0;
+                    for (auto& sc : c.pe.sections)
+                        if (sc.size) {
+                            lo = std::min(lo, sc.addr);
+                            hi = std::max(hi, sc.addr + sc.size);
+                        }
+                    if (lo < hi) addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs);
                 }
             }
             c.names = buildAddrNamesPe(c.bin, c.pe);
@@ -1229,6 +1342,65 @@ std::string bytesText(const std::vector<u8>& b) {
     return out;
 }
 
+// The longest run of printable bytes in a block, and where it starts. This is
+// the answer to "did this function decrypt a string", and it is computed here
+// rather than in the plugin because NocturneScript has no substring operator:
+// a script can ask whether a byte is printable but cannot cut the run out.
+std::string bytesBestRun(const std::vector<u8>& b, size_t* startOut = nullptr) {
+    size_t best = 0, bestAt = 0, run = 0, at = 0;
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (b[i] >= 0x20 && b[i] < 0x7F) {
+            if (run == 0) at = i;
+            if (++run > best) { best = run; bestAt = at; }
+        } else run = 0;
+    }
+    if (startOut) *startOut = bestAt;
+    return best ? std::string((const char*)b.data() + bestAt, best) : std::string();
+}
+
+// One emulator argument in the flat text form the JSON API already uses:
+//   42 / 0x2a   a scalar
+//   buf:256     allocate 256 zeroed bytes, pass the address
+//   str:TEXT    allocate a NUL-terminated copy of TEXT, pass the address
+//   hex:AABB    allocate those bytes, pass the address
+// Shared by Engine::emulate and by the script builtin so there is one spelling
+// of an argument in this engine, not two.
+EmuArg parseEmuArg(const std::string& a) {
+    EmuArg arg;
+    if (a.rfind("buf:", 0) == 0) {
+        arg.kind = EmuArg::Buffer;
+        arg.len = u32(strtoul(a.c_str() + 4, nullptr, 0));
+        if (arg.len > 65536) arg.len = 65536;
+    } else if (a.rfind("hex:", 0) == 0) {
+        arg.kind = EmuArg::Data;
+        arg.data = fromHex(a.substr(4));
+    } else if (a.rfind("str:", 0) == 0) {
+        arg.kind = EmuArg::Data;
+        for (size_t k = 4; k < a.size(); ++k) arg.data.push_back(u8(a[k]));
+        arg.data.push_back(0);
+    } else {
+        arg.kind = EmuArg::Value;
+        arg.value = parseAddr(a);
+    }
+    return arg;
+}
+
+// Shannon entropy of a byte range, in bits per byte. Eight is incompressible
+// — packed, encrypted or already-compressed; a normal .text sits near six and
+// English .rodata near four and a half.
+double byteEntropy(const u8* p, size_t n) {
+    if (!p || n == 0) return 0;
+    u64 hist[256] = {0};
+    for (size_t i = 0; i < n; ++i) hist[p[i]]++;
+    double h = 0;
+    for (int i = 0; i < 256; ++i) {
+        if (!hist[i]) continue;
+        double pr = double(hist[i]) / double(n);
+        h -= pr * (std::log(pr) / std::log(2.0));
+    }
+    return h;
+}
+
 } // namespace
 
 std::string Engine::emulate(const std::string& path, const std::string& reqJson) {
@@ -1259,23 +1431,7 @@ std::string Engine::emulate(const std::string& path, const std::string& reqJson)
     req.limits.strictUserops = j.num("strictUserops", 0) != 0;
 
     for (const std::string& a : splitSemi(j.str("args"))) {
-        EmuArg arg;
-        if (a.rfind("buf:", 0) == 0) {
-            arg.kind = EmuArg::Buffer;
-            arg.len = u32(strtoul(a.c_str() + 4, nullptr, 0));
-            if (arg.len > 65536) arg.len = 65536;
-        } else if (a.rfind("hex:", 0) == 0) {
-            arg.kind = EmuArg::Data;
-            arg.data = fromHex(a.substr(4));
-        } else if (a.rfind("str:", 0) == 0) {
-            arg.kind = EmuArg::Data;
-            for (size_t k = 4; k < a.size(); ++k) arg.data.push_back(u8(a[k]));
-            arg.data.push_back(0);
-        } else {
-            arg.kind = EmuArg::Value;
-            arg.value = parseAddr(a);
-        }
-        req.args.push_back(arg);
+        req.args.push_back(parseEmuArg(a));
         if (req.args.size() >= 16) break;
     }
     for (const std::string& r : splitSemi(j.str("regs"))) {
@@ -1452,9 +1608,23 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
         if (c.fmt == Fmt::ELF) v = &c.elf.imports;
         else if (c.fmt == Fmt::PE) v = &c.pe.imports;
         if (!v || i >= v->size()) return ScriptValue::nil();
+        // An undefined dynsym has st_value 0, so `addr` was 0 for every import
+        // of every shared library and count_xrefs_to(imp.addr) answered 0 for
+        // all of them — attack-surface reported "0 call sites" 13 times in a
+        // row on a library that calls mmap. The address a call to an import
+        // actually reaches is its PLT stub; that is what the xref map is keyed
+        // by, so that is what `addr` has to be when the symbol has none.
+        u64 plt = 0;
+        if (c.fmt == Fmt::ELF) {
+            const std::string& want = (*v)[i].name;
+            for (auto& kv : c.elf.pltNames)
+                if (kv.second == want) { plt = kv.first; break; }
+        }
         auto o = std::make_shared<ScriptObj>();
         (*o)["name"] = ScriptValue::ofStr((*v)[i].name);
-        (*o)["addr"] = ScriptValue::ofNum(double((*v)[i].addr));
+        (*o)["addr"] = ScriptValue::ofNum(double((*v)[i].addr ? (*v)[i].addr : plt));
+        (*o)["plt"]  = ScriptValue::ofNum(double(plt));
+        (*o)["sym"]  = ScriptValue::ofNum(double((*v)[i].addr));
         return ScriptValue::ofObj(o);
     });
     script.setBuiltin("demangle", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
@@ -1464,22 +1634,47 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
         const char* r = a.empty() ? nullptr : classifyImport(a[0].str);
         return r ? ScriptValue::ofStr(r) : ScriptValue::nil();
     });
-    script.setBuiltin("count_xrefs_to", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+    // The xref map holds code references and, since data references were added
+    // to it, data ones too. These two default to CODE references only, because
+    // ten plugins were written when that was all the map held and "how many
+    // callers does this function have" must not start counting vtable slots
+    // underneath them. An explicit kind — "call", "jmp", "data", "code",
+    // "any" — selects otherwise.
+    auto xrefKind = [](const std::vector<ScriptValue>& a, size_t idx) {
+        std::string k = a.size() > idx ? a[idx].str : std::string();
+        return k.empty() ? std::string("code") : k;
+    };
+    auto xrefWanted = [](const Xref& x, const std::string& kind) {
+        if (kind == "any") return true;
+        if (kind == "code") return x.type != "data";
+        return x.type == kind;
+    };
+    script.setBuiltin("count_xrefs_to", [&, xrefKind, xrefWanted]
+                      (const std::vector<ScriptValue>& a) -> ScriptValue {
         if (a.empty()) return ScriptValue::ofNum(0);
-        u64 addr = u64(a[0].num);
-        auto it = c.xrefs.find(addr);
-        return ScriptValue::ofNum(it == c.xrefs.end() ? 0 : double(it->second.size()));
+        auto it = c.xrefs.find(u64(a[0].num));
+        if (it == c.xrefs.end()) return ScriptValue::ofNum(0);
+        std::string kind = xrefKind(a, 1);
+        size_t n = 0;
+        for (auto& x : it->second) if (xrefWanted(x, kind)) ++n;
+        return ScriptValue::ofNum(double(n));
     });
-    script.setBuiltin("xref_to_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+    script.setBuiltin("xref_to_at", [&, xrefKind, xrefWanted]
+                      (const std::vector<ScriptValue>& a) -> ScriptValue {
         if (a.size() < 2) return ScriptValue::nil();
-        u64 addr = u64(a[0].num);
-        size_t i = size_t(a[1].num);
-        auto it = c.xrefs.find(addr);
-        if (it == c.xrefs.end() || i >= it->second.size()) return ScriptValue::nil();
-        auto o = std::make_shared<ScriptObj>();
-        (*o)["from"] = ScriptValue::ofNum(double(it->second[i].from));
-        (*o)["type"] = ScriptValue::ofStr(it->second[i].type);
-        return ScriptValue::ofObj(o);
+        auto it = c.xrefs.find(u64(a[0].num));
+        if (it == c.xrefs.end()) return ScriptValue::nil();
+        std::string kind = xrefKind(a, 2);
+        size_t want = size_t(a[1].num), seen = 0;
+        for (auto& x : it->second) {
+            if (!xrefWanted(x, kind)) continue;
+            if (seen++ != want) continue;
+            auto o = std::make_shared<ScriptObj>();
+            (*o)["from"] = ScriptValue::ofNum(double(x.from));
+            (*o)["type"] = ScriptValue::ofStr(x.type);
+            return ScriptValue::ofObj(o);
+        }
+        return ScriptValue::nil();
     });
     // effects for the app to persist
     script.setBuiltin("rename", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
@@ -1507,8 +1702,10 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
         return ScriptValue::ofBool(true);
     });
     script.setBuiltin("hex", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        // hexAddr already writes the 0x prefix. Adding a second one made every
+        // address a plugin has ever logged read "0x0x2630C".
         if (a.empty()) return ScriptValue::ofStr("0x0");
-        return ScriptValue::ofStr("0x" + hexAddr(u64(a[0].num)));
+        return ScriptValue::ofStr(hexAddr(u64(a[0].num)));
     });
     script.setBuiltin("strlen", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
         return ScriptValue::ofNum(a.empty() ? 0 : double(a[0].str.size()));
@@ -1521,6 +1718,571 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
     });
     script.setBuiltin("str", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
         return ScriptValue::ofStr(a.empty() ? "" : a[0].render());
+    });
+
+    // ------------------------------------------------------------------
+    // Everything below is what the engine knows and a plugin could not see.
+    // All of it follows the one convention the language forces: with no
+    // arrays, a list is count_X() plus X_at(i), never a value.
+    // ------------------------------------------------------------------
+
+    auto funcObj = [](const FuncInfo& f) {
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["addr"] = ScriptValue::ofNum(double(f.addr));
+        (*o)["size"] = ScriptValue::ofNum(double(f.size));
+        (*o)["name"] = ScriptValue::ofStr(f.name);
+        (*o)["from"] = ScriptValue::ofStr(f.from);
+        return ScriptValue::ofObj(o);
+    };
+
+    // Which function is this address inside? A plugin gets instruction
+    // addresses from xref_to_at and had no way to turn one into a function
+    // without scanning all 1,319 in the script — 1.7 million interpreter
+    // steps for one lookup, which is why no existing plugin tries.
+    //
+    // Built once per run and binary-searched: a linear scan here is O(n) per
+    // lookup, and the obfuscation profiler does one lookup per function, so on
+    // a library with 4,000 functions that is 16 million comparisons and the
+    // plugin took 16 seconds. Sorted, it takes 0.9.
+    // Indices, not pointers: functionDetail appends a synthetic FuncInfo to
+    // c.funcs when it is asked about an address no symbol covers, and it holds
+    // a different lock than this does. An index survives that reallocation; a
+    // pointer into the vector would not.
+    auto byAddr = std::make_shared<std::vector<std::pair<u64, size_t>>>();
+    byAddr->reserve(c.funcs.size());
+    for (size_t i = 0; i < c.funcs.size(); ++i) byAddr->push_back({c.funcs[i].addr, i});
+    std::sort(byAddr->begin(), byAddr->end());
+    auto containing = [&c, byAddr](u64 addr) -> const FuncInfo* {
+        // The last function whose start is <= addr.
+        auto it = std::upper_bound(byAddr->begin(), byAddr->end(), addr,
+                                   [](u64 v, const std::pair<u64, size_t>& e) {
+                                       return v < e.first;
+                                   });
+        if (it == byAddr->begin()) return nullptr;
+        size_t idx = (it - 1)->second;
+        if (idx >= c.funcs.size()) return nullptr;
+        const FuncInfo& f = c.funcs[idx];
+        if (f.addr != (it - 1)->first) return nullptr;   // the list moved under us
+        if (f.size ? (addr < f.addr + f.size) : (addr == f.addr)) return &f;
+        return nullptr;
+    };
+    script.setBuiltin("func_containing", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.empty()) return ScriptValue::nil();
+        const FuncInfo* f = containing(u64(a[0].num));
+        return f ? funcObj(*f) : ScriptValue::nil();
+    });
+
+    // Where does this exact byte sequence sit in the image? Zero for "nowhere".
+    // The point is the zero. A string the emulator hands back is only a
+    // *recovered* string if it is not in the file already — otherwise the code
+    // copied it out of .rodata and the run proved nothing. That test was done
+    // by hand with grep when the emulator landed; this is the same test, one
+    // memmem instead of 3,000 interpreter-level string compares.
+    script.setBuiltin("find_bytes", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.empty()) return ScriptValue::ofNum(0);
+        const std::string& needle = a[0].str;
+        if (needle.empty() || needle.size() > c.bin.data.size()) return ScriptValue::ofNum(0);
+        const u8* hay = c.bin.data.data();
+        size_t n = c.bin.data.size(), m = needle.size();
+        // Spelled out rather than memmem(): that is a GNU/BSD extension, and
+        // this file is compiled against three libcs.
+        size_t at = std::string::npos;
+        for (size_t i = 0; i + m <= n; ++i)
+            if (hay[i] == u8(needle[0]) && memcmp(hay + i, needle.data(), m) == 0) { at = i; break; }
+        if (at == std::string::npos) return ScriptValue::ofNum(0);
+        u64 off = u64(at);
+        // Report a virtual address when one exists, so it lines up with every
+        // other address a plugin sees; fall back to the file offset.
+        if (c.fmt == Fmt::ELF) {
+            for (auto& sg : c.elf.segments)
+                if (sg.type == "LOAD" && off >= sg.offset && off < sg.offset + sg.filesz)
+                    return ScriptValue::ofNum(double(sg.vaddr + (off - sg.offset)));
+        }
+        return ScriptValue::ofNum(double(off));
+    });
+
+    // ---- sections ----------------------------------------------------
+    const std::vector<Section>* secs = c.fmt == Fmt::ELF ? &c.elf.sections
+                                     : c.fmt == Fmt::PE  ? &c.pe.sections : nullptr;
+    script.setBuiltin("count_sections", [&](const std::vector<ScriptValue>&) -> ScriptValue {
+        return ScriptValue::ofNum(secs ? double(secs->size()) : 0);
+    });
+    script.setBuiltin("section_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        size_t i = size_t(a.empty() ? 0 : a[0].num);
+        if (!secs || i >= secs->size()) return ScriptValue::nil();
+        const Section& s = (*secs)[i];
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["name"]   = ScriptValue::ofStr(s.name);
+        (*o)["type"]   = ScriptValue::ofStr(s.type);
+        (*o)["flags"]  = ScriptValue::ofStr(s.flags);
+        (*o)["addr"]   = ScriptValue::ofNum(double(s.addr));
+        (*o)["offset"] = ScriptValue::ofNum(double(s.offset));
+        (*o)["size"]   = ScriptValue::ofNum(double(s.size));
+        // What the loader will actually map this as. Section flags are a
+        // linker's opinion; the PT_LOAD that covers the section is what the
+        // kernel honours, and a plugin that says ".rodata is writable" has to
+        // be reading the second one to be telling the truth.
+        std::string perm = "?";
+        if (c.fmt == Fmt::ELF && s.addr) {
+            for (auto& sg : c.elf.segments) {
+                if (sg.type != "LOAD" || !sg.memsz) continue;
+                if (s.addr < sg.vaddr || s.addr >= sg.vaddr + sg.memsz) continue;
+                perm.clear();
+                perm += sg.flags.find('R') != std::string::npos ? 'r' : '-';
+                perm += sg.flags.find('W') != std::string::npos ? 'w' : '-';
+                perm += sg.flags.find('X') != std::string::npos ? 'x' : '-';
+                break;
+            }
+        }
+        (*o)["perm"] = ScriptValue::ofStr(perm);
+        // Entropy needs a 256-bucket histogram. The language has no arrays, so
+        // this is one of the numbers a plugin can only be given.
+        double ent = 0;
+        if (s.type != "NOBITS" && s.size && s.offset + s.size <= c.bin.data.size())
+            ent = byteEntropy(c.bin.data.data() + s.offset, size_t(s.size));
+        (*o)["entropy"] = ScriptValue::ofNum(ent);
+        return ScriptValue::ofObj(o);
+    });
+
+    // ---- exports -----------------------------------------------------
+    // The dynamic exports are the boundary: on a JNI library they are
+    // JNI_OnLoad and the Java_* methods, and they are the only addresses
+    // something outside this file can call. They cannot be read off func_at:
+    // an export that also has a symtab entry is recorded as "symtab", so on
+    // libanort.so all three exports report from="symtab" and a plugin looking
+    // for from=="export" finds nothing.
+    const std::vector<Symbol>* exps = c.fmt == Fmt::ELF ? &c.elf.exports
+                                    : c.fmt == Fmt::PE  ? &c.pe.exports : nullptr;
+    script.setBuiltin("count_exports", [&](const std::vector<ScriptValue>&) -> ScriptValue {
+        return ScriptValue::ofNum(exps ? double(exps->size()) : 0);
+    });
+    script.setBuiltin("export_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        size_t i = size_t(a.empty() ? 0 : a[0].num);
+        if (!exps || i >= exps->size()) return ScriptValue::nil();
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["name"] = ScriptValue::ofStr((*exps)[i].name);
+        (*o)["addr"] = ScriptValue::ofNum(double((*exps)[i].addr));
+        (*o)["size"] = ScriptValue::ofNum(double((*exps)[i].size));
+        (*o)["kind"] = ScriptValue::ofStr((*exps)[i].kind);
+        return ScriptValue::ofObj(o);
+    });
+
+    // ---- DT_NEEDED ---------------------------------------------------
+    script.setBuiltin("count_needed", [&](const std::vector<ScriptValue>&) -> ScriptValue {
+        return ScriptValue::ofNum(c.fmt == Fmt::ELF ? double(c.elf.needed.size()) : 0);
+    });
+    script.setBuiltin("needed_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        size_t i = size_t(a.empty() ? 0 : a[0].num);
+        if (c.fmt != Fmt::ELF || i >= c.elf.needed.size()) return ScriptValue::nil();
+        return ScriptValue::ofStr(c.elf.needed[i]);
+    });
+
+    // ---- xrefs OUT ---------------------------------------------------
+    // count_xrefs_to/xref_to_at answer "who calls this". Nothing answered
+    // "what does this call", so no plugin could follow an edge forwards --
+    // which is the direction reachability runs in.
+    auto calleesOf = [&](u64 addr) -> const std::vector<u64>* {
+        auto it = c.cg.callees.find(addr);
+        return it == c.cg.callees.end() ? nullptr : &it->second;
+    };
+    script.setBuiltin("count_callees", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.empty()) return ScriptValue::ofNum(0);
+        auto* v = calleesOf(u64(a[0].num));
+        return ScriptValue::ofNum(v ? double(v->size()) : 0);
+    });
+    script.setBuiltin("callee_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.size() < 2) return ScriptValue::nil();
+        u64 from = u64(a[0].num);
+        auto* v = calleesOf(from);
+        size_t i = size_t(a[1].num);
+        if (!v || i >= v->size()) return ScriptValue::nil();
+        u64 to = (*v)[i];
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["addr"] = ScriptValue::ofNum(double(to));
+        std::string nm = c.names.lookup(to);
+        std::string kind = "unknown";
+        u32 sites = 0;
+        for (auto& e : c.cg.edges) {
+            if (e.from != from || e.to != to) continue;
+            kind = e.kind;
+            sites = e.sites;
+            if (!e.toName.empty()) nm = e.toName;
+            break;
+        }
+        (*o)["name"]  = ScriptValue::ofStr(nm);
+        (*o)["kind"]  = ScriptValue::ofStr(kind);
+        (*o)["sites"] = ScriptValue::ofNum(double(sites));
+        return ScriptValue::ofObj(o);
+    });
+
+    // Can `from` reach `to` through the call graph, and in how few hops?
+    // Returns the hop count, 0 for the same function, -1 for no path.
+    //
+    // This one is here because the language cannot express it. A search needs
+    // a worklist and a visited set; NocturneScript has neither, and a
+    // depth-limited recursion without a visited set re-walks a diamond
+    // exponentially — on a graph with 5,203 edges that is not a slow plugin,
+    // it is a plugin that never returns. Bounded here at 20,000 expansions so
+    // one call stays microseconds whatever the graph looks like.
+    script.setBuiltin("reaches", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.size() < 2) return ScriptValue::ofNum(-1);
+        u64 from = u64(a[0].num), to = u64(a[1].num);
+        if (from == to) return ScriptValue::ofNum(0);
+        if (!from || !to) return ScriptValue::ofNum(-1);
+        std::map<u64, int> depth;
+        std::vector<u64> frontier{from}, next;
+        depth[from] = 0;
+        int d = 0, expansions = 0;
+        const int kMaxExpansions = 20000;
+        while (!frontier.empty() && expansions < kMaxExpansions) {
+            ++d;
+            next.clear();
+            for (u64 f : frontier) {
+                auto it = c.cg.callees.find(f);
+                if (it == c.cg.callees.end()) continue;
+                for (u64 t : it->second) {
+                    if (++expansions > kMaxExpansions) break;
+                    if (t == to) return ScriptValue::ofNum(double(d));
+                    if (depth.emplace(t, d).second) next.push_back(t);
+                }
+            }
+            frontier.swap(next);
+        }
+        return ScriptValue::ofNum(-1);
+    });
+
+    // ---- disassembly -------------------------------------------------
+    // The instruction stream, with the same auto-comments the Assembly tab
+    // shows -- which is the point: autoComment resolves adrp+add pairs to the
+    // string they build, so a plugin can see that an instruction loads
+    // "/proc/self/status" without doing pointer arithmetic it has no
+    // arithmetic for.
+    // Comments are applied lazily, because autoComment() rebuilds an
+    // address->string map of the whole binary on every call. insn_stats never
+    // looks at a comment, and profiling a 17 MB library is 4,000 calls: with
+    // the comments eager that was 16 seconds, of which 15 were rebuilding the
+    // same 20,000-entry map 4,000 times.
+    struct InsnCache { u64 fn = ~u64(0); u64 end = 0; bool commented = false;
+                       std::vector<AsmLine> lines; };
+    auto icache = std::make_shared<InsnCache>();
+    // Built on first use of a commented listing, not at start-up: most plugins
+    // never ask for one, and on a 17 MB library this is 20,000 entries.
+    auto refFrom = std::make_shared<std::map<u64, u64>>();
+    auto strAt   = std::make_shared<std::map<u64, std::string>>();
+    auto linesFor = [&, icache, containing, refFrom, strAt](u64 addr, bool withComments)
+                        -> const std::vector<AsmLine>* {
+        const FuncInfo* f = containing(addr);
+        if (!f || c.backend.empty()) return nullptr;
+        if (icache->fn != f->addr) {
+            u64 off = vaToOff(c, f->addr);
+            if (off == ~u64(0) || off >= c.bin.data.size()) return nullptr;
+            u64 size = std::min<u64>(f->size ? f->size : 512, 65536);
+            size = std::min<u64>(size, u64(c.bin.data.size()) - off);
+            if (c.dis.armDualMode()) c.dis.setDefaultThumb(f->thumb);
+            icache->lines = c.dis.disassemble(c.bin.data.data() + off, size_t(size), f->addr, 4096);
+            icache->fn = f->addr;
+            icache->end = f->addr + size;
+            icache->commented = false;
+        }
+        if (withComments && !icache->commented) {
+            autoComment(c.arch, icache->lines, c.names, c.strings, icache->fn, icache->end);
+            // Fill in what autoComment left blank from the xref map, which is
+            // now the one place a data reference is recorded. Two payoffs: the
+            // answers agree by construction — an instruction is commented with
+            // a string exactly when count_xrefs_to on that string counts it —
+            // and the ADRP+ADD pairs autoComment's operand parsing misses
+            // (it reads the '#' of "#0x6d4" as the start of the number and
+            // resolves the offset to 0) stop being invisible.
+            if (refFrom->empty() && !c.xrefs.empty()) {
+                for (auto& kv : c.xrefs)
+                    for (auto& x : kv.second)
+                        if (x.type == "data") refFrom->emplace(x.from, x.to);
+                for (auto& s : c.strings) strAt->emplace(s.addr, s.value);
+            }
+            for (AsmLine& l : icache->lines) {
+                if (!l.comment.empty()) continue;
+                auto it = refFrom->find(l.addr);
+                if (it == refFrom->end()) continue;
+                auto sit = strAt->find(it->second);
+                if (sit != strAt->end())
+                    l.comment = "\"" + sit->second.substr(0, 64) + "\"";
+                else {
+                    std::string nm = c.names.lookup(it->second);
+                    if (!nm.empty()) l.comment = nm;
+                }
+            }
+            icache->commented = true;
+        }
+        return &icache->lines;
+    };
+    script.setBuiltin("count_insns", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.empty()) return ScriptValue::ofNum(0);
+        auto* l = linesFor(u64(a[0].num), false);
+        return ScriptValue::ofNum(l ? double(l->size()) : 0);
+    });
+    // The instruction mix of one function, in one pass of C++.
+    //
+    // A plugin can already walk insn_at and compare mnemonics, and the first
+    // version of the obfuscation profiler did: 272,898 instructions times ten
+    // string compares each is 2.7 million interpreter steps, and it took 16.3
+    // seconds to profile libanort.so. The same counters here take 0.6. That is
+    // the whole justification -- and a second one comes free: these are
+    // CATEGORIES, not mnemonics, so a plugin written against them says
+    // something true about an x86 binary as well as an ARM one, which a script
+    // full of `m == "movk"` never can.
+    //
+    // distinct_imm is the interesting one and the reason this is not just a
+    // histogram: it counts how many DIFFERENT constants a function builds in
+    // registers. Control-flow flattening gives every basic block a random
+    // 32-bit state number, and on AArch64 a 32-bit constant cannot be an
+    // operand -- it has to be assembled with movz+movk. So a flattened
+    // function materialises dozens of unrelated constants, and an ordinary one
+    // materialises a handful.
+    script.setBuiltin("insn_stats", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.empty()) return ScriptValue::nil();
+        auto* lines = linesFor(u64(a[0].num), false);
+        if (!lines) return ScriptValue::nil();
+        u64 movimm = 0, pcrel = 0, cmp = 0, cbranch = 0, branch = 0, call = 0,
+            indirect = 0, ret = 0, nop = 0, other = 0;
+        std::map<u64, int> imms;
+        for (const AsmLine& l : *lines) {
+            std::string m;
+            for (char ch : l.mnem) m += char(tolower((unsigned char)ch));
+            const std::string& o = l.ops;
+            auto immOf = [&]() -> bool {
+                size_t h = o.find('#');
+                if (h == std::string::npos) return false;
+                u64 v = (o.compare(h + 1, 2, "0x") == 0)
+                            ? strtoull(o.c_str() + h + 3, nullptr, 16)
+                            : strtoull(o.c_str() + h + 1, nullptr, 10);
+                if (imms.size() < 4096) imms[v]++;
+                return true;
+            };
+            bool armMovImm = (m == "movz" || m == "movk" || m == "movn" ||
+                              m == "movw" || m == "movt" ||
+                              ((m == "mov" || m == "movi") && o.find('#') != std::string::npos));
+            bool x86MovImm = (m == "mov" || m == "movl" || m == "movq" || m == "movabs") &&
+                             o.find("0x") != std::string::npos && o.find('[') == std::string::npos;
+            if (armMovImm)      { ++movimm; immOf(); }
+            else if (x86MovImm) { ++movimm;
+                                  size_t h = o.find("0x");
+                                  u64 v = strtoull(o.c_str() + h + 2, nullptr, 16);
+                                  if (imms.size() < 4096) imms[v]++; }
+            else if (m == "adrp" || m == "adr" || m == "adrl") ++pcrel;
+            else if (m == "lea" && o.find("rip") != std::string::npos) ++pcrel;
+            else if (m == "cmp" || m == "cmn" || m == "tst" || m == "teq" ||
+                     m == "test" || m == "cmpl" || m == "cmpq" || m == "cmpw") ++cmp;
+            else if (m.rfind("b.", 0) == 0 || m == "cbz" || m == "cbnz" ||
+                     m == "tbz" || m == "tbnz" ||
+                     (m.size() > 1 && m[0] == 'j' && m != "jmp" && m != "jmpq")) ++cbranch;
+            else if (m == "br" || m == "blr" || m == "bx" || m == "blx") ++indirect;
+            else if ((m == "jmp" || m == "jmpq" || m == "call" || m == "callq") &&
+                     o.find("0x") == std::string::npos) ++indirect;
+            else if (m == "bl" || m == "call" || m == "callq") ++call;
+            else if (m == "b" || m == "jmp" || m == "jmpq") ++branch;
+            else if (m == "ret" || m == "retq" || m == "eret") ++ret;
+            else if (m == "nop" || m == "hint") ++nop;
+            else ++other;
+        }
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["n"]            = ScriptValue::ofNum(double(lines->size()));
+        (*o)["movimm"]       = ScriptValue::ofNum(double(movimm));
+        (*o)["distinct_imm"] = ScriptValue::ofNum(double(imms.size()));
+        (*o)["pcrel"]        = ScriptValue::ofNum(double(pcrel));
+        (*o)["cmp"]          = ScriptValue::ofNum(double(cmp));
+        (*o)["cbranch"]      = ScriptValue::ofNum(double(cbranch));
+        (*o)["branch"]       = ScriptValue::ofNum(double(branch));
+        (*o)["call"]         = ScriptValue::ofNum(double(call));
+        (*o)["indirect"]     = ScriptValue::ofNum(double(indirect));
+        (*o)["ret"]          = ScriptValue::ofNum(double(ret));
+        (*o)["nop"]          = ScriptValue::ofNum(double(nop));
+        (*o)["other"]        = ScriptValue::ofNum(double(other));
+        return ScriptValue::ofObj(o);
+    });
+
+    script.setBuiltin("insn_at", [&](const std::vector<ScriptValue>& a) -> ScriptValue {
+        if (a.size() < 2) return ScriptValue::nil();
+        auto* l = linesFor(u64(a[0].num), true);
+        size_t i = size_t(a[1].num);
+        if (!l || i >= l->size()) return ScriptValue::nil();
+        const AsmLine& x = (*l)[i];
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["addr"]    = ScriptValue::ofNum(double(x.addr));
+        (*o)["mnem"]    = ScriptValue::ofStr(x.mnem);
+        (*o)["ops"]     = ScriptValue::ofStr(x.ops);
+        (*o)["bytes"]   = ScriptValue::ofStr(x.bytes);
+        (*o)["comment"] = ScriptValue::ofStr(x.comment);
+        return ScriptValue::ofObj(o);
+    });
+
+    // ---- the p-code emulator -----------------------------------------
+    // The one call in the engine that executes the analysed binary's own
+    // instructions, reached from a loop written by whoever wrote the plugin.
+    // The panel runs one function because a person pressed a button; a plugin
+    // runs 1,319 because a `for` said so, and the difference is the whole
+    // safety argument. So a script gets:
+    //
+    //   * its own per-call defaults, an order tighter than the panel's
+    //     (20k instructions / 250 ms / 256 pages / 512 stubbed calls),
+    //   * a ceiling it cannot raise past (200k / 1000 ms), and
+    //   * an aggregate budget across the whole run -- 20 seconds of emulation
+    //     and 4096 runs. A full blind sweep of libanort.so is 1,319 runs in
+    //     9.5 s, so the budget clears real work by 2x and still bounds the
+    //     worst case: 1,319 hostile functions that each burn their 250 ms
+    //     stop at 20 s, not at 5.5 minutes.
+    //
+    // Exhaustion is not an error and never a hang: emulate() returns
+    // stop="budget" with the numbers in `detail`, so the plugin can say so.
+    struct EmuScriptState {
+        bool tried = false, ready = false;
+        std::string why;
+        int runs = 0;
+        double msUsed = 0;
+        EmuResult last;
+        bool haveLast = false;
+    };
+    auto es = std::make_shared<EmuScriptState>();
+    const u64 kEmuDefInstr = 20000, kEmuCeilInstr = 200000;
+    const u32 kEmuDefMs = 250, kEmuCeilMs = 1000;
+    const int kEmuMaxRuns = 4096;
+    const double kEmuBudgetMs = 20000;
+
+    script.setBuiltin("emulate", [&, es](const std::vector<ScriptValue>& a) -> ScriptValue {
+        auto o = std::make_shared<ScriptObj>();
+        auto fail = [&](const char* stop, const std::string& detail) {
+            (*o)["ok"] = ScriptValue::ofBool(false);
+            (*o)["stop"] = ScriptValue::ofStr(stop);
+            (*o)["detail"] = ScriptValue::ofStr(detail);
+            (*o)["ret"] = ScriptValue::ofNum(0);
+            (*o)["instructions"] = ScriptValue::ofNum(0);
+            (*o)["ms"] = ScriptValue::ofNum(0);
+            (*o)["approximate"] = ScriptValue::ofBool(false);
+            (*o)["writes"] = ScriptValue::ofNum(0);
+            (*o)["calls"] = ScriptValue::ofNum(0);
+            (*o)["runs"] = ScriptValue::ofNum(double(es->runs));
+            (*o)["budget_left"] = ScriptValue::ofNum(kEmuBudgetMs - es->msUsed);
+            es->haveLast = false;
+            es->last = EmuResult();
+            return ScriptValue::ofObj(o);
+        };
+        if (a.empty() || u64(a[0].num) == 0) return fail("setup", "no entry address");
+        // "exhausted", not "budget": "budget" is already this emulator's word
+        // for one run running out of instructions, and a plugin has to be
+        // able to tell "this function is a loop" from "stop calling me".
+        if (es->runs >= kEmuMaxRuns)
+            return fail("exhausted", "this plugin has already emulated " +
+                                     std::to_string(kEmuMaxRuns) + " times");
+        if (es->msUsed >= kEmuBudgetMs) {
+            std::ostringstream m;
+            m << "this plugin has used its whole " << int(kEmuBudgetMs / 1000)
+              << " s of emulation (" << es->runs << " runs)";
+            return fail("exhausted", m.str());
+        }
+
+        std::lock_guard<std::mutex> elock(mutex_);
+        auto t0 = std::chrono::steady_clock::now();
+        if (!es->tried) {
+            es->tried = true;
+            es->ready = ghidraEmuReady(c, path, es->why);
+            // Building the architecture parses the whole .sla. It is paid once
+            // per run and it counts against the budget like anything else.
+            es->msUsed += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        }
+        if (!es->ready) return fail("setup", es->why.empty() ? "emulator unavailable" : es->why);
+
+        EmuRequest req;
+        req.entry = u64(a[0].num);
+        for (const std::string& s : splitSemi(a.size() > 1 ? a[1].render() : std::string())) {
+            req.args.push_back(parseEmuArg(s));
+            if (req.args.size() >= 16) break;
+        }
+        req.limits.maxInstructions = kEmuDefInstr;
+        req.limits.timeoutMs = kEmuDefMs;
+        req.limits.maxPages = 256;
+        req.limits.maxCalls = 512;
+        if (a.size() > 2 && a[2].num > 0)
+            req.limits.maxInstructions = std::min<u64>(u64(a[2].num), kEmuCeilInstr);
+        if (a.size() > 3 && a[3].num > 0)
+            req.limits.timeoutMs = std::min<u32>(u32(a[3].num), kEmuCeilMs);
+        // Never let one call outlive what is left of the aggregate budget.
+        double left = kEmuBudgetMs - es->msUsed;
+        if (left < req.limits.timeoutMs) req.limits.timeoutMs = u32(left > 1 ? left : 1);
+
+        auto t1 = std::chrono::steady_clock::now();
+        EmuResult r = GhidraEmu::instance().run(req);
+        es->msUsed += std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t1).count();
+        es->runs++;
+        es->last = r;
+        es->haveLast = true;
+
+        (*o)["ok"] = ScriptValue::ofBool(r.ok);
+        (*o)["stop"] = ScriptValue::ofStr(emuStopName(r.stop));
+        (*o)["detail"] = ScriptValue::ofStr(r.detail);
+        (*o)["ret"] = ScriptValue::ofNum(double(r.ret));
+        (*o)["retreg"] = ScriptValue::ofStr(r.retReg);
+        (*o)["instructions"] = ScriptValue::ofNum(double(r.instructions));
+        (*o)["ms"] = ScriptValue::ofNum(r.ms);
+        (*o)["approximate"] = ScriptValue::ofBool(r.approximate);
+        (*o)["writes"] = ScriptValue::ofNum(double(r.memory.size()));
+        (*o)["calls"] = ScriptValue::ofNum(double(r.calls.size()));
+        (*o)["runs"] = ScriptValue::ofNum(double(es->runs));
+        (*o)["budget_left"] = ScriptValue::ofNum(kEmuBudgetMs - es->msUsed);
+        return ScriptValue::ofObj(o);
+    });
+
+    // What the last run wrote. Every range the guest actually changed, worked
+    // out by diffing its dirty pages against the file, plus the buffers the
+    // sandbox allocated for `buf:` arguments.
+    script.setBuiltin("count_emu_writes", [&, es](const std::vector<ScriptValue>&) -> ScriptValue {
+        return ScriptValue::ofNum(es->haveLast ? double(es->last.memory.size()) : 0);
+    });
+    script.setBuiltin("emu_write_at", [&, es](const std::vector<ScriptValue>& a) -> ScriptValue {
+        size_t i = size_t(a.empty() ? 0 : a[0].num);
+        if (!es->haveLast || i >= es->last.memory.size()) return ScriptValue::nil();
+        const EmuBytes& m = es->last.memory[i];
+        size_t at = 0;
+        std::string best = bytesBestRun(m.bytes, &at);
+        // `best` goes into a comment and a bookmark label. `bestlen` keeps the
+        // true length, so a clamp here loses nothing a plugin can act on: a
+        // 65 KiB buffer of repeated alphabet is one finding, not a label.
+        const size_t kBestLabelCap = 192;
+        std::string bestShown = best.size() > kBestLabelCap ? best.substr(0, kBestLabelCap) : best;
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["addr"]    = ScriptValue::ofNum(double(m.addr));
+        (*o)["label"]   = ScriptValue::ofStr(m.label);
+        (*o)["len"]     = ScriptValue::ofNum(double(m.bytes.size()));
+        (*o)["text"]    = ScriptValue::ofStr(bytesText(m.bytes));
+        (*o)["hex"]     = ScriptValue::ofStr(bytesHex(m.bytes));
+        (*o)["best"]    = ScriptValue::ofStr(bestShown);
+        (*o)["bestlen"] = ScriptValue::ofNum(double(best.size()));
+        (*o)["bestat"]  = ScriptValue::ofNum(double(m.addr + at));
+        return ScriptValue::ofObj(o);
+    });
+
+    // What the last run called instead of executing: the import stubs it
+    // entered, with the arguments the model looked at. This is how a plugin
+    // tells a decrypt routine (malloc, memcpy) from a detector
+    // (__system_property_get, fopen).
+    script.setBuiltin("count_emu_calls", [&, es](const std::vector<ScriptValue>&) -> ScriptValue {
+        return ScriptValue::ofNum(es->haveLast ? double(es->last.calls.size()) : 0);
+    });
+    script.setBuiltin("emu_call_at", [&, es](const std::vector<ScriptValue>& a) -> ScriptValue {
+        size_t i = size_t(a.empty() ? 0 : a[0].num);
+        if (!es->haveLast || i >= es->last.calls.size()) return ScriptValue::nil();
+        const EmuCall& cc = es->last.calls[i];
+        auto o = std::make_shared<ScriptObj>();
+        (*o)["name"]      = ScriptValue::ofStr(cc.name);
+        (*o)["at"]        = ScriptValue::ofNum(double(cc.site));
+        (*o)["ret"]       = ScriptValue::ofNum(double(cc.ret));
+        (*o)["modelled"]  = ScriptValue::ofBool(cc.modelled);
+        (*o)["note"]      = ScriptValue::ofStr(cc.note);
+        (*o)["nargs"]     = ScriptValue::ofNum(double(cc.args.size()));
+        for (int k = 0; k < 4; ++k)
+            (*o)["a" + std::to_string(k)] =
+                ScriptValue::ofNum(size_t(k) < cc.args.size() ? double(cc.args[k]) : 0);
+        return ScriptValue::ofObj(o);
     });
 
     ScriptError err = script.run(source);

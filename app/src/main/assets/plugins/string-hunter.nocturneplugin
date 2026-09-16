@@ -3,6 +3,6 @@
   "name": "String Hunter",
   "version": "1.0",
   "author": "SakoRE",
-  "description": "Adds comments at functions referencing long/high-entropy-like strings.",
-  "script": "## string hunter\nlog(\"=== String Hunter ===\")\nns = count_strings()\nn = count_functions()\nlog(ns, \"strings across\", n, \"functions\")\nfound = 0\nfor i in 0..ns-1 {\n    s = string_at(i)\n    if strlen(s.value) > 24 {\n        nx = count_xrefs_to(s.addr)\n        if nx > 0 {\n            x = xref_to_at(s.addr, 0)\n            comment(s.addr, \"long string referenced \" + str(nx) + \"x\")\n            found = found + 1\n            if found > 40 { break }\n        }\n    }\n}\nlog(\"annotated strings:\", found)\n"
+  "description": "Comments long strings by how often they are referenced, using the data cross-references the disassembler recovers.",
+  "script": "## string hunter\nlog(\"=== String Hunter ===\")\nns = count_strings()\nn = count_functions()\nlog(ns, \"strings across\", n, \"functions\")\nfound = 0\nfor i in 0..ns-1 {\n    s = string_at(i)\n    if strlen(s.value) > 24 {\n        ## \"data\": a string is referenced by an ADRP+ADD pair, not by a call.\n        ## Without the kind this counted code references only, which for a\n        ## string is always zero - so this plugin has never annotated one.\n        nx = count_xrefs_to(s.addr, \"data\")\n        if nx > 0 {\n            x = xref_to_at(s.addr, 0, \"data\")\n            comment(s.addr, \"long string referenced \" + str(nx) + \"x\")\n            found = found + 1\n            if found > 40 { break }\n        }\n    }\n}\nlog(\"annotated strings:\", found)\n"
 }

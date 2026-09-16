@@ -76,7 +76,7 @@ Built end-to-end by a Somali developer — the first mobile reverse-engineering 
 6. **CallGraph** — whole-binary tree or per-function callers/callees; imports highlighted in amber.
 7. **APK** — decoded manifest, permissions (dangerous flagged ⚠), components with intent-filters, DEX classes, native libs (**tap = extract + analyze**), resources (**tap image = preview**).
 8. **Debugger** *(root/debuggable device)* — **Spawn** (e.g. `/system/bin/toybox sleep 30`) → **BP @ function** → on hit inspect registers/memory/stack/threads → **Continue**. Or **Attach** to a running PID.
-9. **Plugins** — run the 10 bundled NocturneScript plugins (`security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter`); effects are applied straight into the project database.
+9. **Plugins** — run the 15 bundled NocturneScript plugins; effects are applied straight into the project database. `string-decryptor` emulates every function and reports the plaintext it wrote, `obfuscation-profile` names the functions whose control flow is flattened, `packer-fingerprint` reads the section table and its entropy, `capability-reach` says what each exported entry point can reach, `detection-sites` finds the root/emulator/debugger checks.
 10. **Save** — `Ctrl+S` persists the SQLite project; reopen later from **RECENT PROJECTS** in the drawer.
 
 ### 🧩 NocturneScript — the Plugin Language
@@ -104,7 +104,17 @@ for i in 0..n-1 {
 }
 ```
 
-**Host API:** `log()` · `count_functions()` · `func_at(i)` · `func_by_name()` · `count_strings()` · `string_at(i)` · `count_imports()` · `import_at(i)` · `demangle()` · `classify()` · `count_xrefs_to()` · `xref_to_at()` · `rename()` · `comment()` · `bookmark()` · `hex()` · `strlen()` · `charat()` · `str()`
+**Host API — the analysis.** `count_functions()` · `func_at(i)` · `func_by_name()` · `func_containing(addr)` · `count_strings()` · `string_at(i)` · `count_imports()` · `import_at(i)` · `count_exports()` · `export_at(i)` · `count_sections()` · `section_at(i)` · `count_needed()` · `needed_at(i)` · `find_bytes(text)`
+**Host API — the code.** `count_xrefs_to(addr[, kind])` · `xref_to_at(addr, i[, kind])` · `count_callees(addr)` · `callee_at(addr, i)` · `reaches(from, to)` · `count_insns(addr)` · `insn_at(addr, i)` · `insn_stats(addr)`
+**Host API — the emulator.** `emulate(addr, args[, maxInstr, timeoutMs])` · `count_emu_writes()` · `emu_write_at(i)` · `count_emu_calls()` · `emu_call_at(i)`
+**Host API — effects and utilities.** `rename()` · `comment()` · `bookmark()` · `log()` · `demangle()` · `classify()` · `hex()` · `strlen()` · `charat()` · `str()`
+
+The language has no arrays, so every list is a `count_X()` and an `X_at(i)`.
+`emulate()` runs the analysed binary's own instructions: it is capped per call
+(20,000 instructions, 250 ms, raisable only to 200,000 and 1 s) and per plugin
+run (20 seconds of emulation in total, 4,096 runs). A plugin that sweeps 1,300
+functions finishes; one that tries to hang gets `stop == "exhausted"` and a
+sentence saying so.
 **Language:** numbers/strings/bools/objects · `if/else` · `while` · `for i in a..b { }` · `fun f(x) { return x }`
 
 ### 🛠️ Build from Source

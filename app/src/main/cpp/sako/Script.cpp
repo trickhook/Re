@@ -299,7 +299,11 @@ struct SakoScript::Impl {
     }
 
     NodeP parseUnary() {
-        if (check(T_MINUS) || check(T_NOT)) {
+        // `not` is in the keyword list, so it can never be an identifier — but
+        // nothing here consumed it, so `not x` was a parse error and the word
+        // was simply unusable. `and` and `or` have had their keyword spelling
+        // since the start; this is the third one.
+        if (check(T_MINUS) || check(T_NOT) || checkKw("not")) {
             std::string op = check(T_MINUS) ? "-" : "!";
             int ln = cur().line;
             advance();
@@ -559,15 +563,24 @@ struct SakoScript::Impl {
                         return ScriptValue::ofStr(l.render() + r.render());
                     return ScriptValue::ofNum(toNum(l) + toNum(r));
                 }
-                if (n->s == "==") {
-                    if (l.kind == ScriptValue::STR || r.kind == ScriptValue::STR)
-                        return ScriptValue::ofBool(l.render() == r.render());
-                    return ScriptValue::ofBool(toNum(l) == toNum(r));
-                }
-                if (n->s == "!=") {
-                    if (l.kind == ScriptValue::STR || r.kind == ScriptValue::STR)
-                        return ScriptValue::ofBool(l.render() != r.render());
-                    return ScriptValue::ofBool(toNum(l) != toNum(r));
+                if (n->s == "==" || n->s == "!=") {
+                    // nil and objects both used to fall through to toNum(),
+                    // which answers 0 for each of them — so `obj != nil` was
+                    // FALSE for every object, and a host API that can return
+                    // nothing (func_containing, insn_at, section_at) could not
+                    // be tested at all. nil equals only nil; an object equals
+                    // only the same object.
+                    bool eq;
+                    if (l.kind == ScriptValue::NIL || r.kind == ScriptValue::NIL)
+                        eq = (l.kind == ScriptValue::NIL && r.kind == ScriptValue::NIL);
+                    else if (l.kind == ScriptValue::OBJ || r.kind == ScriptValue::OBJ)
+                        eq = (l.kind == ScriptValue::OBJ && r.kind == ScriptValue::OBJ &&
+                              l.obj == r.obj);
+                    else if (l.kind == ScriptValue::STR || r.kind == ScriptValue::STR)
+                        eq = (l.render() == r.render());
+                    else
+                        eq = (toNum(l) == toNum(r));
+                    return ScriptValue::ofBool(n->s == "==" ? eq : !eq);
                 }
                 double a = toNum(l), b = toNum(r);
                 if (n->s == "-") return ScriptValue::ofNum(a - b);

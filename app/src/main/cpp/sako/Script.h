@@ -10,6 +10,16 @@
 //   count_xrefs_to(addr)         xref_to_at(addr, i)      rename(addr, name)
 //   comment(addr, text)          bookmark(addr, label)    classify(name)
 //   hex(n)                       strlen(s)                str(n)
+//   func_containing(addr)        count_sections()         section_at(i)
+//   count_needed()               needed_at(i)
+//   count_callees(addr)          callee_at(addr, i)
+//   count_insns(addr)            insn_at(addr, i)
+//   emulate(addr, args, ...)     count_emu_writes()       emu_write_at(i)
+//                                count_emu_calls()        emu_call_at(i)
+//
+// With no arrays in the language, every list in that API is a count_X() and
+// an X_at(i). Engine::scriptRun is the one place they are bound, and the
+// comments there say what each one costs and what bounds it.
 #pragma once
 #include "Types.h"
 #include <functional>
