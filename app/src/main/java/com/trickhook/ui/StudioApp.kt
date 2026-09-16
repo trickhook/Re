@@ -340,7 +340,29 @@ fun StudioApp(vm: StudioViewModel) {
     CommandPaletteOverlay(vm, openFile)
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
-    if (showExportSheet && vm.meta != null) ExportSheet(vm) { showExportSheet = false }
+    // Two contracts so the picker gets a sensible mime per shape; both are
+    // registered here, where they survive the sheet being dismissed.
+    var exportKind by remember { mutableStateOf("c-all") }
+    val saveSource = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/x-c")
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
+    val saveText = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
+
+    if (showExportSheet && vm.meta != null) {
+        ExportSheet(
+            vm,
+            onPick = { k ->
+                exportKind = k
+                showExportSheet = false
+                val name = vm.suggestedExportName(k)
+                if (vm.mimeForExport(k) == "text/plain") saveText.launch(name)
+                else saveSource.launch(name)
+            },
+            onDismiss = { showExportSheet = false }
+        )
+    }
 }
 
 // ------------------------------------------------------------- empty state --

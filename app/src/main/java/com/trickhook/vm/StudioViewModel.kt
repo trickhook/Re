@@ -448,10 +448,21 @@ class StudioViewModel : ViewModel() {
                     log("ERROR", err)
                     return@launch
                 }
+                val produced = tmp.length()
+                if (produced == 0L) {
+                    log("ERROR", "The engine produced an empty listing — nothing written")
+                    return@launch
+                }
+                var copied = 0L
                 context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
-                    tmp.inputStream().use { it.copyTo(out, 64 * 1024) }
+                    copied = tmp.inputStream().use { it.copyTo(out, 64 * 1024) }
+                    out.flush()
                 } ?: run {
                     log("ERROR", "Could not open the chosen file for writing")
+                    return@launch
+                }
+                if (copied != produced) {
+                    log("ERROR", "Short write: $copied of $produced bytes reached the file")
                     return@launch
                 }
                 val fns = Regex("\"functions\"\\s*:\\s*(\\d+)").find(status)?.groupValues?.get(1)

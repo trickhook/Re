@@ -1,7 +1,5 @@
 package com.trickhook.ui
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -43,7 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -242,14 +239,12 @@ private fun ExportBar(vm: StudioViewModel) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ExportSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
+fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> Unit) {
     val ide = LocalIde.current
-    val ctx = LocalContext.current
-    var kind by remember { mutableStateOf("c-all") }
-    val save = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(vm.mimeForExport(kind))
-    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, kind) }
-
+    // The file-picker launcher deliberately lives in StudioApp, not here: this
+    // sheet is composed conditionally, so dismissing it used to unregister the
+    // launcher before launch() ran. SAF still created the document the user
+    // picked, nothing ever wrote to it, and the export landed as 0 bytes.
     val kinds = listOf(
         ExportKind("c-all", Icons.Filled.Code, "Whole binary",
             "${vm.meta?.functions?.size ?: 0} functions decompiled to pseudo-C"),
@@ -281,11 +276,7 @@ fun ExportSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = enabled) {
-                            kind = k.id
-                            onDismiss()
-                            save.launch(vm.suggestedExportName(k.id))
-                        }
+                        .clickable(enabled = enabled) { onPick(k.id) }
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
