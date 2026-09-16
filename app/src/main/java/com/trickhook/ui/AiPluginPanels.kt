@@ -40,6 +40,20 @@ import androidx.compose.material3.Icon
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.OpenInFull
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -172,6 +186,7 @@ private fun SelectionScroll(text: String) {
 fun PluginsPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    var showLog by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -254,18 +269,110 @@ fun PluginsPanel(vm: StudioViewModel) {
                 }
             }
         }
+        // A fixed 200dp slab used to eat the bottom of the list and clip the
+        // log mid-line. The result is a one-line bar now; the whole log opens
+        // full-screen, where it can be read, copied or saved.
         if (vm.pluginOutput.isNotEmpty()) {
-            Text(
-                vm.pluginOutput,
-                color = ide.text, fontSize = 11.sp, fontFamily = Mono, lineHeight = 15.sp,
-                modifier = Modifier
+            Row(
+                Modifier
                     .fillMaxWidth()
-                    .height(200.dp)
                     .background(ide.panel)
-                    .verticalScroll(rememberScrollState())
-                    .padding(8.dp)
-            )
+                    .clickable { showLog = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(7.dp)
+                        .background(if (vm.lastPluginOk) ide.violet else ide.red, CircleShape)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        vm.lastPluginName.ifEmpty { "Plugin result" },
+                        color = ide.text, fontSize = 12.5.sp, fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        if (vm.lastPluginOk)
+                            "${vm.pluginOutput.lineSequence().count()} lines · ${vm.lastPluginEffects} effects"
+                        else "failed — tap to read the error",
+                        color = ide.dim, fontSize = 10.sp, fontFamily = Mono
+                    )
+                }
+                Icon(
+                    Icons.Filled.OpenInFull, contentDescription = "Open full log",
+                    tint = ide.accent, modifier = Modifier.size(17.dp)
+                )
+            }
         }
+    }
+
+    if (showLog) PluginLogSheet(vm) { showLog = false }
+}
+
+/** Full-height reader for a plugin run: scrollable, copyable, savable. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+    val clip = LocalClipboardManager.current
+    val save = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri -> if (uri != null) vm.savePluginLog(ctx, uri) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = ide.panel
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        vm.lastPluginName.ifEmpty { "Plugin result" },
+                        color = ide.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "${vm.pluginOutput.lineSequence().count()} lines · ${vm.lastPluginEffects} effects applied",
+                        color = ide.dim, fontSize = 11.sp, fontFamily = Mono
+                    )
+                }
+                Icon(
+                    Icons.Filled.ContentCopy, contentDescription = "Copy log", tint = ide.dim,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clickable {
+                            clip.setText(AnnotatedString(vm.pluginOutput))
+                            vm.log("OK", "Plugin log copied to the clipboard")
+                        }
+                        .padding(8.dp)
+                )
+                Icon(
+                    Icons.Filled.SaveAlt, contentDescription = "Save log", tint = ide.accent,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clickable { save.launch(vm.suggestedLogName()) }
+                        .padding(8.dp)
+                )
+            }
+            HorizontalDivider(color = ide.border)
+            SelectionContainer(Modifier.weight(1f).fillMaxWidth()) {
+                Text(
+                    vm.pluginOutput,
+                    color = ide.text, fontSize = 11.sp, fontFamily = Mono, lineHeight = 16.sp,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState())
+                        .padding(16.dp)
+                )
+            }
+        }
+    }
     }
 }
 

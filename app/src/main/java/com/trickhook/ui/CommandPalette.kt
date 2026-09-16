@@ -47,6 +47,9 @@ var showSearch by mutableStateOf(false)
 var showGoto by mutableStateOf(false)
 var showShortcutsHelp by mutableStateOf(false)
 
+/** Raised from the Pseudo-C bar, the overflow menu and the command palette. */
+var showExportSheet by mutableStateOf(false)
+
 @Composable
 fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
     val ide = LocalIde.current
@@ -72,10 +75,10 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                 val commands = remember(vm.plugins.size, vm.tab) {
                     buildList {
                         add(Command("Open file (APK/ELF/EXE/DEX)", "soo dooro fayl", "Ctrl+O", openFile))
-                        add(Command("Go to address…", "boosaska", "Ctrl+G") { showGoto = true })
+                        add(Command("Go to address…", "jump to a virtual address", "Ctrl+G") { showGoto = true })
                         add(Command("Search everywhere", "functions + strings + comments", "Ctrl+F") { showSearch = true })
-                        add(Command("Save project", "kaydi mashruuc", "Ctrl+S") { vm.saveProject(ctx, vm.meta?.name ?: "project") })
-                        add(Command("Toggle dark/light theme", "madow/cad", "Ctrl+T") { vm.darkTheme = !vm.darkTheme })
+                        add(Command("Save project", "persist renames, comments, bookmarks", "Ctrl+S") { vm.saveProject(ctx, vm.meta?.name ?: "project") })
+                        add(Command("Toggle dark/light theme", "", "Ctrl+T") { vm.darkTheme = !vm.darkTheme })
                         add(Command("Load call graph", "whole binary", "") { vm.loadCallGraph(0) })
                         add(Command("AI: explain current function", "offline heuristic", "") { vm.tab = Tab.AI; vm.explainLocally() })
                         vm.plugins.forEach { p ->
@@ -85,6 +88,12 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                             add(Command("Go to tab: ${t.title}", "", "Ctrl+${Tab.entries.indexOf(t) + 1}") { vm.tab = t })
                         }
                         add(Command("Keyboard shortcuts help", "", "F1") { showShortcutsHelp = true })
+                        if (vm.meta != null) {
+                            add(Command("Export decompiled source (.c / .h / .asm)",
+                                "Whole binary, one function, header or listing", "") {
+                                showExportSheet = true
+                            })
+                        }
                     }
                 }
                 val filtered = if (query.isBlank()) commands

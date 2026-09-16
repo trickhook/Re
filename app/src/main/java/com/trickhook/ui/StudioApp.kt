@@ -34,6 +34,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Android
@@ -211,6 +212,15 @@ fun StudioApp(vm: StudioViewModel) {
                         containerColor = ide.panel2
                     ) {
                         DropdownMenuItem(
+                            text = { Text("Export source…", color = ide.text, fontSize = 13.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.FileDownload, null, tint = ide.dim,
+                                    modifier = Modifier.size(18.dp))
+                            },
+                            enabled = vm.meta != null,
+                            onClick = { showOverflow = false; showExportSheet = true }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Save project", color = ide.text, fontSize = 13.sp) },
                             leadingIcon = {
                                 Icon(Icons.Filled.Save, null, tint = ide.dim,
@@ -317,6 +327,7 @@ fun StudioApp(vm: StudioViewModel) {
     CommandPaletteOverlay(vm, openFile)
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
+    if (showExportSheet && vm.meta != null) ExportSheet(vm) { showExportSheet = false }
 }
 
 // ------------------------------------------------------------- empty state --

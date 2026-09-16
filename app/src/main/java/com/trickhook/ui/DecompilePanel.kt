@@ -212,19 +212,11 @@ private data class ExportKind(
 @Composable
 private fun ExportBar(vm: StudioViewModel) {
     val ide = LocalIde.current
-    val ctx = LocalContext.current
-    var sheetOpen by remember { mutableStateOf(false) }
-    var kind by remember { mutableStateOf("c-all") }
-
-    val save = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(vm.mimeForExport(kind))
-    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, kind) }
-
     Row(
         Modifier
             .fillMaxWidth()
             .background(ide.panel)
-            .clickable(enabled = !vm.exportBusy) { sheetOpen = true }
+            .clickable(enabled = !vm.exportBusy) { showExportSheet = true }
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -241,63 +233,78 @@ private fun ExportBar(vm: StudioViewModel) {
         )
     }
 
-    if (sheetOpen) {
-        val kinds = listOf(
-            ExportKind("c-one", Icons.Filled.Description, "This function",
-                vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected"),
-            ExportKind("c-all", Icons.Filled.Code, "Whole binary",
-                "${vm.meta?.functions?.size ?: 0} functions as pseudo-C"),
-            ExportKind("h-all", Icons.Filled.Subject, "Header stub",
-                "signatures only, no bodies"),
-            ExportKind("asm-all", Icons.Filled.DataObject, "Assembly listing",
-                "disassembly with auto-comments")
-        )
-        ModalBottomSheet(
-            onDismissRequest = { sheetOpen = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = ide.panel
-        ) {
-            Column(Modifier.padding(bottom = 22.dp)) {
-                Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
-                    Text("Export decompiled output", color = ide.text,
-                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        "Reconstructed from machine code — it will not recompile as-is.",
-                        color = ide.dim, fontSize = 11.5.sp
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                kinds.forEach { k ->
-                    val enabled = k.id != "c-one" || vm.detail != null
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = enabled) {
-                                kind = k.id
-                                sheetOpen = false
-                                save.launch(vm.suggestedExportName(k.id))
-                            }
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            k.icon, contentDescription = null,
-                            tint = if (enabled) ide.accent else ide.dim,
-                            modifier = Modifier.size(19.dp)
-                        )
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                k.title,
-                                color = if (enabled) ide.text else ide.dim,
-                                fontSize = 13.5.sp, fontWeight = FontWeight.Medium
-                            )
-                            Text(k.detail, color = ide.dim, fontSize = 10.5.sp, fontFamily = Mono)
+}
+
+/**
+ * Export picker. Hoisted out of the Pseudo-C tab so the command palette and
+ * the overflow menu can raise it too — buried at the bottom of one tab, nobody
+ * found it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExportSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+    var kind by remember { mutableStateOf("c-all") }
+    val save = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(vm.mimeForExport(kind))
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, kind) }
+
+    val kinds = listOf(
+        ExportKind("c-all", Icons.Filled.Code, "Whole binary",
+            "${vm.meta?.functions?.size ?: 0} functions decompiled to pseudo-C"),
+        ExportKind("c-one", Icons.Filled.Description, "This function",
+            vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected"),
+        ExportKind("h-all", Icons.Filled.Subject, "Header stub",
+            "signatures only, no bodies"),
+        ExportKind("asm-all", Icons.Filled.DataObject, "Assembly listing",
+            "disassembly with auto-comments")
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = ide.panel
+    ) {
+        Column(Modifier.padding(bottom = 22.dp)) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
+                Text("Export decompiled output", color = ide.text,
+                    fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "Reconstructed from machine code — it will not recompile as-is.",
+                    color = ide.dim, fontSize = 11.5.sp
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            kinds.forEach { k ->
+                val enabled = k.id != "c-one" || vm.detail != null
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = enabled) {
+                            kind = k.id
+                            onDismiss()
+                            save.launch(vm.suggestedExportName(k.id))
                         }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        k.icon, contentDescription = null,
+                        tint = if (enabled) ide.accent else ide.dim,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            k.title,
+                            color = if (enabled) ide.text else ide.dim,
+                            fontSize = 13.5.sp, fontWeight = FontWeight.Medium
+                        )
+                        Text(k.detail, color = ide.dim, fontSize = 10.5.sp, fontFamily = Mono)
                     }
-                    HorizontalDivider(color = ide.border.copy(alpha = 0.5f))
                 }
+                HorizontalDivider(color = ide.border.copy(alpha = 0.5f))
             }
         }
     }

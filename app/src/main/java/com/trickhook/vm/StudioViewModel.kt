@@ -93,6 +93,10 @@ class StudioViewModel : ViewModel() {
     var plugins by mutableStateOf<List<PluginDef>>(emptyList()); private set
     var pluginOutput by mutableStateOf<String>(""); private set
     var pluginRunning by mutableStateOf(false); private set
+    /** Name and effect count of the last run, for the result header. */
+    var lastPluginName by mutableStateOf(""); private set
+    var lastPluginEffects by mutableStateOf(0); private set
+    var lastPluginOk by mutableStateOf(true); private set
 
     // v2: APK manifest
     var manifest by mutableStateOf<ManifestInfo?>(null); private set
@@ -462,6 +466,27 @@ class StudioViewModel : ViewModel() {
         }
     }
 
+    fun savePluginLog(context: Context, uri: Uri) {
+        val text = pluginOutput
+        if (text.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                    out.write(text.toByteArray(Charsets.UTF_8))
+                } ?: run { log("ERROR", "Could not open the chosen file"); return@launch }
+                log("OK", "Plugin log saved · ${humanBytes(text.length.toLong())}")
+            } catch (e: Exception) {
+                log("ERROR", "saving the log failed: ${e.message}")
+            }
+        }
+    }
+
+    fun suggestedLogName(): String {
+        val stem = lastPluginName.ifEmpty { "plugin" }
+            .lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        return "$stem-log.txt"
+    }
+
     private fun humanBytes(n: Long): String = when {
         n >= 1024L * 1024 -> "%.1f MB".format(n / 1024.0 / 1024.0)
         n >= 1024L -> "%.0f KB".format(n / 1024.0)
@@ -616,6 +641,9 @@ class StudioViewModel : ViewModel() {
         if (pluginRunning) return
         pluginRunning = true
         pluginOutput = ""
+        lastPluginName = plugin.name
+        lastPluginEffects = 0
+        lastPluginOk = true
         viewModelScope.launch {
             try {
                 val res = withContext(Dispatchers.IO) {
@@ -645,6 +673,8 @@ class StudioViewModel : ViewModel() {
                     sb.appendLine("=== ${plugin.name} FAILED (line ${res.line}): ${res.error} ===")
                 }
                 pluginOutput = sb.toString()
+                lastPluginOk = res.ok
+                lastPluginEffects = res.effects.size
                 log(if (res.ok) "OK" else "ERROR", "Plugin '${plugin.name}' ${if (res.ok) "finished" else "failed: ${res.error}"}")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "plugin error")
