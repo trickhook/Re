@@ -36,16 +36,27 @@ command -v adb >/dev/null || { echo "adb not on PATH — install Android platfor
 ADB=(adb)
 [ -n "$SERIAL" ] && ADB=(adb -s "$SERIAL")
 
-mapfile -t DEVICES < <("${ADB[@]}" devices | awk 'NR>1 && $2=="device" {print $1}')
-if [ "${#DEVICES[@]}" -eq 0 ]; then
+# Portable across bash 3.2 (still /bin/bash on macOS), so no mapfile/readarray.
+DEVICES=""
+while IFS= read -r line; do
+    DEVICES="${DEVICES}${line}
+"
+done <<EOF
+$("${ADB[@]}" devices | awk 'NR>1 && $2=="device" {print $1}')
+EOF
+DEVICES=$(printf '%s' "$DEVICES" | sed '/^$/d')
+COUNT=$(printf '%s' "$DEVICES" | grep -c . || true)
+
+if [ "$COUNT" -eq 0 ]; then
     echo "No device connected. Enable USB debugging and accept the RSA prompt." >&2
     exit 1
 fi
-if [ "${#DEVICES[@]}" -gt 1 ] && [ -z "$SERIAL" ]; then
-    printf 'Several devices connected — pick one with -s SERIAL:\n' >&2
-    printf '  %s\n' "${DEVICES[@]}" >&2
+if [ "$COUNT" -gt 1 ] && [ -z "$SERIAL" ]; then
+    echo "Several devices connected — pick one with -s SERIAL:" >&2
+    printf '  %s\n' $DEVICES >&2
     exit 1
 fi
+FIRST=$(printf '%s' "$DEVICES" | head -n1)
 
 ABI=$("${ADB[@]}" shell getprop ro.product.cpu.abi | tr -d '\r')
 case "$ABI" in
@@ -53,7 +64,7 @@ case "$ABI" in
     *) echo "Warning: device ABI is '$ABI'; this build only ships arm64-v8a and x86_64." >&2 ;;
 esac
 
-echo "==> Installing $(du -h "$APK" | cut -f1) on ${DEVICES[0]} ($ABI)"
+echo "==> Installing $(du -h "$APK" | cut -f1) on $FIRST ($ABI)"
 "${ADB[@]}" install -r "$APK"
 "${ADB[@]}" shell monkey -p com.sakore.studio -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
 echo "==> Done — Sako RE Studio launched."
