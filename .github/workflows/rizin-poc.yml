@@ -99,37 +99,47 @@ jobs:
         run: |
           STRIP="$TOOLCHAIN/bin/llvm-strip"
           mkdir -p measured
-          find rizin/build -name 'librz_*.so*' -type f -exec cp {} measured/ \; 2>/dev/null || true
-          find rizin/build -name '*.so' -type f | head -50
 
-          echo "## Rizin on arm64-v8a — size PoC" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "rizin \`${RIZIN_REF}\` · NDK ${NDK_VERSION} · API ${API} · release" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| library | unstripped | stripped |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---------|-----------:|---------:|" >> "$GITHUB_STEP_SUMMARY"
+          # Count each library once. meson leaves versioned aliases next to the
+          # real file, and globbing "librz_*.so*" summed the same library two or
+          # three times — deduplicate by inode so the total is defensible.
+          find rizin/build -name 'librz_*.so*' -type f -printf '%i\t%p\n' \
+            | sort -u -k1,1 | cut -f2- > libs.txt
+          echo "unique libraries: $(wc -l < libs.txt)"
+          while read -r f; do cp "$f" "measured/$(basename "$f")"; done < libs.txt
 
-          raw=0; str=0
-          for f in measured/*.so*; do
+          printf '%-28s %12s %12s\n' library unstripped stripped
+          {
+            echo "## Rizin on arm64-v8a — size PoC"
+            echo
+            echo "rizin \`${RIZIN_REF}\` · NDK ${NDK_VERSION} · API ${API} · release · deduplicated by inode"
+            echo
+            echo "| library | unstripped | stripped |"
+            echo "|---------|-----------:|---------:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          raw=0; str=0; n=0
+          for f in measured/*; do
             [ -f "$f" ] || continue
+            case "$f" in *.stripped) continue ;; esac
             a=$(stat -c%s "$f")
             "$STRIP" --strip-unneeded "$f" -o "$f.stripped" 2>/dev/null || cp "$f" "$f.stripped"
             b=$(stat -c%s "$f.stripped")
-            raw=$((raw + a)); str=$((str + b))
+            raw=$((raw + a)); str=$((str + b)); n=$((n + 1))
+            printf '%-28s %12s %12s\n' "$(basename "$f")" "$a" "$b"
             printf '| `%s` | %s | %s |\n' "$(basename "$f")" \
               "$(numfmt --to=iec --suffix=B $a)" "$(numfmt --to=iec --suffix=B $b)" >> "$GITHUB_STEP_SUMMARY"
           done
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Total stripped: $(numfmt --to=iec --suffix=B $str)** (unstripped $(numfmt --to=iec --suffix=B $raw))" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "For comparison, Nocturne ships **9.3 MiB** of \`libnocturne.so\` per ABI today." >> "$GITHUB_STEP_SUMMARY"
-          echo "Two ABIs are packaged, so double both figures for the APK cost." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Build took **${{ steps.build.outputs.seconds }}s** on a 4-core runner." >> "$GITHUB_STEP_SUMMARY"
-
-          echo "TOTAL_STRIPPED=$str" >> "$GITHUB_ENV"
-          echo "TOTAL_RAW=$raw" >> "$GITHUB_ENV"
+          echo "---------------------------------------------------"
+          printf '%-28s %12s %12s\n' "TOTAL ($n libs)" "$raw" "$str"
+          {
+            echo
+            echo "**$n libraries · total stripped $(numfmt --to=iec --suffix=B $str)** (unstripped $(numfmt --to=iec --suffix=B $raw))"
+            echo
+            echo "Nocturne ships **9.3 MiB** of \`libnocturne.so\` per ABI today, for two ABIs."
+            echo "Build took **${{ steps.build.outputs.seconds }}s** on a 4-core runner."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the built libraries
         if: always()
