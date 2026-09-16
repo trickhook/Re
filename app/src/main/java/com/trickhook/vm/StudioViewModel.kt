@@ -365,9 +365,10 @@ class StudioViewModel : ViewModel() {
             // The name comes from the last analysis; a stale one is better
             // than "—" while the new decompile is in flight, because the
             // point of the bar is to say what is being worked on.
-            val label = meta?.functions?.firstOrNull { it.addr == addr }?.let { f ->
-                f.displayName.ifBlank { f.name }
-            } ?: "0x%X".format(addr)
+            val fn = meta?.functions?.firstOrNull { it.addr == addr }
+            val label = fn?.demangled?.takeIf { it.isNotBlank() }
+                ?: fn?.name?.takeIf { it.isNotBlank() }
+                ?: "0x%X".format(addr)
             decompileTargetName = label
             decompilePhase = if (decompiler == "ghidra" && sleighReady)
                 "Decompiling with Ghidra p-code" else "Lifting to IR"

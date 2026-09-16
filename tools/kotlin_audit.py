@@ -8,7 +8,40 @@ on it once.
 import os, re, sys
 
 ROOT = 'app/src/main/java/com/trickhook'
+MODELS = os.path.join(ROOT, 'model', 'Models.kt')
 bad = []
+
+# Members every receiver has, so a hit on one of these is never a missing field.
+KOTLIN_STDLIB_MEMBERS = {
+    'toString', 'hashCode', 'equals', 'copy', 'let', 'also', 'apply', 'run',
+    'takeIf', 'takeUnless', 'javaClass', 'isNotEmpty', 'isEmpty', 'isBlank',
+    'isNotBlank', 'length', 'size', 'first', 'last', 'orEmpty', 'ifEmpty',
+    'ifBlank', 'toLong', 'toInt', 'toDouble', 'format', 'lowercase', 'uppercase',
+}
+
+
+def scan_models(path):
+    """Property names per data class, and the element type of each List field."""
+    props, list_elem = {}, {}
+    try:
+        src = open(path, encoding='utf-8').read()
+    except OSError:
+        return props, list_elem
+    # data class Name( ... ) — the parameter list is the property list
+    for m in re.finditer(r'\b(?:data\s+)?class\s+(\w+)\s*\(([^)]*)\)', src, re.S):
+        name, body = m.group(1), m.group(2)
+        fields = set()
+        for f in re.finditer(r'\b(?:val|var)\s+(\w+)\s*:', body):
+            fields.add(f.group(1))
+        if fields:
+            props[name] = fields
+    # val xs: List<T> — remember T so an element's properties can be checked
+    for m in re.finditer(r'\b(?:val|var)\s+(\w+)\s*:\s*(?:List|MutableList|Set)<(\w+)>', src):
+        list_elem[m.group(1)] = m.group(2)
+    return props, list_elem
+
+
+MODEL_PROPS, LIST_ELEM = scan_models(MODELS)
 
 
 def code_positions(t):
@@ -68,7 +101,46 @@ for dp, _, fns in os.walk(ROOT):
             if not re.search(imp, t, re.M):
                 bad.append('%s Icons.*.%s used without import' % (p, u))
 
-        # 3. A `var x` compiles to setX()/getX(); a function with that name and
+        # 3. The same fully-qualified name imported twice — Kotlin rejects it as
+        #    "Conflicting import: imported name 'X' is ambiguous". Two DIFFERENT
+        #    packages sharing a simple name is fine and common here (material3's
+        #    Tab composable beside our own Tab enum: functions and classifiers
+        #    live in separate namespaces), so only the exact-duplicate case is
+        #    an error.
+        imports = {}
+        for m in re.finditer(r'^import\s+([\w.]+)(?:\s+as\s+(\w+))?\s*$', t, re.M):
+            fqn = m.group(1)
+            if fqn.endswith('.*'):
+                continue
+            key = (fqn, m.group(2))
+            imports.setdefault(key, []).append(t[:m.start()].count('\n') + 1)
+        for (fqn, alias), lines in imports.items():
+            if len(lines) < 2:
+                continue
+            bad.append('%s duplicate import of `%s` on lines %s'
+                       % (p, fqn, ', '.join(str(n) for n in lines)))
+
+        # 4. A property read off a model class that does not declare it.
+        #    Checked only where the receiver's type is unambiguous: an element
+        #    pulled out of a `List<T>` field whose T is declared in Models.kt.
+        #    Anything less certain is left alone — a wrong guess here would
+        #    train people to ignore the audit.
+        for m in re.finditer(
+                r'\.(\w+)\s*\??\.\s*(?:firstOrNull|first|last|lastOrNull|find|getOrNull|single|singleOrNull)'
+                r'\s*(?:\([^()]*\))?\s*(?:\{[^{}]*\})?\s*\??\.\s*(\w+)', t):
+            container, prop = m.group(1), m.group(2)
+            elem = LIST_ELEM.get(container)
+            if not elem or elem not in MODEL_PROPS:
+                continue
+            if prop in MODEL_PROPS[elem]:
+                continue
+            if prop in KOTLIN_STDLIB_MEMBERS:
+                continue
+            bad.append('%s:%d `%s` is not a property of %s (from .%s: List<%s>) — has %s'
+                       % (p, t[:m.start()].count('\n') + 1, prop, elem, container, elem,
+                          ', '.join(sorted(MODEL_PROPS[elem]))))
+
+        # 5. A `var x` compiles to setX()/getX(); a function with that name and
         #    a matching argument count in the same class is a signature clash.
         props = set(re.findall(r'^\s*(?:private\s+)?var\s+(\w+)\b', t, re.M))
         for m in re.finditer(r'^\s*(?:\w+\s+)*fun\s+(set|get)([A-Z]\w*)\s*\(([^)]*)\)', t, re.M):
