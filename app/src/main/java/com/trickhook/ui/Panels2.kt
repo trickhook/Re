@@ -18,6 +18,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.Functions
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -115,11 +118,10 @@ fun FunctionsPanel(vm: StudioViewModel) {
                         .clickable { vm.selectFunction(f.addr) }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
-                    Text(
-                        if (renamed != null) "✏" else "ƒ",
-                        color = if (renamed != null) ide.amber else ide.dim,
-                        fontSize = 12.sp, fontFamily = Mono,
-                        modifier = Modifier.width(24.dp)
+                    RowIcon(
+                        if (renamed != null) Icons.Filled.DriveFileRenameOutline
+                        else Icons.Filled.Functions,
+                        if (renamed != null) ide.amber else ide.dim, 13.dp
                     )
                     Column(Modifier.weight(1f)) {
                         Text(

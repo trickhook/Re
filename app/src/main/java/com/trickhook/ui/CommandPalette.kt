@@ -296,7 +296,7 @@ fun GlobalSearchDialog(vm: StudioViewModel, onDismiss: () -> Unit) {
                         items(marks.size) { i ->
                             val b = marks[i]
                             Text(
-                                "${b.addr}  ★ ${b.label}",
+                                "${b.addr}  ${b.label}",
                                 color = ide.amber, fontSize = 11.sp, fontFamily = Mono,
                                 modifier = Modifier
                                     .fillMaxWidth()

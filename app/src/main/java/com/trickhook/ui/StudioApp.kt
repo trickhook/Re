@@ -15,12 +15,28 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.DataObject
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Functions
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Laptop
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LightMode
@@ -141,13 +157,18 @@ fun StudioApp(vm: StudioViewModel) {
                 }
                 Column {
                     Text(
-                        "SAKO RE STUDIO",
-                        color = ide.accent,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.2.sp
+                        "Nocturne",
+                        color = ide.text,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = (-0.2).sp
                     )
-                    Text("v2 · ELF / PE / DEX / APK · IR decompiler · callgraph · debugger", color = ide.dim, fontSize = 8.5.sp)
+                    Text(
+                        "ELF · PE · DEX · APK",
+                        color = ide.dim,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.4.sp
+                    )
                 }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = { showSearch = true }) {
@@ -229,27 +250,39 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            "SAKO RE STUDIO", color = ide.accent, fontSize = 30.sp,
-            fontWeight = FontWeight.Bold, letterSpacing = 2.sp
+            "Nocturne", color = ide.text, fontSize = 40.sp,
+            fontWeight = FontWeight.Light, letterSpacing = (-1).sp
         )
-        Spacer(Modifier.height(6.dp))
-        Text("v2.0 — Advanced Analysis Engine", color = ide.text, fontSize = 14.sp)
-        Text("IR decompiler · call graph · project DB · real debugger · plugins · AI", color = ide.dim, fontSize = 11.sp)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Interactive disassembler & decompiler",
+            color = ide.dim, fontSize = 13.sp, letterSpacing = 0.2.sp
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "ARM64 · ARM/Thumb · x86 · MIPS · PowerPC · SPARC · SystemZ · m68k",
+            color = ide.dim.copy(alpha = 0.7f), fontSize = 10.sp,
+            fontFamily = Mono, lineHeight = 15.sp
+        )
+        Spacer(Modifier.height(32.dp))
         Button(onClick = onOpen, enabled = !vm.busy) {
-            Text("Open APK / ELF / EXE — Fur fayl")
+            Text("Open a binary", fontWeight = FontWeight.Medium)
         }
-        Spacer(Modifier.height(14.dp))
-        Text("Ctrl+K command palette · Ctrl+F search · F1 shortcuts", color = ide.dim, fontSize = 10.sp, fontFamily = Mono)
+        Spacer(Modifier.height(18.dp))
+        Text(
+            "Ctrl+K  palette     Ctrl+F  search     F1  shortcuts",
+            color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp, fontFamily = Mono
+        )
         Spacer(Modifier.height(18.dp))
         if (vm.busy) {
             CircularProgressIndicator(color = ide.accent, modifier = Modifier.width(36.dp).height(36.dp))
             Spacer(Modifier.height(10.dp))
-            Text("Analyzing… · Falanqaynta socda", color = ide.dim, fontSize = 12.sp)
+            Text("Analyzing\u2026", color = ide.dim, fontSize = 12.sp)
         } else {
             Text(
-                "Fur .so / .dex / .exe / .apk\nSamples-ka app/samples/ waa kuwo tijaabo u diyaar ah.",
-                color = ide.dim, fontSize = 11.sp, lineHeight = 16.sp
+                ".so   .dex   .exe   .apk",
+                color = ide.dim.copy(alpha = 0.55f), fontSize = 11.sp,
+                fontFamily = Mono, lineHeight = 16.sp
             )
         }
         Spacer(Modifier.weight(1f))
@@ -275,20 +308,24 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
         item {
             Column(Modifier.fillMaxWidth().background(ide.panel2).padding(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(meta?.let { fileIcon(it.format) } ?: "📁", fontSize = 18.sp)
-                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        meta?.let { fileIcon(it.format) } ?: Icons.Filled.FolderOpen,
+                        contentDescription = null, tint = ide.accent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         meta?.name ?: "No file", color = ide.text, fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                KeyValue("Format · Nooca", "${meta?.format ?: "-"} · ${meta?.arch ?: "-"}")
+                KeyValue("Format", "${meta?.format ?: "-"} · ${meta?.arch ?: "-"}")
                 KeyValue(
                     "Entry / Base",
                     "${meta?.entry?.let { hexFmt(it) } ?: "-"} / ${meta?.base?.let { hexFmt(it) } ?: "-"}"
                 )
-                KeyValue("Size · Cabbir", "${meta?.sizeBytes ?: 0} bytes")
+                KeyValue("Size", "${meta?.sizeBytes ?: 0} bytes")
                 KeyValue("Disassembler", meta?.backend?.ifEmpty { "-" } ?: "-")
                 KeyValue("Pseudo-C", vm.detail?.pseudoMode ?: "-")
             }
@@ -296,7 +333,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
         }
         // RECENT PROJECTS
         if (vm.recents.isNotEmpty()) {
-            item { SectionTitle("RECENT PROJECTS · MASHRUUCYADA (${vm.recents.size})") }
+            item { SectionTitle("Recent projects (${vm.recents.size})") }
             items(minOf(vm.recents.size, 8)) { i ->
                 val rp = vm.recents[i]
                 Row(
@@ -320,7 +357,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
         }
         // BOOKMARKS
         if (vm.bookmarks.isNotEmpty()) {
-            item { SectionTitle("BOOKMARKS · CALAAMADAYN (${vm.bookmarks.size})") }
+            item { SectionTitle("Bookmarks (${vm.bookmarks.size})") }
             items(minOf(vm.bookmarks.size, 10)) { i ->
                 val b = vm.bookmarks[i]
                 Row(
@@ -334,7 +371,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
                         }
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                 ) {
-                    Text("★", color = ide.amber, fontSize = 12.sp, modifier = Modifier.width(24.dp))
+                    RowIcon(Icons.Filled.Star, ide.amber, 13.dp)
                     Text(b.label, color = ide.text, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
                     Text(b.addr, color = ide.dim, fontSize = 10.sp, fontFamily = Mono)
                 }
@@ -343,7 +380,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
         }
         // APK CONTENTS
         if (vm.apkEntries.isNotEmpty()) {
-            item { SectionTitle("APK CONTENTS · APK GUDAHEDA (${vm.apkEntries.size})") }
+            item { SectionTitle("APK contents (${vm.apkEntries.size})") }
             items(minOf(vm.apkEntries.size, 40)) { i ->
                 val e = vm.apkEntries[i]
                 Row(
@@ -352,11 +389,11 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
                         .clickable { vm.openApkEntry(e); onClose() }
                         .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
-                    Text(
-                        if (e.name.endsWith(".apk")) "📦"
-                        else if (e.name.endsWith(".so")) "🧩"
-                        else "📜",
-                        fontSize = 12.sp, modifier = Modifier.width(24.dp)
+                    RowIcon(
+                        if (e.name.endsWith(".apk")) Icons.Filled.Android
+                        else if (e.name.endsWith(".so")) Icons.Filled.Memory
+                        else Icons.Filled.Description,
+                        ide.dim, 13.dp
                     )
                     Text(e.name, color = ide.cyan, fontSize = 11.sp, fontFamily = Mono, maxLines = 1, modifier = Modifier.weight(1f))
                     Text("${e.size}", color = ide.dim, fontSize = 10.sp, fontFamily = Mono)
@@ -365,7 +402,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
             item { HorizontalDivider(color = ide.border) }
         }
         // FUNCTIONS with icons
-        item { SectionTitle("FUNCTIONS · SHAQOYINKA (${meta?.functions?.size ?: 0})") }
+        item { SectionTitle("Functions (${meta?.functions?.size ?: 0})") }
         if (meta != null && meta.functions.isNotEmpty()) {
             items(minOf(meta.functions.size, 150)) { i ->
                 val f = meta.functions[i]
@@ -379,10 +416,12 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
                         }
                         .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
-                    Text(
-                        if (f.from == "import") "⬇" else if (vm.renames.containsKey("0x%08X".format(f.addr))) "✏" else "ƒ",
-                        color = if (vm.renames.containsKey("0x%08X".format(f.addr))) ide.amber else ide.dim,
-                        fontSize = 12.sp, modifier = Modifier.width(24.dp)
+                    val isRenamed = vm.renames.containsKey("0x%08X".format(f.addr))
+                    RowIcon(
+                        if (f.from == "import") Icons.Filled.ArrowDownward
+                        else if (isRenamed) Icons.Filled.DriveFileRenameOutline
+                        else Icons.Filled.Functions,
+                        if (isRenamed) ide.amber else ide.dim, 13.dp
                     )
                     Text(
                         display,
@@ -396,22 +435,26 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
             item { HorizontalDivider(color = ide.border) }
         }
         // IMPORTS
-        item { SectionTitle("IMPORTS · SOO DHEXA (${meta?.imports?.size ?: 0})") }
+        item { SectionTitle("Imports (${meta?.imports?.size ?: 0})") }
         if (meta != null && meta.imports.isNotEmpty()) {
             items(minOf(meta.imports.size, 60)) { i ->
-                Text(
-                    "⬇ ${meta.imports[i].name}",
-                    color = ide.dim, fontSize = 11.sp, fontFamily = Mono,
-                    modifier = Modifier
+                Row(
+                    Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 3.dp),
-                    maxLines = 1
-                )
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RowIcon(Icons.Filled.ArrowDownward, ide.dim, 12.dp)
+                    Text(
+                        meta.imports[i].name,
+                        color = ide.dim, fontSize = 11.sp, fontFamily = Mono, maxLines = 1
+                    )
+                }
             }
             item { HorizontalDivider(color = ide.border) }
         }
         // SECTIONS
-        item { SectionTitle("SECTIONS · QAYBAHA (${meta?.sections?.size ?: 0})") }
+        item { SectionTitle("Sections (${meta?.sections?.size ?: 0})") }
         if (meta != null && meta.sections.isNotEmpty()) {
             items(minOf(meta.sections.size, 60)) { i ->
                 val s = meta.sections[i]
@@ -421,9 +464,11 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
                         .clickable { vm.tab = Tab.MAP; onClose() }
                         .padding(horizontal = 12.dp, vertical = 3.dp)
                 ) {
-                    Text(
-                        if (s.flags.contains("X")) "⚙" else if (s.flags.contains("W")) "📝" else "📊",
-                        fontSize = 11.sp, modifier = Modifier.width(24.dp)
+                    RowIcon(
+                        if (s.flags.contains("X")) Icons.Filled.Code
+                        else if (s.flags.contains("W")) Icons.Filled.Edit
+                        else Icons.Filled.Storage,
+                        ide.dim, 12.dp
                     )
                     Text(s.name.ifEmpty { "(unnamed)" }, color = ide.text, fontSize = 11.sp, fontFamily = Mono, maxLines = 1)
                     Spacer(Modifier.weight(1f))
@@ -443,25 +488,27 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
     }
 }
 
-private fun fileIcon(format: String?): String = when (format) {
-    "APK" -> "📦"
-    "ELF" -> "🧩"
-    "PE" -> "🪟"
-    "DEX" -> "📜"
-    "MachO" -> "🍎"
-    else -> "📄"
+private fun fileIcon(format: String?): ImageVector = when (format) {
+    "APK" -> Icons.Filled.Android
+    "ELF" -> Icons.Filled.Memory
+    "PE" -> Icons.Filled.DesktopWindows
+    "DEX" -> Icons.Filled.DataObject
+    "MachO" -> Icons.Filled.Laptop
+    else -> Icons.Filled.InsertDriveFile
 }
 
 @Composable
 fun SectionTitle(text: String) {
     val ide = LocalIde.current
     Text(
-        text,
-        color = ide.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+        text.uppercase(),
+        color = ide.dim,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.sp,
         modifier = Modifier
             .fillMaxWidth()
-            .background(ide.panel2)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(start = 12.dp, end = 12.dp, top = 18.dp, bottom = 6.dp)
     )
 }
 
@@ -475,9 +522,13 @@ private fun AboutDialog(onDismiss: () -> Unit) {
         title = { Text("Nocturne v2.0", color = ide.accent) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("Advanced reverse-engineering studio: ELF / PE / DEX / APK", color = ide.text, fontSize = 12.sp)
+                Text("Reverse-engineering studio for ELF, PE, DEX and APK binaries.", color = ide.text, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
-                KeyValue("Engine", "C++17 NDK · Capstone 4.0.2 + Mini fallback")
+                KeyValue("Engine", "C++17 NDK · Capstone 4.0.2 + built-in fallback")
+                KeyValue(
+                    "Architectures",
+                    "ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · SystemZ · m68k · TI C6000 (LE + BE)"
+                )
                 KeyValue("Decompiler", "ASM → IR → Pseudo-C (typed vars, while/if, calls w/ args)")
                 KeyValue("Analysis", "call graph · PLT/GOT/IAT resolution · demangler · auto-comments")
                 KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
@@ -486,7 +537,8 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                 KeyValue("AI", "offline heuristic explain + optional OpenAI-compatible LLM endpoint")
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Note: debugger-ka wuxuu u baahan yahay root ama debuggable device (SELinux). Pseudo-C waa IR-based laakiin ma aha decompiler buuxa (vtables/exceptions ma taageero).",
+                    "The debugger needs a rooted or debuggable device; SELinux may still deny ptrace. " +
+                        "Pseudo-C is a real IR pipeline, not a full decompiler — no vtable or exception recovery.",
                     color = ide.amber, fontSize = 10.5.sp, lineHeight = 14.sp
                 )
             }

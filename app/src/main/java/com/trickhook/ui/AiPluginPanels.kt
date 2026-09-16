@@ -52,7 +52,7 @@ fun AiPanel(vm: StudioViewModel) {
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontFamily = Mono
             )
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = { showSettings = true }) { Text("⚙ Settings", color = ide.dim, fontSize = 11.sp) }
+            TextButton(onClick = { showSettings = true }) { Text("Settings", color = ide.dim, fontSize = 11.sp) }
         }
         val d = vm.detail
         Row(
@@ -85,7 +85,7 @@ fun AiPanel(vm: StudioViewModel) {
         if (text.isEmpty()) {
             Hint(
                 "AI Explain analyzes the selected function: called APIs, string refs, loop structure, dangerous patterns (strcpy/system/dlopen), crypto constants.",
-                "Offline = local heuristics. Ask LLM = OpenAI-compatible endpoint (set in ⚙ Settings)."
+                "Offline = local heuristics. Ask LLM = OpenAI-compatible endpoint (set in Settings)."
             )
         } else {
             SelectionScroll(text)

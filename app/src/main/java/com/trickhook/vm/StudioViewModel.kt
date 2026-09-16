@@ -121,7 +121,7 @@ class StudioViewModel : ViewModel() {
     }
 
     init {
-        log("INFO", "Nocturne v2 diyaar — engine loaded (IR decompiler, callgraph, debugger, plugins)")
+        log("INFO", "Nocturne ready — engine loaded (IR decompiler, call graph, debugger, plugins)")
     }
 
     fun log(level: String, msg: String) {
@@ -632,7 +632,7 @@ class StudioViewModel : ViewModel() {
         }
         if (danger.isNotEmpty()) {
             sb.appendLine("### Security notes")
-            danger.forEach { sb.appendLine(" • ⚠ $it") }
+            danger.forEach { sb.appendLine("  [!] $it") }
             sb.appendLine()
         }
         if (crypto) sb.appendLine("### Crypto hint: looks like hashing/crypto constants present.")
@@ -656,7 +656,7 @@ class StudioViewModel : ViewModel() {
 
     fun explainRemote() {
         val d = detail ?: return
-        if (aiEndpoint.isBlank()) { aiExplanation = "Set endpoint in AI settings first (⚙)."; return }
+        if (aiEndpoint.isBlank()) { aiExplanation = "Set endpoint in AI settings first."; return }
         aiBusy = true
         viewModelScope.launch {
             try {

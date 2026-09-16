@@ -105,7 +105,7 @@ fun DebuggerPanel(vm: StudioViewModel) {
                 }
                 Spacer(Modifier.width(4.dp))
                 Button(onClick = { vm.dbgStep() }, enabled = vm.dbgState?.state == "stopped" && !vm.dbgBusy) {
-                    Text("⏭ Step", fontSize = 11.sp)
+                    Text("Step", fontSize = 11.sp)
                 }
                 Spacer(Modifier.width(4.dp))
                 Button(onClick = { vm.dbgBpAtSelectedFunction() }, enabled = vm.selectedFunc != null) {

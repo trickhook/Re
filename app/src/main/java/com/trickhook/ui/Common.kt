@@ -8,13 +8,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -96,3 +101,15 @@ fun levelColor(level: String, ide: IdeColors): Color = when (level) {
 }
 
 fun defaultTextStyle() = TextStyle(fontSize = 12.sp)
+
+/**
+ * Leading icon for a list row. Occupies the same 24dp gutter the rows were
+ * built around, so every list stays aligned regardless of glyph width — which
+ * is what emoji could never guarantee across devices and fonts.
+ */
+@Composable
+fun RowIcon(icon: ImageVector, tint: Color, size: Dp = 15.dp) {
+    Box(Modifier.width(24.dp), contentAlignment = Alignment.CenterStart) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+    }
+}

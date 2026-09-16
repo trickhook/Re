@@ -15,6 +15,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -203,11 +209,8 @@ private fun PermissionsSection(vm: StudioViewModel) {
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp, vertical = 3.dp)
             ) {
-                Text(
-                    if (dangerous) "⚠" else "·",
-                    color = ide.amber, fontSize = 12.sp, fontFamily = Mono,
-                    modifier = Modifier.width(20.dp)
-                )
+                if (dangerous) RowIcon(Icons.Filled.PriorityHigh, ide.red, 13.dp)
+                else Spacer(Modifier.width(24.dp))
                 Text(p, color = ide.text, fontSize = 11.5.sp, fontFamily = Mono, maxLines = 1)
             }
         }
@@ -266,9 +269,9 @@ private fun LibsSection(vm: StudioViewModel) {
                     .clickable { vm.openApkEntry(e) }
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             ) {
-                Text(
-                    if (e.name.endsWith(".so")) "🧩" else "📜",
-                    fontSize = 12.sp, modifier = Modifier.width(24.dp)
+                RowIcon(
+                    if (e.name.endsWith(".so")) Icons.Filled.Memory else Icons.Filled.Description,
+                    ide.dim, 13.dp
                 )
                 Text(e.name, color = ide.cyan, fontSize = 11.5.sp, fontFamily = Mono,
                     maxLines = 1, modifier = Modifier.weight(1f))
@@ -330,13 +333,13 @@ private fun ResourcesSection(vm: StudioViewModel) {
                         .clickable { if (r.isImage) previewPath = r.path }
                         .padding(horizontal = 10.dp, vertical = 2.dp)
                 ) {
-                    Text(
+                    RowIcon(
                         when {
-                            r.isImage -> "🖼"
-                            r.isXml -> "📄"
-                            else -> "·"
+                            r.isImage -> Icons.Filled.Photo
+                            r.isXml -> Icons.Filled.Code
+                            else -> Icons.Filled.Description
                         },
-                        fontSize = 12.sp, modifier = Modifier.width(24.dp)
+                        ide.dim, 13.dp
                     )
                     Text(r.path, color = ide.text, fontSize = 11.sp, fontFamily = Mono,
                         maxLines = 1, modifier = Modifier.weight(1f))
