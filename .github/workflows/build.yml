@@ -125,6 +125,20 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
 
+      - name: Inspect APK
+        run: |
+          aapt2="$ANDROID_HOME/build-tools/${BUILD_TOOLS}/aapt2"
+          for apk in dist/*.apk; do
+            echo "::group::$(basename "$apk")  ($(du -h "$apk" | cut -f1))"
+            "$aapt2" dump badging "$apk" | grep -E \
+              '^package|^sdkVersion|^targetSdkVersion|^application-label|^application-icon|^launchable-activity|^native-code'
+            echo "--- launcher icon resources packaged ---"
+            unzip -l "$apk" | grep -E 'ic_launcher' || echo 'NONE FOUND'
+            echo "--- native libs ---"
+            unzip -l "$apk" | grep -E '\.so$'
+            echo "::endgroup::"
+          done
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
