@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "GhidraArch.h"
+#include "JniTypes.h"
 #include <fstream>
 #include "Binary.h"
 #include "DebugSession.h"
@@ -92,10 +93,56 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
     return true;
 }
 
-std::string Engine::ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn) {
+// Does this function take a JNIEnv* as its first argument? Nothing in a
+// stripped library says so, but the code does: an Android native helper loads
+// the interface table out of its first argument and calls through it. That one
+// fact is what turns
+//     (**(code **)(*param_1 + 0x720))(param_1)
+// into (*env)->ExceptionCheck(env), and this library does it 526 times.
+static bool takesJniEnv(const std::vector<AsmLine>& lines, const std::string& arch) {
+    if (arch != "ARM64") return false;         // only ARM64 is pattern-matched here
+    std::string tableReg;                      // register holding *env
+    std::vector<u64> slots;                    // the offsets called through it
+
+    for (const AsmLine& l : lines) {
+        if (l.mnem != "ldr" && l.mnem != "blr") continue;
+        if (l.mnem == "ldr") {
+            size_t comma = l.ops.find(',');
+            if (comma == std::string::npos) continue;
+            std::string dst = l.ops.substr(0, comma);
+            if (l.ops.find("[x0]") != std::string::npos) { tableReg = dst; continue; }
+            if (tableReg.empty()) continue;
+            // ldr xN, [<table>, #imm] — a slot in the interface
+            std::string want = "[" + tableReg + ",";
+            size_t br = l.ops.find(want);
+            if (br == std::string::npos) continue;
+            size_t hash = l.ops.find('#', br);
+            if (hash == std::string::npos) continue;
+            u64 off = strtoull(l.ops.c_str() + hash + 1,
+                               nullptr, l.ops.compare(hash + 1, 2, "0x") == 0 ? 16 : 10);
+            slots.push_back(off);
+        }
+    }
+    if (slots.empty()) return false;
+
+    // Every offset has to name a real function. A C++ virtual call on `this`
+    // has the same shape, so the discriminator is where the offsets land: the
+    // four reserved slots and anything past the end of the table are proof
+    // this is some other kind of object, and a wrong JNIEnv* claim would
+    // invent a call that is not there.
+    const u64 kFirst = 4 * 8;                                  // past reserved0..3
+    const u64 kLast  = u64(jni::kNativeInterfaceCount) * 8;
+    for (u64 off : slots)
+        if (off % 8 != 0 || off < kFirst || off >= kLast) return false;
+    return true;
+}
+
+std::string Engine::ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn,
+                                 const std::vector<AsmLine>& lines) {
     if (!ghidraReady(c, path)) return std::string();
     std::string err;
-    std::string text = GhidraDecomp::instance().decompile(fn.addr, fn.name, err);
+    bool env = takesJniEnv(lines, c.arch);
+    std::string text = GhidraDecomp::instance().decompile(fn.addr, fn.name, err, env);
     if (text.empty()) ghidraNote_ = err.empty() ? "no output" : err;
     return text;
 }
@@ -540,7 +587,7 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     // Ghidra's p-code decompiler when a specification covers this target,
     // otherwise the built-in IR lifter, otherwise the heuristic printer.
     IrResult ir;
-    std::string pseudo = ghidraPseudo(c, path, *fn);
+    std::string pseudo = ghidraPseudo(c, path, *fn, lines);
     std::string pseudoMode = "Ghidra";
     std::string pseudoBackend = pseudo.empty() ? std::string()
                                                : GhidraDecomp::instance().backendName();
@@ -1004,7 +1051,8 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
         // matches what the user was looking at when they exported it.
         if (useGhidra) {
             std::string err;
-            out.pseudo = GhidraDecomp::instance().decompile(fn.addr, fn.name, err);
+            out.pseudo = GhidraDecomp::instance().decompile(
+                fn.addr, fn.name, err, takesJniEnv(out.lines, c.arch));
             if (!out.pseudo.empty()) {
                 out.mode = "Ghidra";
                 out.size = sz;

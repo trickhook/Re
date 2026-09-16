@@ -56,9 +56,16 @@ public:
     std::string backendName() const;
 
     // Decompiled C for one function, or "" with `err` set. Never throws.
-    std::string decompile(u64 addr, const std::string& name, std::string& err);
+    // `jniEnvArg0` types the first parameter as JNIEnv*, which is what turns
+    // this library's most common line into a named call. The caller decides:
+    // only it has the disassembly to recognise the pattern.
+    std::string decompile(u64 addr, const std::string& name, std::string& err,
+                          bool jniEnvArg0 = false);
 
 private:
+    // Takes a ghidra::Funcdata* as void* so this header stays Ghidra-free.
+    void applyJniPrototype(void* fd, const std::string& name, bool jniEnvArg0);
+
     GhidraDecomp() = default;
     ~GhidraDecomp();
     GhidraDecomp(const GhidraDecomp&) = delete;

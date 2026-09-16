@@ -1,4 +1,5 @@
 #include "GhidraArch.h"
+#include "JniTypes.h"
 
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include "architecture.hh"
 #include "funcdata.hh"
 #include "loadimage.hh"
+#include "marshal.hh"
 #include "printc.hh"
 #include "globalcontext.hh"
 #include "sleigh_arch.hh"
@@ -54,7 +56,7 @@ bool GhidraDecomp::open(const std::string&, const std::string&, const u8*, size_
     err = "built without the Ghidra decompiler";
     return false;
 }
-std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err) {
+std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err, bool) {
     err = "built without the Ghidra decompiler";
     return std::string();
 }
@@ -195,6 +197,11 @@ struct GhidraDecomp::Impl {
     MemArchitecture* arch = nullptr;
     std::string key, language, backend;
     std::vector<std::string> addedPaths;
+    // The JNI tables, built once per image and reused for every function.
+    Datatype* jniNative = nullptr;
+    Datatype* jniInvoke = nullptr;
+    Datatype* jniEnvPtr = nullptr;
+    Datatype* javaVmPtr = nullptr;
 
     ~Impl() { delete arch; }
 };
@@ -315,6 +322,68 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
         // Names are a nicety; a failure here must not lose the architecture.
     }
 
+    // Give the decompiler the two JNI function tables. A generic decompiler
+    // has no idea what JNIEnv is, so every call an Android native library
+    // makes into the VM comes out as an offset off an unnamed pointer:
+    //     (**(code **)(*param_1 + 0x720))(param_1)
+    // With the struct in hand the same call reads ExceptionCheck.
+    try {
+        TypeFactory* tf = impl_->arch->types;
+        AddrSpace* dspc = impl_->arch->getDefaultDataSpace();
+        int4 ps = dspc->getAddrSize();
+        // The third argument is the addressable unit, not the pointer size.
+        // Passing the pointer size scaled all pointer arithmetic by 8, so
+        // slot 48 rendered as element [6] of a struct instead of its field.
+        uint4 ws = dspc->getWordSize();
+        Datatype* fnptr = tf->getTypePointer(ps, tf->getTypeCode(), ws);
+
+        (void)fnptr;
+        // TypeFactory::setFields is private; the supported way to define a
+        // structure from outside is to decode one, so build the document the
+        // factory already knows how to read.
+        auto buildTable = [&](const char* name, const char* const* slots,
+                              int count) -> Datatype* {
+            std::ostringstream xml;
+            xml << "<type name=\"" << name << "\" size=\"" << (count * ps)
+                << "\" alignment=\"" << ps << "\" metatype=\"struct\">";
+            for (int i = 0; i < count; ++i) {
+                if (slots[i] == nullptr) continue;
+                xml << "<field name=\"" << slots[i] << "\" offset=\"" << (i * ps) << "\">"
+                    << "<type name=\"\" size=\"" << ps << "\" metatype=\"ptr\">"
+                    << "<type name=\"code\" size=\"1\" metatype=\"code\"/>"
+                    << "</type></field>";
+            }
+            xml << "</type>";
+            std::istringstream is(xml.str());
+            Document* doc = xml_tree(is);
+            if (doc == nullptr) return nullptr;
+            Datatype* dt = nullptr;
+            try {
+                XmlDecode decoder(impl_->arch, doc->getRoot());
+                dt = tf->decodeType(decoder);
+            } catch (...) { dt = nullptr; }
+            delete doc;
+            return dt;
+        };
+
+        impl_->jniNative = buildTable("JNINativeInterface",
+                                      jni::kNativeInterface, jni::kNativeInterfaceCount);
+        impl_->jniInvoke = buildTable("JNIInvokeInterface",
+                                      jni::kInvokeInterface, jni::kInvokeInterfaceCount);
+        if (impl_->jniNative == nullptr || impl_->jniInvoke == nullptr)
+            throw LowlevelError("could not define the JNI interface types");
+        // JNIEnv is a pointer to the table, so a JNIEnv* parameter is a
+        // pointer to that pointer — which is exactly the double dereference
+        // the undecorated output was showing.
+        impl_->jniEnvPtr = tf->getTypePointer(
+            ps, tf->getTypePointer(ps, impl_->jniNative, ws), ws);
+        impl_->javaVmPtr = tf->getTypePointer(
+            ps, tf->getTypePointer(ps, impl_->jniInvoke, ws), ws);
+    } catch (...) {
+        impl_->jniEnvPtr = nullptr;
+        impl_->javaVmPtr = nullptr;
+    }
+
     // Typing the extracted strings as char arrays is what makes a pointer to
     // one print as the text instead of as its address. Without this the
     // decompiler has no reason to believe those bytes are a string.
@@ -355,7 +424,61 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
     return true;
 }
 
-std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::string& err) {
+// JNI entry points have a signature fixed by the specification, and it is the
+// one piece of type information a stripped Android library always carries: it
+// is in the symbol name. Applying it is what lets the decompiler resolve the
+// calls the function makes through the interface pointer.
+void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, bool jniEnvArg0) {
+    if (!impl_ || !impl_->arch || fdv == nullptr) return;
+    if (impl_->jniEnvPtr == nullptr || impl_->javaVmPtr == nullptr) return;
+    Funcdata* fd = static_cast<Funcdata*>(fdv);
+
+    PrototypePieces pieces;
+    pieces.model = impl_->arch->protoModels.empty()
+                       ? impl_->arch->defaultfp
+                       : impl_->arch->defaultfp;
+    pieces.name = name;
+    pieces.firstVarArgSlot = -1;
+
+    TypeFactory* tf = impl_->arch->types;
+    if (name == "JNI_OnLoad" || name == "JNI_OnUnload") {
+        // jint JNI_OnLoad(JavaVM *vm, void *reserved)
+        pieces.outtype = tf->getBase(4, TYPE_INT);
+        pieces.intypes.push_back(impl_->javaVmPtr);
+        pieces.innames.push_back("vm");
+        AddrSpace* ds = impl_->arch->getDefaultDataSpace();
+        pieces.intypes.push_back(tf->getTypePointer(
+            ds->getAddrSize(), tf->getBase(1, TYPE_UNKNOWN), ds->getWordSize()));
+        pieces.innames.push_back("reserved");
+    } else if (name.rfind("Java_", 0) == 0) {
+        // Everything after (JNIEnv*, jobject) depends on the Java signature,
+        // which the symbol encodes but which we do not parse; naming the first
+        // two is what resolves the interface calls.
+        pieces.outtype = tf->getBase(8, TYPE_UNKNOWN);
+        pieces.intypes.push_back(impl_->jniEnvPtr);
+        pieces.innames.push_back("env");
+        pieces.intypes.push_back(tf->getBase(8, TYPE_UNKNOWN));
+        pieces.innames.push_back("thiz");
+    } else if (jniEnvArg0) {
+        // A helper the entry point handed the interface pointer to. The name
+        // says nothing, but the code does: it dereferences its first argument
+        // twice and calls through the result.
+        pieces.outtype = tf->getBase(8, TYPE_UNKNOWN);
+        pieces.intypes.push_back(impl_->jniEnvPtr);
+        pieces.innames.push_back("env");
+    } else {
+        return;
+    }
+
+    try {
+        fd->getFuncProto().setPieces(pieces);
+        fd->getFuncProto().setInputLock(true);
+    } catch (LowlevelError&) {
+    } catch (...) {}
+}
+
+std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::string& err,
+                                    bool jniEnvArg0) {
     err.clear();
     std::lock_guard<std::mutex> lock(ghidraMutex());
     if (!impl_ || !impl_->arch) { err = "no architecture bound"; return std::string(); }
@@ -377,6 +500,8 @@ std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::stri
             scope->removeSymbolMappings(fd->getSymbol());
             fd = scope->addFunction(a, fd->getName())->getFunction();
         }
+
+        applyJniPrototype(fd, name.empty() ? fd->getName() : name, jniEnvArg0);
 
         glb->allacts.setCurrent("decompile");
         Action* act = glb->allacts.getCurrent();

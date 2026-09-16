@@ -83,7 +83,8 @@ private:
     // every caller falls back to the IR lifter.
     bool ghidraReady(Ctx& c, const std::string& path);
     // Decompiled text for one function, or "" when the backend cannot serve it.
-    std::string ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn);
+    std::string ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn,
+                             const std::vector<AsmLine>& lines);
 
     Ctx ctx_;
     std::string ctxPath_;
