@@ -31,6 +31,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -118,8 +120,24 @@ fun DecompilePanel(vm: StudioViewModel) {
             Text(
                 d?.displayName?.ifEmpty { d.name } ?: "—",
                 color = ide.text, fontSize = 13.sp,
-                fontWeight = FontWeight.Medium, fontFamily = Mono, maxLines = 1
+                fontWeight = FontWeight.Medium, fontFamily = Mono, maxLines = 1,
+                modifier = Modifier.weight(1f)
             )
+            val clip = LocalClipboardManager.current
+            val pseudoNow = d?.pseudo
+            if (!pseudoNow.isNullOrEmpty()) {
+                Icon(
+                    Icons.Filled.ContentCopy, contentDescription = "Copy pseudo-C",
+                    tint = ide.dim,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clickable {
+                            clip.setText(AnnotatedString(pseudoNow))
+                            vm.log("OK", "Pseudo-C copied to the clipboard")
+                        }
+                        .padding(6.dp)
+                )
+            }
         }
         // Pipeline stats as tinted chips: what the IR actually recovered, at a
         // glance, instead of a run-on line of text.

@@ -29,6 +29,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Android
@@ -106,6 +111,7 @@ fun StudioApp(vm: StudioViewModel) {
     }
     val openFile = { openLauncher.launch(arrayOf("*/*")) }
     var showAbout by remember { mutableStateOf(false) }
+    var showOverflow by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         vm.refreshRecents(ctx)
@@ -182,27 +188,70 @@ fun StudioApp(vm: StudioViewModel) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                // One tint for every control. Six icons in five colours read as
+                // decoration; the accent is reserved for state and primary
+                // actions. Secondary items move into the overflow — all of them
+                // remain reachable from the command palette too.
+                IconButton(onClick = { openFile() }) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = "Open (Ctrl+O)", tint = ide.dim)
+                }
                 IconButton(onClick = { showSearch = true }) {
-                    Icon(Icons.Filled.Search, contentDescription = "Search (Ctrl+F)", tint = ide.cyan)
+                    Icon(Icons.Filled.Search, contentDescription = "Search (Ctrl+F)", tint = ide.dim)
                 }
                 IconButton(onClick = { showPalette = true }) {
-                    Icon(Icons.Filled.List, contentDescription = "Command palette (Ctrl+K)", tint = ide.violet)
+                    Icon(Icons.Filled.List, contentDescription = "Command palette (Ctrl+K)", tint = ide.dim)
                 }
-                IconButton(onClick = { vm.darkTheme = !vm.darkTheme }) {
-                    Icon(
-                        if (vm.darkTheme) Icons.Filled.LightMode else Icons.Filled.DarkMode,
-                        contentDescription = "Theme (Ctrl+T)",
-                        tint = ide.amber
-                    )
-                }
-                IconButton(onClick = { openFile() }) {
-                    Icon(Icons.Filled.FolderOpen, contentDescription = "Open APK / ELF / EXE (Ctrl+O)", tint = ide.cyan)
-                }
-                IconButton(onClick = { vm.saveProject(ctx, vm.meta?.name ?: "project") }) {
-                    Icon(Icons.Filled.Save, contentDescription = "Save project (Ctrl+S)", tint = ide.text)
-                }
-                IconButton(onClick = { showAbout = true }) {
-                    Icon(Icons.Filled.Info, contentDescription = "Help (F1)", tint = ide.dim)
+                Box {
+                    IconButton(onClick = { showOverflow = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = ide.dim)
+                    }
+                    DropdownMenu(
+                        expanded = showOverflow,
+                        onDismissRequest = { showOverflow = false },
+                        containerColor = ide.panel2
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Save project", color = ide.text, fontSize = 13.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Save, null, tint = ide.dim,
+                                    modifier = Modifier.size(18.dp))
+                            },
+                            enabled = vm.meta != null,
+                            onClick = {
+                                showOverflow = false
+                                vm.saveProject(ctx, vm.meta?.name ?: "project")
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (vm.darkTheme) "Light theme" else "Dark theme",
+                                    color = ide.text, fontSize = 13.sp)
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (vm.darkTheme) Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                                    null, tint = ide.dim, modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = { showOverflow = false; vm.darkTheme = !vm.darkTheme }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Shortcuts", color = ide.text, fontSize = 13.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Keyboard, null, tint = ide.dim,
+                                    modifier = Modifier.size(18.dp))
+                            },
+                            onClick = { showOverflow = false; showShortcutsHelp = true }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("About", color = ide.text, fontSize = 13.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Info, null, tint = ide.dim,
+                                    modifier = Modifier.size(18.dp))
+                            },
+                            onClick = { showOverflow = false; showAbout = true }
+                        )
+                    }
                 }
             }
 
@@ -274,105 +323,161 @@ fun StudioApp(vm: StudioViewModel) {
 @Composable
 private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit) {
     val ide = LocalIde.current
+    val ctx = LocalContext.current
     Box(Modifier.fillMaxSize().background(ide.bg)) {
-        // Two soft glows keep a near-black screen from reading as dead space.
         Box(
             Modifier
-                .offset(x = (-60).dp, y = 110.dp)
-                .size(380.dp)
+                .offset(x = (-70).dp, y = 20.dp)
+                .size(320.dp)
                 .background(
-                    Brush.radialGradient(
-                        listOf(ide.accent.copy(alpha = 0.13f), Color.Transparent)
-                    ),
+                    Brush.radialGradient(listOf(ide.accent.copy(alpha = 0.13f), Color.Transparent)),
                     CircleShape
                 )
         )
         Box(
             Modifier
                 .align(Alignment.TopEnd)
-                .offset(x = 90.dp, y = 260.dp)
-                .size(300.dp)
+                .offset(x = 80.dp, y = 120.dp)
+                .size(240.dp)
                 .background(
-                    Brush.radialGradient(
-                        listOf(ide.violet.copy(alpha = 0.09f), Color.Transparent)
-                    ),
+                    Brush.radialGradient(listOf(ide.violet.copy(alpha = 0.09f), Color.Transparent)),
                     CircleShape
                 )
         )
 
-        Column(Modifier.fillMaxSize()) {
+        // Top-aligned rather than centred: centring left roughly a third of the
+        // screen empty above the wordmark and another gap below it, and pushed
+        // the recent list off the first screen.
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+        ) {
             Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp),
-                verticalArrangement = Arrangement.Center,
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                Spacer(Modifier.height(28.dp))
                 Text(
-                    "Nocturne", color = ide.text, fontSize = 44.sp,
-                    fontWeight = FontWeight.Light, letterSpacing = (-1.6).sp
+                    "Nocturne", color = ide.text, fontSize = 34.sp,
+                    fontWeight = FontWeight.Light, letterSpacing = (-1.2).sp
                 )
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     "Interactive disassembler & decompiler",
-                    color = ide.dim, fontSize = 13.sp, letterSpacing = 0.2.sp
+                    color = ide.dim, fontSize = 12.sp
                 )
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(16.dp))
                 ArchChips()
-                Spacer(Modifier.height(34.dp))
+                Spacer(Modifier.height(20.dp))
 
-                // A plain Box rather than a Material Button, so the corner
-                // radius, height and accent shadow match the spec exactly.
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
-                        .shadow(18.dp, RoundedCornerShape(14.dp), clip = false,
+                        .height(48.dp)
+                        .shadow(16.dp, RoundedCornerShape(13.dp), clip = false,
                             ambientColor = ide.accent, spotColor = ide.accent)
                         .background(
                             if (vm.busy) ide.accent.copy(alpha = 0.45f) else ide.accent,
-                            RoundedCornerShape(14.dp)
+                            RoundedCornerShape(13.dp)
                         )
                         .clickable(enabled = !vm.busy) { onOpen() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Filled.FolderOpen, contentDescription = null,
-                            tint = Color(0xFF14020A), modifier = Modifier.size(19.dp)
-                        )
-                        Spacer(Modifier.width(9.dp))
-                        Text(
-                            "Open a binary", color = Color(0xFF14020A),
-                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold
-                        )
+                    if (vm.busy) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                color = Color(0xFF14020A),
+                                modifier = Modifier.size(16.dp), strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "Analyzing\u2026", color = Color(0xFF14020A),
+                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.FolderOpen, contentDescription = null,
+                                tint = Color(0xFF14020A), modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(9.dp))
+                            Text(
+                                "Open a binary", color = Color(0xFF14020A),
+                                fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
 
-                Spacer(Modifier.height(18.dp))
-                if (vm.busy) {
-                    CircularProgressIndicator(
-                        color = ide.accent,
-                        modifier = Modifier.size(30.dp), strokeWidth = 2.dp
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Text("Analyzing\u2026", color = ide.dim, fontSize = 12.sp)
-                } else {
-                    Text(
-                        "Ctrl+K  palette     Ctrl+F  search     F1  shortcuts",
-                        color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp,
-                        fontFamily = Mono, letterSpacing = 0.3.sp
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        ".so   .dex   .exe   .apk",
-                        color = ide.dim.copy(alpha = 0.5f), fontSize = 11.sp, fontFamily = Mono
-                    )
-                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Ctrl+K palette   ·   Ctrl+F search   ·   F1 shortcuts",
+                    color = ide.dim.copy(alpha = 0.55f), fontSize = 10.sp, fontFamily = Mono
+                )
             }
 
+            // Recents belong on the first screen, not only behind the drawer —
+            // reopening the last binary is the most common way in.
+            if (vm.recents.isNotEmpty()) {
+                Spacer(Modifier.height(22.dp))
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Text(
+                        "RECENT", color = ide.dim, fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium, letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${vm.recents.size}",
+                        color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp, fontFamily = Mono
+                    )
+                }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    vm.recents.take(4).forEach { rp ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp)
+                                .border(1.dp, ide.border, RoundedCornerShape(11.dp))
+                                .background(ide.panel, RoundedCornerShape(11.dp))
+                                .clickable { vm.openRecent(ctx, rp) }
+                                .padding(horizontal = 13.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                fileIcon(rp.format), contentDescription = null,
+                                tint = ide.dim, modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(11.dp))
+                            Text(
+                                rp.name, color = ide.text, fontSize = 12.5.sp,
+                                fontFamily = Mono, maxLines = 1,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                rp.format.ifEmpty { "RAW" },
+                                color = ide.dim.copy(alpha = 0.7f), fontSize = 9.5.sp,
+                                fontFamily = Mono
+                            )
+                        }
+                    }
+                }
+            } else {
+                Spacer(Modifier.height(22.dp))
+                Text(
+                    ".so    .dex    .exe    .apk",
+                    color = ide.dim.copy(alpha = 0.45f), fontSize = 11.sp, fontFamily = Mono,
+                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
             ConsoleCard(vm)
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
@@ -409,7 +514,7 @@ private fun ConsoleCard(vm: StudioViewModel) {
     val ide = LocalIde.current
     Column(
         Modifier
-            .padding(start = 16.dp, end = 16.dp, bottom = 20.dp)
+            .padding(horizontal = 16.dp)
             .fillMaxWidth()
             .border(1.dp, ide.border, RoundedCornerShape(14.dp))
             .background(ide.panel, RoundedCornerShape(14.dp))
@@ -431,7 +536,7 @@ private fun ConsoleCard(vm: StudioViewModel) {
             )
         }
         Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 13.dp)) {
-            vm.console.takeLast(3).forEach { line ->
+            vm.console.takeLast(2).forEach { line ->
                 Row {
                     Text(
                         "[${line.level.lowercase()}] ",

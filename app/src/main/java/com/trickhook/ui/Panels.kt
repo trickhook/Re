@@ -27,6 +27,9 @@ import androidx.compose.material.icons.filled.Subject
 import androidx.compose.material3.Icon
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -135,6 +138,25 @@ fun AssemblyPanel(vm: StudioViewModel) {
                         color = ide.dim, fontSize = 10.sp, fontFamily = Mono, maxLines = 1
                     )
                 }
+                val clip = LocalClipboardManager.current
+                Icon(
+                    Icons.Filled.ContentCopy, contentDescription = "Copy listing",
+                    tint = ide.dim,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clickable {
+                            val text = d.asm.joinToString("\n") { l ->
+                                buildString {
+                                    append(hexFmt(l.addr)); append("  "); append(l.mnem)
+                                    if (l.ops.isNotEmpty()) { append(' '); append(l.ops) }
+                                    if (l.comment.isNotEmpty()) { append("    ; "); append(l.comment) }
+                                }
+                            }
+                            clip.setText(AnnotatedString(text))
+                            vm.log("OK", "Listing copied to the clipboard (${d.asm.size} lines)")
+                        }
+                        .padding(6.dp)
+                )
             }
             LazyColumn(Modifier.fillMaxSize().background(ide.bg)) {
                 items(d.asm.size) { i ->
