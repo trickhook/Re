@@ -27,6 +27,14 @@ public:
     // Interactive debugger session command (JSON in, JSON out)
     std::string dbgCmd(const std::string& json);
 
+    // Produce a source listing from the analysis — the equivalent of IDA's
+    // "produce file". Writes to outPath (a real filesystem path, not a content
+    // URI) so a whole-binary listing never has to be held in memory as a
+    // Java string, and returns a small JSON status.
+    //   kind: "c-one" (function at addr) | "c-all" | "h-all" | "asm-all"
+    std::string exportSource(const std::string& path, const std::string& kind,
+                             u64 addr, const std::string& outPath);
+
     // Run a SakoScript plugin; effects (rename/comment/bookmark) returned as
     // JSON list for the app to persist. Analysis context from path (optional).
     std::string scriptRun(const std::string& source, const std::string& path);

@@ -39,6 +39,16 @@ Java_com_trickhook_engine_NativeBridge_nativeCallGraph(JNIEnv* env, jobject, jst
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeExportSource(JNIEnv* env, jobject, jstring jpath,
+                                                          jstring jkind, jlong addr,
+                                                          jstring jout) {
+    std::string path = toStdString(env, jpath);
+    std::string kind = toStdString(env, jkind);
+    std::string out  = toStdString(env, jout);
+    return toJString(env, sako::Engine::instance().exportSource(path, kind, u64(addr), out));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeDbgCmd(JNIEnv* env, jobject, jstring jcmd) {
     std::string cmd = toStdString(env, jcmd);
     return toJString(env, sako::Engine::instance().dbgCmd(cmd));

@@ -1,20 +1,44 @@
 package com.trickhook.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.DataObject
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -108,13 +132,17 @@ fun DecompilePanel(vm: StudioViewModel) {
         }
         val pseudo = d?.pseudo
         if (pseudo.isNullOrEmpty()) {
-            Hint(
-                "Select a function to decompile — dooro shaqo si aad u hesho pseudo-C.",
-                "Pipeline: assembly lifted to an expression IR, propagated, then structured (while/if/calls with args)."
-            )
+            Box(Modifier.weight(1f)) {
+                Hint(
+                    "Select a function to decompile.",
+                    "Pipeline: assembly lifted to an expression IR, propagated, then structured (while/if/calls with args)."
+                )
+            }
         } else {
             val annotated = remember(pseudo, vm.darkTheme) { highlightPseudo(pseudo, ide) }
-            SelectionContainer {
+            // weight() is a ColumnScope modifier, so it belongs on the container
+            // here rather than on the Text inside SelectionContainer's lambda.
+            SelectionContainer(Modifier.weight(1f).fillMaxWidth()) {
                 Text(
                     annotated,
                     fontFamily = Mono, fontSize = 12.sp, lineHeight = 17.sp,
@@ -124,6 +152,116 @@ fun DecompilePanel(vm: StudioViewModel) {
                         .horizontalScroll(rememberScrollState())
                         .padding(12.dp)
                 )
+            }
+        }
+        // Whole-binary export does not need a selected function, so the bar is
+        // available whenever something is loaded.
+        if (vm.meta != null) ExportBar(vm)
+    }
+}
+
+private data class ExportKind(
+    val id: String,
+    val icon: ImageVector,
+    val title: String,
+    val detail: String
+)
+
+/**
+ * Export the decompiled output to a file the user picks — the equivalent of
+ * IDA's File > Produce file. The engine writes the listing itself; this only
+ * chooses the shape and the destination.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ExportBar(vm: StudioViewModel) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+    var sheetOpen by remember { mutableStateOf(false) }
+    var kind by remember { mutableStateOf("c-all") }
+
+    val save = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(vm.mimeForExport(kind))
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, kind) }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(ide.panel)
+            .clickable(enabled = !vm.exportBusy) { sheetOpen = true }
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Filled.FileDownload, contentDescription = null,
+            tint = if (vm.exportBusy) ide.dim else ide.accent,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (vm.exportBusy) "Exporting…" else "Export as source",
+            color = if (vm.exportBusy) ide.dim else ide.text,
+            fontSize = 13.sp, fontWeight = FontWeight.Medium
+        )
+    }
+
+    if (sheetOpen) {
+        val kinds = listOf(
+            ExportKind("c-one", Icons.Filled.Description, "This function",
+                vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected"),
+            ExportKind("c-all", Icons.Filled.Code, "Whole binary",
+                "${vm.meta?.functions?.size ?: 0} functions as pseudo-C"),
+            ExportKind("h-all", Icons.Filled.Subject, "Header stub",
+                "signatures only, no bodies"),
+            ExportKind("asm-all", Icons.Filled.DataObject, "Assembly listing",
+                "disassembly with auto-comments")
+        )
+        ModalBottomSheet(
+            onDismissRequest = { sheetOpen = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = ide.panel
+        ) {
+            Column(Modifier.padding(bottom = 22.dp)) {
+                Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
+                    Text("Export decompiled output", color = ide.text,
+                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        "Reconstructed from machine code — it will not recompile as-is.",
+                        color = ide.dim, fontSize = 11.5.sp
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                kinds.forEach { k ->
+                    val enabled = k.id != "c-one" || vm.detail != null
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = enabled) {
+                                kind = k.id
+                                sheetOpen = false
+                                save.launch(vm.suggestedExportName(k.id))
+                            }
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            k.icon, contentDescription = null,
+                            tint = if (enabled) ide.accent else ide.dim,
+                            modifier = Modifier.size(19.dp)
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                k.title,
+                                color = if (enabled) ide.text else ide.dim,
+                                fontSize = 13.5.sp, fontWeight = FontWeight.Medium
+                            )
+                            Text(k.detail, color = ide.dim, fontSize = 10.5.sp, fontFamily = Mono)
+                        }
+                    }
+                    HorizontalDivider(color = ide.border.copy(alpha = 0.5f))
+                }
             }
         }
     }

@@ -394,6 +394,80 @@ class StudioViewModel : ViewModel() {
 
     fun listProjects(context: Context): List<RecentProject> = database(context).recentProjects(24)
 
+    // ---------------------------------------------------------------- export --
+    // IDA's "produce file": turn the analysis into a source listing on disk.
+
+    var exportBusy by mutableStateOf(false); private set
+
+    /** Default filename offered to the file picker for each export kind. */
+    fun suggestedExportName(kind: String): String {
+        val stem = (meta?.name ?: "binary").substringBeforeLast('.')
+        return when (kind) {
+            "c-one" -> (detail?.name?.takeIf { it.isNotBlank() } ?: "function") + ".c"
+            "h-all" -> "$stem.h"
+            "asm-all" -> "$stem.asm"
+            else -> "$stem.c"
+        }
+    }
+
+    fun mimeForExport(kind: String): String =
+        if (kind == "asm-all") "text/plain" else "text/x-c"
+
+    /**
+     * The engine writes the listing to a private cache file, which is then
+     * streamed to the document the user picked. Going through a file keeps a
+     * whole-binary export — which can run to megabytes — out of the heap, and
+     * means a failed write never leaves a half-written document behind.
+     */
+    fun exportSource(context: Context, uri: Uri, kind: String) {
+        val path = currentPath
+        if (path == null) { log("ERROR", "Nothing to export — open a binary first"); return }
+        if (exportBusy) return
+        exportBusy = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val tmp = File(context.cacheDir, "export.tmp")
+            try {
+                val addr = selectedFunc ?: 0L
+                val status = NativeBridge.nativeExportSource(path, kind, addr, tmp.absolutePath)
+                val ok = Regex("\"ok\"\\s*:\\s*true").containsMatchIn(status)
+                if (!ok) {
+                    val err = Regex("\"error\"\\s*:\\s*\"([^\"]*)\"")
+                        .find(status)?.groupValues?.get(1) ?: "export failed"
+                    log("ERROR", err)
+                    return@launch
+                }
+                context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                    tmp.inputStream().use { it.copyTo(out, 64 * 1024) }
+                } ?: run {
+                    log("ERROR", "Could not open the chosen file for writing")
+                    return@launch
+                }
+                val fns = Regex("\"functions\"\\s*:\\s*(\\d+)").find(status)?.groupValues?.get(1)
+                val bytes = Regex("\"bytes\"\\s*:\\s*(\\d+)").find(status)?.groupValues?.get(1)?.toLongOrNull()
+                val what = when (kind) {
+                    "c-one" -> "function"
+                    "h-all" -> "header"
+                    "asm-all" -> "assembly listing"
+                    else -> "source"
+                }
+                log("OK", "Exported $what" +
+                        (fns?.let { " · $it functions" } ?: "") +
+                        (bytes?.let { " · ${humanBytes(it)}" } ?: ""))
+            } catch (e: Exception) {
+                log("ERROR", "export failed: ${e.message}")
+            } finally {
+                tmp.delete()
+                exportBusy = false
+            }
+        }
+    }
+
+    private fun humanBytes(n: Long): String = when {
+        n >= 1024L * 1024 -> "%.1f MB".format(n / 1024.0 / 1024.0)
+        n >= 1024L -> "%.0f KB".format(n / 1024.0)
+        else -> "$n B"
+    }
+
     // -------------------------------------------------------------- debugger --
     fun debugRun(argv: List<String>, maxEvents: Int) {
         if (debugRunning || argv.isEmpty()) return

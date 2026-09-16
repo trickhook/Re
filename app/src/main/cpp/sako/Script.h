@@ -1,4 +1,4 @@
-// SakoScript — a tiny interpreter powering the SakoRE plugin system.
+// NocturneScript — the embedded interpreter behind the plugin system.
 // Language: numbers (double), strings, booleans, objects (from host),
 // variables, arithmetic, comparisons, if/else, while, for-in-range,
 // user functions, and host API builtins (bound to an analysis context).

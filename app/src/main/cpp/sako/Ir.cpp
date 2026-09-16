@@ -913,7 +913,7 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
         if (i) head << ", ";
         head << "u64 " << argsSorted[i];
     }
-    head << ") {  // SakoRE IR\n";
+    head << ") {  // Nocturne IR\n";
 
     // declarations: only registers actually written via statements
     std::set<std::string> writtenRegs;

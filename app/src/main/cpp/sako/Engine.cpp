@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include <fstream>
 #include "Binary.h"
 #include "DebugSession.h"
 #include "Script.h"
@@ -732,6 +733,178 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
     }
     out << "]}";
     return out.str();
+}
+
+// --------------------------------------------------------------- export --
+namespace {
+
+// Decompile one function exactly the way functionDetail does, so an exported
+// listing matches what the Pseudo-C tab shows — same disassembly, same
+// auto-comments, same IR-with-heuristic-fallback choice.
+struct FnSource {
+    std::vector<AsmLine> lines;
+    std::string pseudo;
+    std::string mode;
+    u64 size = 0;
+};
+
+std::string fnSignature(const FuncInfo& f) {
+    std::string n = f.name;
+    if (looksMangled(n)) {
+        std::string d = demangle(n);
+        if (!d.empty()) n = d;
+    }
+    // The IR lifter types everything as u64; a signature-only header should say
+    // so rather than invent argument lists it cannot recover.
+    return "u64 " + n + "(void)";
+}
+
+} // namespace
+
+std::string Engine::exportSource(const std::string& path, const std::string& kind,
+                                 u64 addr, const std::string& outPath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensureCtx(path);
+    Ctx& c = ctx_;
+    std::ostringstream st;
+
+    if (c.backend.empty()) {
+        st << "{\"ok\":false,\"error\":\"No disassembler for this architecture\"}";
+        return st.str();
+    }
+
+    std::ofstream f(outPath, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        st << "{\"ok\":false,\"error\":\"Cannot write the output file\"}";
+        return st.str();
+    }
+
+    const bool wantAsm = (kind == "asm-all");
+    const bool wantHdr = (kind == "h-all");
+    const bool wantOne = (kind == "c-one");
+
+    std::string base = c.bin.path;
+    size_t slash = base.find_last_of('/');
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+
+    f << "/*\n";
+    f << " * " << (wantAsm ? "Assembly listing" : wantHdr ? "Header stub" : "Decompiled source")
+      << " produced by Nocturne\n";
+    f << " *\n";
+    f << " * Binary      : " << base << "\n";
+    f << " * Format      : " << (c.fmt == Fmt::ELF ? "ELF" : c.fmt == Fmt::PE ? "PE"
+                                 : c.fmt == Fmt::DEX ? "DEX" : "raw") << "\n";
+    f << " * Architecture: " << (c.arch.empty() ? "-" : c.arch) << "\n";
+    f << " * Disassembler: " << c.backend << "\n";
+    f << " *\n";
+    f << " * This is reconstructed from machine code, not original source. The IR\n";
+    f << " * lifter types every value as u64 and does not recover argument lists,\n";
+    f << " * structs, vtables or exception handling. It will not recompile as-is.\n";
+    f << " */\n\n";
+
+    if (!wantAsm) {
+        f << "#include <stdint.h>\n\n";
+        f << "typedef uint8_t  u8;\ntypedef uint16_t u16;\n";
+        f << "typedef uint32_t u32;\ntypedef uint64_t u64;\n\n";
+    }
+
+    std::map<u64, std::string> labels;
+    for (auto& fn : c.funcs) labels[fn.addr] = fn.name;
+
+    auto buildFnSource = [&](const FuncInfo& fn, FnSource& out) -> bool {
+        u64 o = vaToOff(c, fn.addr);
+        if (o == ~u64(0) || o >= c.bin.data.size()) return false;
+        u64 sz = std::min<u64>(fn.size ? fn.size : 512, 65536);
+        sz = std::min<u64>(sz, u64(c.bin.data.size()) - o);
+        if (!sz) return false;
+
+        if (c.dis.armDualMode()) c.dis.setDefaultThumb(fn.thumb);
+        out.lines = c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr, 4096);
+
+        int runStart = -1, run = 0;
+        for (size_t i = 0; i < out.lines.size(); ++i) {
+            bool allZero = !out.lines[i].bytes.empty();
+            for (char ch : out.lines[i].bytes)
+                if (ch != '0' && ch != ' ') { allZero = false; break; }
+            if (allZero) {
+                if (run == 0) runStart = int(i);
+                if (++run >= 4) { out.lines.resize(size_t(runStart)); break; }
+            } else run = 0;
+        }
+
+        autoComment(c.arch, out.lines, c.names, c.strings, fn.addr, fn.addr + sz);
+        IrResult ir = decompileIR(out.lines, c.arch, fn.addr, fn.name, c.names, c.strings);
+        out.pseudo = ir.ok ? ir.text : genPseudo(out.lines, c.arch, fn.addr, fn.name, labels);
+        out.mode = ir.ok ? "IR" : "heuristic";
+        out.size = sz;
+        return true;
+    };
+
+    std::vector<const FuncInfo*> targets;
+    if (wantOne) {
+        for (auto& fn : c.funcs)
+            if (fn.addr == addr) { targets.push_back(&fn); break; }
+        if (targets.empty()) {
+            for (auto& fn : c.funcs)
+                if (addr >= fn.addr && addr < fn.addr + fn.size) { targets.push_back(&fn); break; }
+        }
+        if (targets.empty()) {
+            st << "{\"ok\":false,\"error\":\"No function at that address\"}";
+            return st.str();
+        }
+    } else {
+        for (auto& fn : c.funcs)
+            if (fn.from != "import") targets.push_back(&fn);
+    }
+
+    if (wantHdr) {
+        f << "/* " << targets.size() << " functions */\n\n";
+        for (auto* fn : targets)
+            f << fnSignature(*fn) << ";  /* 0x" << std::hex << std::uppercase
+              << fn->addr << std::dec << std::nouppercase << " */\n";
+        f << "\n";
+        f.flush();
+        st << "{\"ok\":true,\"functions\":" << targets.size() << ",\"bytes\":" << u64(f.tellp()) << "}";
+        return st.str();
+    }
+
+    size_t done = 0, failed = 0;
+    FnSource src;
+    for (auto* fn : targets) {
+        src = FnSource{};
+        if (!buildFnSource(*fn, src)) { ++failed; continue; }
+
+        f << "/* ---------------------------------------------------------------\n";
+        f << "   " << fn->name << "\n";
+        f << "   0x" << std::hex << std::uppercase << fn->addr << std::dec << std::nouppercase
+          << "  ·  " << src.size << " bytes";
+        if (!wantAsm) f << "  ·  " << src.mode;
+        f << "\n   --------------------------------------------------------------- */\n";
+
+        if (wantAsm) {
+            for (auto& l : src.lines) {
+                char buf[32];
+                snprintf(buf, sizeof buf, "%08llX", (unsigned long long)l.addr);
+                f << buf << "  " << l.mnem;
+                if (!l.ops.empty()) f << " " << l.ops;
+                if (!l.comment.empty()) f << "    ; " << l.comment;
+                f << "\n";
+            }
+        } else {
+            f << src.pseudo;
+            if (!src.pseudo.empty() && src.pseudo.back() != '\n') f << "\n";
+        }
+        f << "\n";
+        ++done;
+    }
+
+    f.flush();
+    long long bytes = (long long)f.tellp();
+    f.close();
+
+    st << "{\"ok\":true,\"functions\":" << done << ",\"failed\":" << failed
+       << ",\"bytes\":" << bytes << "}";
+    return st.str();
 }
 
 } // namespace sako

@@ -1,4 +1,4 @@
-// Sako RE Studio — common types & helpers
+// Nocturne — common types & helpers
 #pragma once
 #include <cstdint>
 #include <cstddef>

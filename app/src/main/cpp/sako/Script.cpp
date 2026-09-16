@@ -1,4 +1,4 @@
-// SakoScript interpreter implementation.
+// NocturneScript interpreter implementation.
 // Tokenizer -> recursive-descent parser (AST as closures) -> evaluator.
 #include "Script.h"
 #include <cctype>
@@ -51,8 +51,13 @@ struct SakoScript::Impl {
                 while (i < src.size() && src[i] != '\n') ++i;
                 continue;
             }
+            // A leading-dot number (".5") must not swallow the second dot of a
+            // range: in "0..3" the first dot is already guarded below, but
+            // without this the second would lex as the number 0.3 and the
+            // for-range parser would see DOT NUM instead of DOT DOT.
             if (isdigit((unsigned char)c) ||
-                (c == '.' && i + 1 < src.size() && isdigit((unsigned char)src[i + 1]))) {
+                (c == '.' && i + 1 < src.size() && isdigit((unsigned char)src[i + 1]) &&
+                 !(i > 0 && src[i - 1] == '.'))) {
                 size_t s = i;
                 int dots = 0;
                 bool hex = (c == '0' && i + 1 < src.size() &&
@@ -189,6 +194,11 @@ struct SakoScript::Impl {
     bool matchKw(const std::string& kw) {
         if (cur().t == T_KW && cur().s == kw) { advance(); return true; }
         return false;
+    }
+    // Non-consuming variant. The binary-operator loops advance() themselves,
+    // so testing with matchKw() there ate the right-hand operand.
+    bool checkKw(const std::string& kw) const {
+        return cur().t == T_KW && cur().s == kw;
     }
     bool expect(TokType t, const char* what) {
         if (check(t)) { advance(); return true; }
@@ -358,7 +368,7 @@ struct SakoScript::Impl {
     NodeP parseAnd() {
         auto l = parseCmp();
         if (!l) return nullptr;
-        while (check(T_ANDAND) || matchKw("and")) {
+        while (check(T_ANDAND) || checkKw("and")) {
             advance();
             auto r = parseCmp();
             if (!r) return nullptr;
@@ -372,7 +382,7 @@ struct SakoScript::Impl {
     NodeP parseOr() {
         auto l = parseAnd();
         if (!l) return nullptr;
-        while (check(T_OROR) || matchKw("or")) {
+        while (check(T_OROR) || checkKw("or")) {
             advance();
             auto r = parseAnd();
             if (!r) return nullptr;

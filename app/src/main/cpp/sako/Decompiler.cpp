@@ -67,7 +67,7 @@ std::string genPseudo(const std::vector<AsmLine>& lines, const std::string& arch
                       const std::map<u64, std::string>& labels) {
     std::ostringstream out;
     out << "void " << (funcName.empty() ? ("sub_" + hexAddr(funcStart).substr(2)) : funcName)
-        << "() {  // pseudo-C heuristic (SakoRE)\n";
+        << "() {  // pseudo-C heuristic (Nocturne)\n";
 
     // collect branch targets for labels
     std::set<u64> targets;
