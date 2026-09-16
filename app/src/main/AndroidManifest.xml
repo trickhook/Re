@@ -9,9 +9,24 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Nocturne">
 
+        <!--
+          configChanges: turning the phone sideways is the obvious response to
+          truncated disassembly, and recreating the Activity for it threw away
+          every panel's scroll position, search box and graph viewport. There
+          are no orientation- or size-qualified resources in this project, so
+          there is nothing for a recreation to re-resolve; Compose reacts to
+          the new configuration on its own. Font scale and night mode are
+          deliberately NOT listed — those are rare and a clean recreation is
+          the right answer there.
+
+          adjustResize so WindowInsets.ime is reported and imePadding() works
+          below API 30.
+        -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|layoutDirection"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

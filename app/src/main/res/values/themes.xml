@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      The system bars are transparent because the app draws behind them
+      (enableEdgeToEdge in MainActivity) and the Compose side owns the icon
+      appearance through WindowInsetsControllerCompat, following vm.darkTheme.
+
+      Both used to be pinned to #08060B, the dark background. In the light
+      theme that left a black navigation bar underneath dark gesture-pill and
+      back/home/recents icons — the bar was effectively invisible — while the
+      status bar was simultaneously told to draw dark icons on black.
+
+      windowBackground stays opaque: it is only the pre-inflation splash, and
+      the app starts in the dark theme.
+    -->
     <style name="Theme.Nocturne" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">#08060B</item>
-        <item name="android:navigationBarColor">#08060B</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">#08060B</item>
     </style>
 </resources>
