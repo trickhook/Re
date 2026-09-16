@@ -493,7 +493,7 @@ fun FunctionsPanel(vm: StudioViewModel) {
                     fontFamily = Mono, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = Space.l, bottom = Space.m)
+                        .padding(start = Space.l, end = Space.l, bottom = Space.m)
                 )
             }
         }

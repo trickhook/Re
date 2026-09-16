@@ -20,6 +20,14 @@ KOTLIN_STDLIB_MEMBERS = {
 }
 
 
+# Imports that resolve at a glance but not at the pinned versions. Add to this
+# whenever CI rejects one — the point is that the next person pays once, not
+# every time.
+ABSENT_IMPORTS = {
+    'androidx.compose.animation.using':
+        'use the ContentTransform(enter, exit, zIndex, sizeTransform) constructor',
+}
+
 def scan_models(path):
     """Property names per data class, and the element type of each List field."""
     props, list_elem = {}, {}
@@ -170,6 +178,30 @@ for dp, _, fns in os.walk(ROOT):
         for m in re.finditer(r"\$\{\s*'\$'\s*\}", t):
             bad.append("%s:%d `${'$'}` emits a literal dollar, not an interpolation"
                        % (p, t[:m.start()].count('\n') + 1))
+
+        # 7. Modifier.padding has four overloads — (all), (horizontal, vertical),
+        #    (start, top, end, bottom) and (PaddingValues). There is none that
+        #    mixes an axis argument with an edge argument, so
+        #    `padding(horizontal = x, bottom = y)` resolves to nothing and the
+        #    compiler prints all four candidates. It reads perfectly naturally,
+        #    which is exactly why it gets written.
+        for m in re.finditer(r'\.padding\(([^()]*(?:\([^()]*\)[^()]*)*)\)', t):
+            args = m.group(1)
+            axis = re.search(r'\b(horizontal|vertical)\s*=', args)
+            edge = re.search(r'\b(start|top|end|bottom)\s*=', args)
+            if axis and edge:
+                bad.append('%s:%d padding() mixes `%s` with `%s` — no such overload'
+                           % (p, t[:m.start()].count('\n') + 1, axis.group(1), edge.group(1)))
+
+        # 8. Imports that do not exist at the versions this project pins. Each
+        #    one here cost a CI cycle. `using` was an infix on ContentTransform
+        #    that androidx.compose.animation no longer exports — build the
+        #    ContentTransform with its four-argument constructor instead.
+        for fqn, why in ABSENT_IMPORTS.items():
+            m = re.search(r'^import %s\s*$' % re.escape(fqn), t, re.M)
+            if m:
+                bad.append('%s:%d `%s` does not exist here — %s'
+                           % (p, t[:m.start()].count('\n') + 1, fqn, why))
 
 for b in bad:
     print(b)

@@ -15,8 +15,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.using
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -676,26 +676,31 @@ private fun PanelHost(vm: StudioViewModel, popFlag: BooleanArray, modifier: Modi
             val rightwards = sameGroup &&
                 Tab.of(targetState.group).indexOf(targetState) >
                 Tab.of(initialState.group).indexOf(initialState)
+            // ContentTransform is built by hand rather than with `togetherWith`
+            // plus the `using` infix: `using` is not in androidx.compose.animation
+            // at the version this project pins, and the four-argument constructor
+            // carries the SizeTransform in the same place with no extra symbol.
             when {
-                ms == 0 ->
-                    (fadeIn(tween(0)) togetherWith fadeOut(tween(0))).using(sizing)
+                ms == 0 -> ContentTransform(
+                    fadeIn(tween(0)), fadeOut(tween(0)), 0f, sizing
+                )
 
-                !goingBack && !sameGroup ->
-                    (fadeIn(tween(ms)) + scaleIn(tween(ms), initialScale = 0.98f))
-                        .togetherWith(fadeOut(tween(ms)))
-                        .using(sizing)
+                !goingBack && !sameGroup -> ContentTransform(
+                    fadeIn(tween(ms)) + scaleIn(tween(ms), initialScale = 0.98f),
+                    fadeOut(tween(ms)), 0f, sizing
+                )
 
                 else -> {
                     val dir = if (rightwards) 1 else -1
                     // The outgoing panel gives way by a sixth of its width; a
                     // full counter-slide reads as two screens fighting, and this
                     // is a reading surface.
-                    (slideInHorizontally(tween(ms)) { w -> w * dir } + fadeIn(tween(ms)))
-                        .togetherWith(
-                            slideOutHorizontally(tween(ms)) { w -> -w * dir / 6 } +
-                                fadeOut(tween(ms))
-                        )
-                        .using(sizing)
+                    ContentTransform(
+                        slideInHorizontally(tween(ms)) { w -> w * dir } + fadeIn(tween(ms)),
+                        slideOutHorizontally(tween(ms)) { w -> -w * dir / 6 } +
+                            fadeOut(tween(ms)),
+                        0f, sizing
+                    )
                 }
             }
         }
