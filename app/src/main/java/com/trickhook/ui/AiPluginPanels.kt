@@ -18,6 +18,28 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.DataObject
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -153,52 +175,84 @@ fun PluginsPanel(vm: StudioViewModel) {
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.Bottom
         ) {
             Text(
-                "PLUGINS (NocturneScript)",
-                color = ide.text, fontSize = 12.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontFamily = Mono
+                "NOCTURNESCRIPT", color = ide.dim, fontSize = 10.sp,
+                fontWeight = FontWeight.Medium, letterSpacing = 1.sp
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
             Text(
                 "${vm.plugins.size} installed",
-                color = ide.dim, fontSize = 11.sp, fontFamily = Mono
+                color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp, fontFamily = Mono
             )
         }
-        LazyColumn(Modifier.weight(1f).background(ide.bg)) {
+        LazyColumn(
+            Modifier.weight(1f).background(ide.bg),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
             items(vm.plugins.size) { i ->
                 val p = vm.plugins[i]
+                val (icon, tint) = pluginIcon(p.id, ide)
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .background(ide.panel)
+                        .border(1.dp, ide.border, RoundedCornerShape(13.dp))
+                        .background(ide.panel, RoundedCornerShape(13.dp))
+                        .padding(horizontal = 14.dp, vertical = 13.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(28.dp)
+                                .background(tint.copy(alpha = 0.14f), RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(icon, contentDescription = null, tint = tint,
+                                modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                "${p.name} v${p.version}",
-                                color = ide.accent, fontSize = 13.sp, fontFamily = Mono,
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                p.name, color = ide.text, fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                p.description.ifEmpty { "by ${p.author}" },
-                                color = ide.dim, fontSize = 11.sp, maxLines = 2
+                                "v${p.version}",
+                                color = ide.dim.copy(alpha = 0.7f), fontSize = 9.5.sp,
+                                fontFamily = Mono
                             )
                         }
-                        Button(
-                            onClick = { vm.runPlugin(ctx, p) },
-                            enabled = !vm.pluginRunning
-                        ) { Text("Run", fontSize = 11.sp) }
+                        Box(
+                            Modifier
+                                .height(30.dp)
+                                .background(
+                                    if (vm.pluginRunning) ide.border
+                                    else ide.accent.copy(alpha = 0.15f),
+                                    RoundedCornerShape(9.dp)
+                                )
+                                .clickable(enabled = !vm.pluginRunning) { vm.runPlugin(ctx, p) }
+                                .padding(horizontal = 15.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "Run",
+                                color = if (vm.pluginRunning) ide.dim else ide.accent,
+                                fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                    if (p.description.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            p.description, color = ide.dim, fontSize = 11.5.sp,
+                            lineHeight = 16.sp
+                        )
                     }
                 }
             }
-            item { Spacer(Modifier.height(20.dp)) }
         }
         if (vm.pluginOutput.isNotEmpty()) {
             Text(
@@ -213,4 +267,19 @@ fun PluginsPanel(vm: StudioViewModel) {
             )
         }
     }
+}
+
+/** Icon and tint per bundled plugin, falling back to a generic extension mark. */
+private fun pluginIcon(id: String, ide: IdeColors): Pair<ImageVector, Color> = when (id) {
+    "security-auditor"   -> Icons.Filled.Shield to ide.red
+    "crypto-finder"      -> Icons.Filled.Lock to ide.amber
+    "anti-debug-scanner" -> Icons.Filled.BugReport to ide.violet
+    "jni-mapper"         -> Icons.Filled.Link to ide.cyan
+    "xref-hotspots"      -> Icons.Filled.TrendingUp to ide.accent
+    "attack-surface"     -> Icons.Filled.Public to ide.red
+    "string-triage"      -> Icons.Filled.TextFields to ide.cyan
+    "string-hunter"      -> Icons.Filled.Search to ide.cyan
+    "arm-analyzer"       -> Icons.Filled.Memory to ide.violet
+    "dex-helper"         -> Icons.Filled.DataObject to ide.amber
+    else                 -> Icons.Filled.Extension to ide.dim
 }

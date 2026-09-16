@@ -20,6 +20,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Android
@@ -265,57 +274,174 @@ fun StudioApp(vm: StudioViewModel) {
 @Composable
 private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit) {
     val ide = LocalIde.current
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            "Nocturne", color = ide.text, fontSize = 40.sp,
-            fontWeight = FontWeight.Light, letterSpacing = (-1).sp
+    Box(Modifier.fillMaxSize().background(ide.bg)) {
+        // Two soft glows keep a near-black screen from reading as dead space.
+        Box(
+            Modifier
+                .offset(x = (-60).dp, y = 110.dp)
+                .size(380.dp)
+                .background(
+                    Brush.radialGradient(
+                        listOf(ide.accent.copy(alpha = 0.13f), Color.Transparent)
+                    ),
+                    CircleShape
+                )
         )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Interactive disassembler & decompiler",
-            color = ide.dim, fontSize = 13.sp, letterSpacing = 0.2.sp
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .offset(x = 90.dp, y = 260.dp)
+                .size(300.dp)
+                .background(
+                    Brush.radialGradient(
+                        listOf(ide.violet.copy(alpha = 0.09f), Color.Transparent)
+                    ),
+                    CircleShape
+                )
         )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "ARM64 · ARM/Thumb · x86 · MIPS · PowerPC · SPARC · SystemZ · m68k",
-            color = ide.dim.copy(alpha = 0.7f), fontSize = 10.sp,
-            fontFamily = Mono, lineHeight = 15.sp
-        )
-        Spacer(Modifier.height(32.dp))
-        Button(onClick = onOpen, enabled = !vm.busy) {
-            Text("Open a binary", fontWeight = FontWeight.Medium)
+
+        Column(Modifier.fillMaxSize()) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Nocturne", color = ide.text, fontSize = 44.sp,
+                    fontWeight = FontWeight.Light, letterSpacing = (-1.6).sp
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Interactive disassembler & decompiler",
+                    color = ide.dim, fontSize = 13.sp, letterSpacing = 0.2.sp
+                )
+                Spacer(Modifier.height(22.dp))
+                ArchChips()
+                Spacer(Modifier.height(34.dp))
+
+                // A plain Box rather than a Material Button, so the corner
+                // radius, height and accent shadow match the spec exactly.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .shadow(18.dp, RoundedCornerShape(14.dp), clip = false,
+                            ambientColor = ide.accent, spotColor = ide.accent)
+                        .background(
+                            if (vm.busy) ide.accent.copy(alpha = 0.45f) else ide.accent,
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable(enabled = !vm.busy) { onOpen() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.FolderOpen, contentDescription = null,
+                            tint = Color(0xFF14020A), modifier = Modifier.size(19.dp)
+                        )
+                        Spacer(Modifier.width(9.dp))
+                        Text(
+                            "Open a binary", color = Color(0xFF14020A),
+                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+                if (vm.busy) {
+                    CircularProgressIndicator(
+                        color = ide.accent,
+                        modifier = Modifier.size(30.dp), strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text("Analyzing\u2026", color = ide.dim, fontSize = 12.sp)
+                } else {
+                    Text(
+                        "Ctrl+K  palette     Ctrl+F  search     F1  shortcuts",
+                        color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp,
+                        fontFamily = Mono, letterSpacing = 0.3.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        ".so   .dex   .exe   .apk",
+                        color = ide.dim.copy(alpha = 0.5f), fontSize = 11.sp, fontFamily = Mono
+                    )
+                }
+            }
+
+            ConsoleCard(vm)
         }
-        Spacer(Modifier.height(18.dp))
-        Text(
-            "Ctrl+K  palette     Ctrl+F  search     F1  shortcuts",
-            color = ide.dim.copy(alpha = 0.6f), fontSize = 10.sp, fontFamily = Mono
-        )
-        Spacer(Modifier.height(18.dp))
-        if (vm.busy) {
-            CircularProgressIndicator(color = ide.accent, modifier = Modifier.width(36.dp).height(36.dp))
-            Spacer(Modifier.height(10.dp))
-            Text("Analyzing\u2026", color = ide.dim, fontSize = 12.sp)
-        } else {
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ArchChips() {
+    val ide = LocalIde.current
+    // Colour ranks them: what the IR decompiler lifts, what only disassembles.
+    val chips = listOf(
+        "ARM64" to ide.violet, "ARM/Thumb" to ide.violet,
+        "x86-64" to ide.cyan, "x86" to ide.cyan,
+        "MIPS" to ide.dim, "PowerPC" to ide.dim,
+        "SPARC" to ide.dim, "SystemZ" to ide.dim, "m68k" to ide.dim
+    )
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        chips.forEach { (label, tint) ->
             Text(
-                ".so   .dex   .exe   .apk",
-                color = ide.dim.copy(alpha = 0.55f), fontSize = 11.sp,
-                fontFamily = Mono, lineHeight = 16.sp
+                label,
+                color = tint, fontSize = 10.sp, fontFamily = Mono,
+                modifier = Modifier
+                    .border(1.dp, ide.border, RoundedCornerShape(999.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }
-        Spacer(Modifier.weight(1f))
-        Column(Modifier.fillMaxWidth().background(ide.panel).padding(12.dp)) {
-            Text("Console", color = ide.dim, fontSize = 11.sp)
-            vm.console.takeLast(4).forEach { line ->
-                Text(
-                    "[${line.level}] ${line.msg}",
-                    color = levelColor(line.level, ide), fontSize = 10.sp, fontFamily = Mono
-                )
+    }
+}
+
+@Composable
+private fun ConsoleCard(vm: StudioViewModel) {
+    val ide = LocalIde.current
+    Column(
+        Modifier
+            .padding(start = 16.dp, end = 16.dp, bottom = 20.dp)
+            .fillMaxWidth()
+            .border(1.dp, ide.border, RoundedCornerShape(14.dp))
+            .background(ide.panel, RoundedCornerShape(14.dp))
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 11.dp, bottom = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(6.dp).background(ide.amber, CircleShape))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "CONSOLE", color = ide.dim, fontSize = 10.sp,
+                fontWeight = FontWeight.Medium, letterSpacing = 1.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${vm.plugins.size} plugins",
+                color = ide.dim.copy(alpha = 0.6f), fontSize = 9.sp, fontFamily = Mono
+            )
+        }
+        Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 13.dp)) {
+            vm.console.takeLast(3).forEach { line ->
+                Row {
+                    Text(
+                        "[${line.level.lowercase()}] ",
+                        color = levelColor(line.level, ide), fontSize = 10.sp, fontFamily = Mono
+                    )
+                    Text(
+                        line.msg, color = ide.dim, fontSize = 10.sp,
+                        fontFamily = Mono, lineHeight = 15.sp, maxLines = 2
+                    )
+                }
             }
         }
     }

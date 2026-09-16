@@ -21,6 +21,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material3.Icon
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -76,7 +82,7 @@ fun AssemblyPanel(vm: StudioViewModel) {
 
         if (d == null) {
             Hint(
-                "Select a function to disassemble — dooro shaqo si aad u arkid assembly.",
+                "Select a function to disassemble.",
                 "Capstone engine: ${meta?.backend ?: "-"} · arch: ${meta?.arch ?: "-"} · long-press a line to rename/comment/bookmark"
             )
         } else {
@@ -100,14 +106,36 @@ fun AssemblyPanel(vm: StudioViewModel) {
                     color = ide.amber, fontSize = 11.sp, fontFamily = Mono
                 )
             }
-            Text(
-                "${d.displayName.ifEmpty { d.name }} · ${hexFmt(d.addr)} · ${d.size} bytes · ${d.from}",
-                color = ide.dim, fontSize = 10.sp, fontFamily = Mono,
-                modifier = Modifier
+            Row(
+                Modifier
                     .fillMaxWidth()
-                    .background(ide.panel)
-                    .padding(horizontal = 10.dp)
-            )
+                    .padding(horizontal = 16.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(30.dp)
+                        .background(ide.accent.copy(alpha = 0.14f), RoundedCornerShape(9.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Subject, contentDescription = null,
+                        tint = ide.accent, modifier = Modifier.size(15.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        d.displayName.ifEmpty { d.name },
+                        color = ide.text, fontSize = 13.sp, fontFamily = Mono,
+                        fontWeight = FontWeight.Medium, maxLines = 1
+                    )
+                    Text(
+                        "${hexFmt(d.addr)} · ${d.size} bytes · ${d.from}",
+                        color = ide.dim, fontSize = 10.sp, fontFamily = Mono, maxLines = 1
+                    )
+                }
+            }
             LazyColumn(Modifier.fillMaxSize().background(ide.bg)) {
                 items(d.asm.size) { i ->
                     val line = d.asm[i]
@@ -234,33 +262,37 @@ private fun FunctionPicker(vm: StudioViewModel) {
 @Composable
 fun AsmRow(line: AsmLine, highlighted: Boolean) {
     val ide = LocalIde.current
+    // Raw bytes used to sit between the address and the mnemonic, which left
+    // almost no width for operands on a phone. They live in the Hex tab; here
+    // the four columns that matter get the space.
+    val marker = ide.accent
     Row(
         Modifier
             .fillMaxWidth()
-            .background(if (highlighted) ide.amber.copy(alpha = 0.18f) else Color.Transparent)
-            .padding(horizontal = 10.dp, vertical = 1.dp)
+            .background(if (highlighted) marker.copy(alpha = 0.09f) else Color.Transparent)
+            .drawBehind {
+                if (highlighted) drawRect(marker, size = Size(2.dp.toPx(), size.height))
+            }
+            .padding(start = 16.dp, end = 12.dp, top = 1.dp, bottom = 1.dp)
     ) {
         Text(
-            hexFmt(line.addr), color = ide.cyan, fontSize = 11.sp, fontFamily = Mono,
-            modifier = Modifier.width(76.dp)
-        )
-        Text(
-            line.bytes, color = ide.dim, fontSize = 11.sp, fontFamily = Mono,
-            modifier = Modifier.width(108.dp), maxLines = 1
+            hexFmt(line.addr), color = ide.dim.copy(alpha = 0.55f), fontSize = 11.sp,
+            fontFamily = Mono, modifier = Modifier.width(74.dp)
         )
         Text(
             line.mnem, color = mnemonicColor(line.mnem, ide), fontSize = 11.sp,
-            fontFamily = Mono, fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(88.dp)
+            fontFamily = Mono, fontWeight = FontWeight.Medium,
+            modifier = Modifier.width(60.dp), maxLines = 1
         )
         Text(
             line.ops, color = ide.text, fontSize = 11.sp, fontFamily = Mono,
             modifier = Modifier.weight(1f), maxLines = 1
         )
         if (line.comment.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
             Text(
-                "; ${line.comment}", color = ide.dim, fontSize = 10.5.sp, fontFamily = Mono,
-                maxLines = 1
+                "; ${line.comment}", color = ide.dim.copy(alpha = 0.55f), fontSize = 10.sp,
+                fontFamily = Mono, maxLines = 1
             )
         }
     }

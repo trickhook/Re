@@ -28,6 +28,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -109,26 +112,31 @@ fun DecompilePanel(vm: StudioViewModel) {
     val d = vm.detail
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 4.dp)
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Pseudo-C · " + (d?.displayName?.ifEmpty { d.name } ?: "—"),
-                color = ide.text, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = Mono
+                d?.displayName?.ifEmpty { d.name } ?: "—",
+                color = ide.text, fontSize = 13.sp,
+                fontWeight = FontWeight.Medium, fontFamily = Mono, maxLines = 1
             )
-            Spacer(Modifier.weight(1f))
-            val mode = d?.pseudoMode ?: ""
-            val stats = d?.irStats
-            Text(
-                buildString {
-                    append(if (mode == "IR") "ASM→IR→C" else "ASM→C (fallback)")
-                    if (stats != null && mode == "IR")
-                        append(" · ${stats.calls} calls · ${stats.whiles} while · ${stats.ifs} if")
-                },
-                color = if (mode == "IR") ide.accent else ide.dim, fontSize = 10.sp
-            )
+        }
+        // Pipeline stats as tinted chips: what the IR actually recovered, at a
+        // glance, instead of a run-on line of text.
+        val mode = d?.pseudoMode ?: ""
+        val stats = d?.irStats
+        Row(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            StatChip(if (mode == "IR") "ASM→IR→C" else "ASM→C fallback",
+                if (mode == "IR") ide.violet else ide.dim)
+            if (stats != null && mode == "IR") {
+                StatChip("${stats.stmts} IR", ide.cyan)
+                StatChip("${stats.calls} calls", ide.accent)
+                if (stats.whiles > 0) StatChip("${stats.whiles} loops", ide.amber)
+                if (stats.ifs > 0) StatChip("${stats.ifs} if", ide.dim)
+            }
         }
         val pseudo = d?.pseudo
         if (pseudo.isNullOrEmpty()) {
@@ -158,6 +166,16 @@ fun DecompilePanel(vm: StudioViewModel) {
         // available whenever something is loaded.
         if (vm.meta != null) ExportBar(vm)
     }
+}
+
+@Composable
+private fun StatChip(label: String, tint: Color) {
+    Text(
+        label, color = tint, fontSize = 9.5.sp, fontFamily = Mono,
+        modifier = Modifier
+            .background(tint.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
 }
 
 private data class ExportKind(
