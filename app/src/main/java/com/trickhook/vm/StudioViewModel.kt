@@ -27,14 +27,23 @@ import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
+import com.trickhook.model.IdaAnnotations
+import com.trickhook.model.IdaCommentRow
+import com.trickhook.model.IdaExport
+import com.trickhook.model.IdaMarkRow
+import com.trickhook.model.IdaNameRow
 import com.trickhook.model.ManifestInfo
 import com.trickhook.model.PluginDef
 import com.trickhook.model.Section
 import com.trickhook.model.ApkAnalyzer
+import com.trickhook.model.idaIdcScript
+import com.trickhook.model.idaPythonScript
 import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
 import com.trickhook.model.parseDetail
+import com.trickhook.model.parseHexAddr
+import com.trickhook.model.parseIdcAnnotations
 import com.trickhook.model.parseMeta
 import com.trickhook.model.parseScriptResult
 import kotlinx.coroutines.Dispatchers
@@ -898,12 +907,20 @@ class StudioViewModel : ViewModel() {
             "c-one" -> (detail?.name?.takeIf { it.isNotBlank() } ?: "function") + ".c"
             "h-all" -> "$stem.h"
             "asm-all" -> "$stem.asm"
+            "ida-py" -> "$stem-nocturne.py"
+            "ida-idc" -> "$stem-nocturne.idc"
             else -> "$stem.c"
         }
     }
 
-    fun mimeForExport(kind: String): String =
-        if (kind == "asm-all") "text/plain" else "text/x-c"
+    fun mimeForExport(kind: String): String = when (kind) {
+        "asm-all" -> "text/plain"
+        "ida-py" -> "text/x-python"
+        // No registered type for IDC, and text/plain is what makes a picker
+        // offer every folder rather than none.
+        "ida-idc" -> "text/plain"
+        else -> "text/x-c"
+    }
 
     /**
      * The engine writes the listing to a private cache file, which is then
@@ -915,6 +932,19 @@ class StudioViewModel : ViewModel() {
         val path = currentPath
         if (path == null) { log("ERROR", "Nothing to export — open a binary first"); return }
         if (exportBusy) return
+        // The two IDA kinds are written here rather than by the engine: what
+        // they carry is the annotation database, which the engine has never
+        // seen. Everything else about the export — the picker, the busy flag,
+        // the phase line — stays the same.
+        if (kind == "ida-py" || kind == "ida-idc") {
+            val model = idaExportModel()
+            if (model == null || model.total == 0) {
+                log("WARN", "Nothing to send to IDA yet — rename a function, write a comment or drop a bookmark first")
+                return
+            }
+            exportIdaScript(context, uri, kind, model)
+            return
+        }
         exportBusy = true
         val backend = if (decompiler == "ghidra" && sleighReady) "Ghidra" else "IR lifter"
         val scope = when (kind) {
@@ -979,6 +1009,292 @@ class StudioViewModel : ViewModel() {
             }
         }
     }
+
+    // --------------------------------------------------------- IDA Pro bridge --
+    // Triage on the phone, the deep work at the desk, and the names flow both
+    // ways. IDA itself is nowhere near this: what crosses is a text script the
+    // user runs in their own licensed copy, and a text file it can write back.
+
+    /** How many project notes the script header carries before it stops listing. */
+    private val idaNotesInHeader = 20
+
+    /**
+     * The user's own work, in address order, ready for the script generator.
+     *
+     * Built on the caller's thread because [renames], [comments] and
+     * [bookmarks] are Compose state that the UI thread owns; the generator
+     * itself is pure and runs on IO.
+     */
+    private fun idaExportModel(): IdaExport? {
+        val m = meta ?: return null
+        // Sorting by the address XOR the sign bit is the unsigned order: an
+        // address with the top bit set is a high address, not a negative one.
+        val nameRows = renames.mapNotNull { (key, value) ->
+            val addr = parseHexAddr(key)
+            if (addr == null) null else IdaNameRow(addr, value, functionAt(addr)?.name)
+        }.sortedBy { it.addr xor Long.MIN_VALUE }
+        val commentRows = comments.mapNotNull { (key, value) ->
+            val addr = parseHexAddr(key)
+            if (addr == null) null else IdaCommentRow(addr, value)
+        }.sortedBy { it.addr xor Long.MIN_VALUE }
+        val markRows = bookmarks.mapNotNull { b ->
+            val addr = parseHexAddr(b.addr)
+            if (addr == null) null else IdaMarkRow(addr, b.label)
+        }.sortedBy { it.addr xor Long.MIN_VALUE }
+
+        val all = notes()
+        val noteLines = ArrayList<String>()
+        for (n in all.take(idaNotesInHeader)) {
+            noteLines.add(if (n.body.isBlank()) n.title else n.title + " - " + n.body)
+        }
+        if (all.size > idaNotesInHeader) {
+            noteLines.add("(" + (all.size - idaNotesInHeader) + " more notes, not listed)")
+        }
+
+        // ELF and PE addresses are virtual; a DEX "function" is a code_item
+        // offset in the file, and Mach-O/raw never get past the hex view, so
+        // their addresses are offsets too.
+        val virtualAddresses = m.format == "ELF" || m.format == "PE"
+        return IdaExport(
+            binaryName = m.name,
+            format = m.format,
+            arch = m.arch,
+            base = m.base,
+            fileOffsets = !virtualAddresses,
+            names = nameRows,
+            comments = commentRows,
+            marks = markRows,
+            notes = noteLines,
+            stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+                .format(java.util.Date())
+        )
+    }
+
+    private fun exportIdaScript(context: Context, uri: Uri, kind: String, model: IdaExport) {
+        exportBusy = true
+        val idc = kind == "ida-idc"
+        decompilePhase = "Writing " + (if (idc) "IDC" else "IDAPython") + " script"
+        globalPhase = "Exporting"
+        decompileTargetName = model.binaryName
+        decompileStartMs = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val text = if (idc) idaIdcScript(model) else idaPythonScript(model)
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                var written = false
+                context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                    out.write(bytes)
+                    out.flush()
+                    written = true
+                }
+                if (!written) {
+                    log("ERROR", "Could not open the chosen file for writing")
+                    return@launch
+                }
+                log(
+                    "OK",
+                    "Exported " + (if (idc) "IDC" else "IDAPython") + " script · " +
+                        "${model.names.size} names · ${model.comments.size} comments · " +
+                        "${model.marks.size} bookmarks · ${humanBytes(bytes.size.toLong())}"
+                )
+            } catch (e: Exception) {
+                log("ERROR", "export failed: ${e.message}")
+            } finally {
+                exportBusy = false
+                withContext(Dispatchers.Main) {
+                    decompilePhase = ""
+                    decompileTargetName = ""
+                    decompileStartMs = 0L
+                    globalPhase = ""
+                }
+            }
+        }
+    }
+
+    var importBusy by mutableStateOf(false); private set
+
+    /**
+     * Read an IDA-produced file and put what it holds into this project.
+     *
+     * The file is IDA's "File > Produce file > Dump database to IDC file";
+     * [parseIdcAnnotations] says why that one and not a .map or a listing. It
+     * is streamed rather than read whole, because a database dump of a real
+     * binary is tens of megabytes and this is a phone.
+     */
+    fun importIdaAnnotations(context: Context, uri: Uri) {
+        if (meta == null) { log("ERROR", "Open a binary before importing from IDA"); return }
+        if (importBusy) return
+        importBusy = true
+        globalPhase = "Reading IDA annotations"
+        viewModelScope.launch {
+            try {
+                val parsed = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { ins ->
+                        ins.bufferedReader().useLines { lines -> parseIdcAnnotations(lines) }
+                    }
+                }
+                if (parsed == null) log("ERROR", "Could not read the chosen file")
+                else applyIdaAnnotations(context, parsed)
+            } catch (e: Exception) {
+                log("ERROR", "IDA import failed: ${e.message}")
+            } finally {
+                importBusy = false
+                globalPhase = ""
+            }
+        }
+    }
+
+    /** How many of [p]'s addresses mean something in this binary, shifted by [delta]. */
+    private fun scoreIdaDelta(p: IdaAnnotations, delta: Long): Int {
+        var hits = 0
+        for (a in p.names.keys) if (functionAt(a + delta) != null) hits++
+        for (a in p.comments.keys) if (functionContaining(a + delta) != null) hits++
+        for (a in p.marks.keys) if (functionContaining(a + delta) != null) hits++
+        return hits
+    }
+
+    /**
+     * Apply an IDA file through the ordinary annotation paths, so everything
+     * lands in ProjectDb and shows up wherever a rename or a comment already
+     * shows up.
+     *
+     * Every address is checked against this binary first. A name that matches
+     * nothing here is counted and reported rather than written: a silent
+     * partial import is the kind of answer that looks like it worked.
+     */
+    private fun applyIdaAnnotations(context: Context, p: IdaAnnotations) {
+        val m = meta ?: return
+        if (p.total == 0) {
+            log(
+                "ERROR",
+                "No names or comments in that file. Nocturne reads IDA's " +
+                    "\"File > Produce file > Dump database to IDC file\" output" +
+                    (if (p.unreadable > 0) " — ${p.unreadable} line(s) looked right but could not be read" else "")
+            )
+            return
+        }
+        // The same question the exported script asks, asked in reverse: IDA's
+        // addresses are IDA's. Try no shift, and the shift the file's own
+        // segment table implies, and keep whichever lands on real functions.
+        val deltas = ArrayList<Long>()
+        deltas.add(0L)
+        val seg = p.lowestSegment
+        if (seg != null && m.base != seg) deltas.add(m.base - seg)
+        var delta = 0L
+        var best = -1
+        for (d in deltas) {
+            val score = scoreIdaDelta(p, d)
+            if (score > best) { best = score; delta = d }
+        }
+        if (best <= 0) {
+            log(
+                "ERROR",
+                "None of the ${p.total} addresses in that file exist in this binary — " +
+                    "nothing was changed. Is it the same file, loaded at the same address?"
+            )
+            return
+        }
+        if (delta != 0L) {
+            val shift = if (delta < 0) "-0x%X".format(-delta) else "0x%X".format(delta)
+            log("INFO", "That file's addresses are $shift away from this binary's; applied with that shift")
+        }
+
+        var namesApplied = 0
+        var namesReplaced = 0
+        var namesSame = 0
+        var namesMissing = 0
+        var namesInside = 0
+        var cmtApplied = 0
+        var cmtSame = 0
+        var cmtMissing = 0
+        var markApplied = 0
+        var markSame = 0
+        var markMissing = 0
+
+        // One transaction around the lot. Each rename and comment still goes
+        // through its own public path — this only stops SQLite from committing
+        // (and fsyncing) once per row, which for a symbolised binary is
+        // thousands of commits on the main thread. It also makes the import
+        // all-or-nothing rather than half-applied if something throws.
+        val sql = database(context).writableDatabase
+        var committed = false
+        sql.beginTransaction()
+        try {
+            for ((addr0, name) in p.names) {
+                val addr = addr0 + delta
+                if (functionAt(addr) == null) {
+                    namesMissing++
+                    if (functionContaining(addr) != null) namesInside++
+                    continue
+                }
+                // effectiveFuncName covers both cases that are not a change:
+                // this project already renamed it that, or the engine read the
+                // very same name out of the symbol table.
+                if (effectiveFuncName(addr) == name) { namesSame++; continue }
+                if (renames["0x%08X".format(addr)] != null) namesReplaced++
+                renameFunction(context, addr, name)
+                namesApplied++
+            }
+
+            for ((addr0, text) in p.comments) {
+                val addr = addr0 + delta
+                if (!knownAddress(addr)) { cmtMissing++; continue }
+                if (comments["0x%08X".format(addr)] == text) { cmtSame++; continue }
+                addComment(context, addr, text)
+                cmtApplied++
+            }
+
+            for ((addr0, label) in p.marks) {
+                val addr = addr0 + delta
+                if (!knownAddress(addr)) { markMissing++; continue }
+                val key = "0x%08X".format(addr)
+                // addBookmark always inserts, so re-importing the same file
+                // would otherwise stack up duplicates.
+                if (bookmarks.any { it.addr == key && it.label == label }) { markSame++; continue }
+                addBookmark(context, addr, label)
+                markApplied++
+            }
+            sql.setTransactionSuccessful()
+            committed = true
+        } finally {
+            sql.endTransaction()
+            // A rollback leaves the in-memory maps ahead of the database, so
+            // re-read rather than leave the screen describing rows that are no
+            // longer there.
+            if (!committed) syncProjectAnnotations()
+        }
+
+        log(
+            "INFO",
+            "IDA file: ${p.lines} lines · names $namesApplied applied, $namesSame already matched, " +
+                "$namesMissing unmatched · comments $cmtApplied applied, $cmtSame already matched, " +
+                "$cmtMissing unmatched · bookmarks $markApplied added, $markSame already there, " +
+                "$markMissing unmatched"
+        )
+        if (namesReplaced > 0) {
+            log("INFO", "$namesReplaced of the applied names replaced a name typed here")
+        }
+        if (namesInside > 0) {
+            log("INFO", "$namesInside of the unmatched names point inside a function rather than at its start")
+        }
+        if (p.dummySkipped > 0) {
+            log("INFO", "${p.dummySkipped} name(s) IDA had generated for itself (sub_…, loc_…) were skipped")
+        }
+        if (p.unreadable > 0) {
+            log("INFO", "${p.unreadable} line(s) named a call we read but could not be parsed")
+        }
+        val applied = namesApplied + cmtApplied + markApplied
+        val missed = namesMissing + cmtMissing + markMissing
+        log(
+            if (missed > 0) "WARN" else "OK",
+            "Imported from IDA: $applied applied, ${namesSame + cmtSame + markSame} already matched" +
+                (if (missed > 0) ", $missed with no address in this binary" else "")
+        )
+    }
+
+    /** True when [addr] is somewhere this binary actually has: a function or a mapped section. */
+    private fun knownAddress(addr: Long): Boolean =
+        functionAt(addr) != null || functionContaining(addr) != null || fileOffsetOf(addr) != null
 
     fun savePluginLog(context: Context, uri: Uri) {
         val text = pluginOutput

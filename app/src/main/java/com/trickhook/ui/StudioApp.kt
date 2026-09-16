@@ -95,6 +95,7 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
@@ -193,6 +194,15 @@ fun StudioApp(vm: StudioViewModel) {
         uri?.let { vm.openUri(ctx, it) }
     }
     val openFile = { openLauncher.launch(arrayOf("*/*")) }
+
+    // The return leg of the IDA bridge. Registered up here beside openLauncher,
+    // not down in the menu that raises it: a launcher created inside a
+    // conditionally composed block is unregistered before its result lands.
+    // "*/*" because an .idc has no registered type and a filtered picker shows
+    // the file greyed out.
+    val importIdaLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { vm.importIdaAnnotations(ctx, it) } }
 
     // rememberSaveable, not remember: rotating recreates the Activity, and these
     // four are the only pieces of screen state StudioApp still owns — everything
@@ -424,6 +434,26 @@ fun StudioApp(vm: StudioViewModel) {
                                 onClick = { showOverflow = false; showExportSheet = true }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("Import from IDA…", color = ide.text, fontSize = Type.body)
+                                        Text(
+                                            "names and comments out of an IDC database dump",
+                                            color = ide.dim, fontSize = Type.caption
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.SaveAlt, null, tint = ide.dim,
+                                        modifier = Modifier.size(18.dp))
+                                },
+                                enabled = vm.meta != null && !vm.importBusy,
+                                onClick = {
+                                    showOverflow = false
+                                    importIdaLauncher.launch(arrayOf("*/*"))
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Save project", color = ide.text, fontSize = Type.body) },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Save, null, tint = ide.dim,
@@ -567,18 +597,21 @@ fun StudioApp(vm: StudioViewModel) {
         }
     }
 
-    CommandPaletteOverlay(vm, openFile)
+    CommandPaletteOverlay(vm, openFile, importIda = { importIdaLauncher.launch(arrayOf("*/*")) })
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
     if (showAnnotations) AnnotationsSheet(vm, onDismiss = { showAnnotations = false })
 
-    // Two contracts so the picker gets a sensible mime per shape; both are
-    // registered here, where they survive the sheet being dismissed.
+    // Three contracts so the picker gets a sensible mime per shape; all of them
+    // are registered here, where they survive the sheet being dismissed.
     val saveSource = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/x-c")
     ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
     val saveText = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
+    val savePython = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/x-python")
     ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
 
     if (showExportSheet && vm.meta != null) {
@@ -588,8 +621,11 @@ fun StudioApp(vm: StudioViewModel) {
                 exportKind = k
                 showExportSheet = false
                 val name = vm.suggestedExportName(k)
-                if (vm.mimeForExport(k) == "text/plain") saveText.launch(name)
-                else saveSource.launch(name)
+                when (vm.mimeForExport(k)) {
+                    "text/plain" -> saveText.launch(name)
+                    "text/x-python" -> savePython.launch(name)
+                    else -> saveSource.launch(name)
+                }
             },
             onDismiss = { showExportSheet = false }
         )

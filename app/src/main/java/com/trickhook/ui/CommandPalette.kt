@@ -83,7 +83,7 @@ private const val NUMBERED_TABS = 9
 private const val APK_MODE_DEX = 3
 
 @Composable
-fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
+fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: () -> Unit) {
     val ide = LocalIde.current
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
@@ -219,9 +219,14 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                         add(Command("Keyboard shortcuts help", "", "F1") { showShortcutsHelp = true })
                         if (vm.meta != null) {
                             add(Command(
-                                "Export decompiled source (.c / .h / .asm)",
-                                "Whole binary, one function, header or listing", ""
+                                "Export source or an IDA script",
+                                "pseudo-C, header, listing — or your names as .py / .idc", ""
                             ) { showExportSheet = true })
+                            add(Command(
+                                "Import from IDA…",
+                                "names and comments out of an IDC database dump", "",
+                                importIda
+                            ))
                         }
                     }
                 }

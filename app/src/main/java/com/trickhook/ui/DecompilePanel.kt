@@ -40,8 +40,10 @@ import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -742,7 +744,9 @@ private data class ExportKind(
     val id: String,
     val icon: ImageVector,
     val title: String,
-    val detail: String
+    val detail: String,
+    /** Rows are drawn in list order and a new group prints its own heading. */
+    val group: String
 )
 
 /**
@@ -782,6 +786,38 @@ private fun ExportBar(vm: StudioViewModel) {
     }
 }
 
+private const val SRC_GROUP = "Decompiled output"
+private const val IDA_GROUP = "Take it to IDA Pro"
+
+/**
+ * The heading over one group of export kinds. Two groups sit in this sheet and
+ * they are not the same kind of thing: one is a listing to read, the other is a
+ * script that changes somebody's database, and the caveat that belongs to each
+ * belongs beside it rather than in one line at the top covering both.
+ */
+@Composable
+private fun ExportGroupLabel(group: String) {
+    val ide = LocalIde.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = Space.xl, top = Space.m, end = Space.xl, bottom = Space.s)
+    ) {
+        Text(
+            group.uppercase(), color = ide.dim,
+            fontSize = Type.caption, lineHeight = Type.captionLine,
+            fontWeight = FontWeight.Medium, letterSpacing = Type.upperTracking
+        )
+        Text(
+            if (group == SRC_GROUP)
+                "reconstructed from machine code — it will not recompile as-is"
+            else
+                "runs in your own IDA and applies what you named here",
+            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+        )
+    }
+}
+
 /**
  * Export picker. Hoisted out of the Pseudo-C tab so the command palette and
  * the overflow menu can raise it too — buried at the bottom of one tab, nobody
@@ -795,15 +831,26 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
     // sheet is composed conditionally, so dismissing it used to unregister the
     // launcher before launch() ran. SAF still created the document the user
     // picked, nothing ever wrote to it, and the export landed as 0 bytes.
+
+    // What the user has actually authored, which is all the IDA scripts carry:
+    // with none of it there is nothing to send, so those two rows go grey.
+    val authored = vm.renames.size + vm.comments.size + vm.bookmarks.size
+    val authoredLine =
+        if (authored == 0) "nothing named or commented yet"
+        else "${vm.renames.size} names · ${vm.comments.size} comments · ${vm.bookmarks.size} bookmarks"
     val kinds = listOf(
         ExportKind("c-all", Icons.Filled.Code, "Whole binary",
-            "${vm.meta?.functions?.size ?: 0} functions decompiled to pseudo-C"),
+            "${vm.meta?.functions?.size ?: 0} functions decompiled to pseudo-C", SRC_GROUP),
         ExportKind("c-one", Icons.Filled.Description, "This function",
-            vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected"),
+            vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected", SRC_GROUP),
         ExportKind("h-all", Icons.Filled.Subject, "Header stub",
-            "signatures only, no bodies"),
+            "signatures only, no bodies", SRC_GROUP),
         ExportKind("asm-all", Icons.Filled.DataObject, "Assembly listing",
-            "disassembly with auto-comments")
+            "disassembly with auto-comments", SRC_GROUP),
+        ExportKind("ida-py", Icons.Filled.Terminal, "IDAPython script",
+            authoredLine, IDA_GROUP),
+        ExportKind("ida-idc", Icons.Filled.DesktopWindows, "IDC script",
+            if (authored == 0) authoredLine else "the same, for any IDA back to 7.0", IDA_GROUP)
     )
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -818,19 +865,24 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
         Column(Modifier.padding(bottom = Space.xl)) {
             Column(Modifier.padding(horizontal = Space.xl, vertical = Space.s)) {
                 Text(
-                    "Export decompiled output", color = ide.text,
+                    "Export", color = ide.text,
                     fontSize = Type.title, lineHeight = Type.titleLine,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(Space.xs))
                 Text(
-                    "Reconstructed from machine code — it will not recompile as-is.",
+                    "A listing to read, or your own work as a script for IDA Pro.",
                     color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine
                 )
             }
             Spacer(Modifier.height(Space.m))
-            kinds.forEach { k ->
-                val enabled = k.id != "c-one" || vm.detail != null
+            kinds.forEachIndexed { i, k ->
+                if (i == 0 || kinds[i - 1].group != k.group) ExportGroupLabel(k.group)
+                val enabled = when (k.id) {
+                    "c-one" -> vm.detail != null
+                    "ida-py", "ida-idc" -> authored > 0
+                    else -> true
+                }
                 Row(
                     Modifier
                         .fillMaxWidth()
