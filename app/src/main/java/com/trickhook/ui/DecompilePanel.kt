@@ -204,16 +204,6 @@ fun DecompilePanel(vm: StudioViewModel) {
     }
 }
 
-@Composable
-private fun StatChip(label: String, tint: Color) {
-    Text(
-        label, color = tint, fontSize = 9.5.sp, fontFamily = Mono,
-        modifier = Modifier
-            .background(tint.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-    )
-}
-
 private data class ExportKind(
     val id: String,
     val icon: ImageVector,
