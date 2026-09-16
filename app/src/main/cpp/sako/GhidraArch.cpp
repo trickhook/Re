@@ -1,5 +1,6 @@
 #include "GhidraArch.h"
 #include "JniTypes.h"
+#include "Prototypes.h"
 
 #include <cstdio>
 #include <cstring>
@@ -49,6 +50,7 @@ bool GhidraDecomp::ready() const { return false; }
 std::string GhidraDecomp::backendName() const { return std::string(); }
 bool GhidraDecomp::open(const std::string&, const std::string&, const u8*, size_t,
                         const std::vector<GhidraSeg>&,
+                        const std::vector<std::pair<u64, u64>>&,
                         const std::vector<std::pair<u64, std::string>>&,
                         const std::vector<FoundString>&,
                         const std::vector<std::pair<u64, char>>&,
@@ -56,7 +58,7 @@ bool GhidraDecomp::open(const std::string&, const std::string&, const u8*, size_
     err = "built without the Ghidra decompiler";
     return false;
 }
-std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err, bool) {
+std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err, int) {
     err = "built without the Ghidra decompiler";
     return std::string();
 }
@@ -76,11 +78,14 @@ class MemLoadImage : public LoadImage {
     const u8* image_ = nullptr;
     size_t size_ = 0;
     std::vector<GhidraSeg> segs_;
+    std::vector<std::pair<u64, u64>> readOnly_;
     AddrSpace* space_ = nullptr;
 
 public:
-    MemLoadImage(const u8* image, size_t size, std::vector<GhidraSeg> segs)
-        : LoadImage("nocturne"), image_(image), size_(size), segs_(std::move(segs)) {}
+    MemLoadImage(const u8* image, size_t size, std::vector<GhidraSeg> segs,
+                 std::vector<std::pair<u64, u64>> readOnly)
+        : LoadImage("nocturne"), image_(image), size_(size), segs_(std::move(segs)),
+          readOnly_(std::move(readOnly)) {}
 
     void attachToSpace(AddrSpace* s) { space_ = s; }
 
@@ -116,6 +121,11 @@ public:
     // folded out of .rodata — and with them, string literals recognised.
     void getReadonly(RangeList& list) const override {
         if (space_ == nullptr) return;
+        if (!readOnly_.empty()) {
+            for (const auto& r : readOnly_)
+                if (r.second > r.first) list.insertRange(space_, r.first, r.second - 1);
+            return;
+        }
         for (const GhidraSeg& s : segs_) {
             if (s.writable || !s.filesz) continue;
             list.insertRange(space_, s.vaddr, s.vaddr + s.filesz - 1);
@@ -131,10 +141,11 @@ class MemArchitecture : public SleighArchitecture {
     const u8* image_;
     size_t size_;
     std::vector<GhidraSeg> segs_;
+    std::vector<std::pair<u64, u64>> readOnly_;
 
     void buildLoader(DocumentStorage& store) override {
         collectSpecFiles(*errorstream);
-        loader = new MemLoadImage(image_, size_, segs_);
+        loader = new MemLoadImage(image_, size_, segs_, readOnly_);
     }
     void resolveArchitecture(void) override {
         archid = getTarget();     // the caller already chose the language
@@ -173,9 +184,11 @@ class MemArchitecture : public SleighArchitecture {
 
 public:
     MemArchitecture(const string& target, ostream* estream,
-                    const u8* image, size_t size, std::vector<GhidraSeg> segs)
+                    const u8* image, size_t size, std::vector<GhidraSeg> segs,
+                    std::vector<std::pair<u64, u64>> readOnly)
         : SleighArchitecture("nocturne", target, estream),
-          image_(image), size_(size), segs_(std::move(segs)) {}
+          image_(image), size_(size), segs_(std::move(segs)),
+          readOnly_(std::move(readOnly)) {}
 };
 
 // One-time registration of the decompiler's capabilities. startDecompilerLibrary()
@@ -202,6 +215,8 @@ struct GhidraDecomp::Impl {
     Datatype* jniInvoke = nullptr;
     Datatype* jniEnvPtr = nullptr;
     Datatype* javaVmPtr = nullptr;
+    int protosApplied = 0;
+    std::string langId;
 
     ~Impl() { delete arch; }
 };
@@ -226,7 +241,10 @@ void GhidraDecomp::setSpecDir(const std::string& dir) {
 bool GhidraDecomp::ready() const { return impl_ != nullptr && impl_->arch != nullptr; }
 
 std::string GhidraDecomp::backendName() const {
-    return impl_ ? impl_->backend : std::string();
+    if (!impl_) return std::string();
+    if (impl_->protosApplied > 0)
+        return impl_->backend + ", " + std::to_string(impl_->protosApplied) + " known protos";
+    return impl_->backend;
 }
 
 void GhidraDecomp::close() {
@@ -238,6 +256,7 @@ void GhidraDecomp::close() {
 bool GhidraDecomp::open(const std::string& key, const std::string& arch,
                         const u8* image, size_t size,
                         const std::vector<GhidraSeg>& segs,
+                        const std::vector<std::pair<u64, u64>>& readOnly,
                         const std::vector<std::pair<u64, std::string>>& funcs,
                         const std::vector<FoundString>& strings,
                         const std::vector<std::pair<u64, char>>& armMapping,
@@ -260,12 +279,13 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
     std::ostringstream estream;
     try {
         initLibraryOnce();
-        impl_->arch = new MemArchitecture(lang, &estream, image, size, segs);
+        impl_->arch = new MemArchitecture(lang, &estream, image, size, segs, readOnly);
         DocumentStorage store;
         impl_->arch->init(store);
         // A runaway function must not take the process with it.
         impl_->arch->max_instructions = 200000;
         impl_->backend = "Ghidra p-code (" + lang + ")";
+        impl_->langId = lang;
     } catch (LowlevelError& e) {
         err = e.explain;
         if (err.empty()) err = estream.str();
@@ -384,6 +404,72 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
         impl_->javaVmPtr = nullptr;
     }
 
+    // Give the imports we recognise a real signature. Without one every call
+    // result is an undefined8, and — the reason this matters most — a constant
+    // pointer is only read through as text when its type says char *, so
+    // strlen("...") stays strlen(0x169c21) until the prototype exists.
+    try {
+        Architecture* glb = impl_->arch;
+        TypeFactory* tf = glb->types;
+        AddrSpace* dspc = glb->getDefaultDataSpace();
+        int4 ps = dspc->getAddrSize();
+        uint4 ws = dspc->getWordSize();
+        Datatype* chr = tf->getTypeChar(1);
+
+        auto typeOf = [&](char c) -> Datatype* {
+            switch (c) {
+                case 'v': return tf->getTypeVoid();
+                case 'i': return tf->getBase(4, TYPE_INT);
+                case 'u': return tf->getBase(4, TYPE_UINT);
+                case 'l': return tf->getBase(8, TYPE_INT);
+                case 'z': return tf->getBase(8, TYPE_UINT);
+                case 'c': return chr;
+                case 'w': return tf->getBase(2, TYPE_INT);
+                case 'f': return tf->getBase(4, TYPE_FLOAT);
+                case 'd': return tf->getBase(8, TYPE_FLOAT);
+                case 's': return tf->getTypePointer(ps, chr, ws);
+                default:  return tf->getTypePointer(ps, tf->getBase(1, TYPE_UNKNOWN), ws);
+            }
+        };
+
+        std::map<std::string, const proto::KnownProto*> byName;
+        for (int i = 0; i < proto::kKnownProtoCount; ++i)
+            byName[proto::kKnownProtos[i].name] = &proto::kKnownProtos[i];
+
+        Scope* scope = glb->symboltab->getGlobalScope();
+        AddrSpace* code = glb->getDefaultCodeSpace();
+        for (const auto& f : funcs) {
+            if (f.second.empty()) continue;
+            std::string nm = f.second;
+            size_t at = nm.find('@');            // "memcpy@plt" and the like
+            if (at != std::string::npos) nm.resize(at);
+            auto it = byName.find(nm);
+            if (it == byName.end()) continue;
+            Funcdata* fd = scope->queryFunction(Address(code, f.first));
+            if (fd == nullptr) continue;
+
+            PrototypePieces pieces;
+            pieces.model = glb->defaultfp;
+            pieces.name = nm;
+            pieces.firstVarArgSlot = -1;
+            pieces.outtype = typeOf(it->second->ret[0]);
+            const char* a = it->second->args;
+            for (int k = 0; a[k] != '\0'; ++k) {
+                if (a[k] == '.') { pieces.firstVarArgSlot = k; break; }
+                pieces.intypes.push_back(typeOf(a[k]));
+                pieces.innames.push_back("a" + std::to_string(k));
+            }
+            try {
+                fd->getFuncProto().setPieces(pieces);
+                fd->getFuncProto().setInputLock(true);
+                fd->getFuncProto().setOutputLock(true);
+                ++impl_->protosApplied;
+            } catch (LowlevelError&) {}
+        }
+    } catch (...) {
+        // A missing prototype costs readability, never correctness.
+    }
+
     // Typing the extracted strings as char arrays is what makes a pointer to
     // one print as the text instead of as its address. Without this the
     // decompiler has no reason to believe those bytes are a string.
@@ -428,7 +514,7 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
 // one piece of type information a stripped Android library always carries: it
 // is in the symbol name. Applying it is what lets the decompiler resolve the
 // calls the function makes through the interface pointer.
-void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, bool jniEnvArg0) {
+void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, int jniEnvArg) {
     if (!impl_ || !impl_->arch || fdv == nullptr) return;
     if (impl_->jniEnvPtr == nullptr || impl_->javaVmPtr == nullptr) return;
     Funcdata* fd = static_cast<Funcdata*>(fdv);
@@ -459,11 +545,16 @@ void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, bool jn
         pieces.innames.push_back("env");
         pieces.intypes.push_back(tf->getBase(8, TYPE_UNKNOWN));
         pieces.innames.push_back("thiz");
-    } else if (jniEnvArg0) {
-        // A helper the entry point handed the interface pointer to. The name
-        // says nothing, but the code does: it dereferences its first argument
-        // twice and calls through the result.
+    } else if (jniEnvArg >= 0 && jniEnvArg <= 7) {
+        // A helper that was handed the interface pointer. Its name says
+        // nothing; the call graph does. Everything before the env argument
+        // has to be declared to reach it, and there is nothing to say about
+        // those, so they stay unknown but sized.
         pieces.outtype = tf->getBase(8, TYPE_UNKNOWN);
+        for (int i = 0; i < jniEnvArg; ++i) {
+            pieces.intypes.push_back(tf->getBase(8, TYPE_UNKNOWN));
+            pieces.innames.push_back("a" + std::to_string(i));
+        }
         pieces.intypes.push_back(impl_->jniEnvPtr);
         pieces.innames.push_back("env");
     } else {
@@ -478,7 +569,7 @@ void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, bool jn
 }
 
 std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::string& err,
-                                    bool jniEnvArg0) {
+                                    int jniEnvArg) {
     err.clear();
     std::lock_guard<std::mutex> lock(ghidraMutex());
     if (!impl_ || !impl_->arch) { err = "no architecture bound"; return std::string(); }
@@ -501,7 +592,7 @@ std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::stri
             fd = scope->addFunction(a, fd->getName())->getFunction();
         }
 
-        applyJniPrototype(fd, name.empty() ? fd->getName() : name, jniEnvArg0);
+        applyJniPrototype(fd, name.empty() ? fd->getName() : name, jniEnvArg);
 
         glb->allacts.setCurrent("decompile");
         Action* act = glb->allacts.getCurrent();

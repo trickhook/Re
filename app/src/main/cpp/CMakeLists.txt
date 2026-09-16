@@ -157,7 +157,8 @@ add_library(nocturne SHARED
     sako/Debugger.cpp
     sako/Engine.cpp
     sako/GhidraArch.cpp
-    sako/JniTypes.cpp)
+    sako/JniTypes.cpp
+    sako/Prototypes.cpp)
 
 target_include_directories(nocturne PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sako

@@ -75,6 +75,27 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
     if (segs.empty())
         segs.push_back({0, 0, u64(c.bin.data.size()), u64(c.bin.data.size()), true});
 
+    // Read-only ranges come from the section table, because a linker happily
+    // puts .rodata inside a writable PT_LOAD. Where a section itself says it
+    // is writable we take it at its word: a writable .rodata usually means the
+    // library rewrites its own constants, and folding through it would print
+    // strings the running program never sees.
+    std::vector<std::pair<u64, u64>> readOnly;
+    if (c.fmt == Fmt::ELF) {
+        for (auto& sc : c.elf.sections) {
+            if (!sc.addr || !sc.size) continue;
+            if (sc.flags.find('A') == std::string::npos) continue;
+            if (sc.flags.find('W') != std::string::npos) continue;
+            readOnly.push_back({sc.addr, sc.addr + sc.size});
+        }
+    } else if (c.fmt == Fmt::PE) {
+        for (auto& sc : c.pe.sections) {
+            if (!sc.addr || !sc.size) continue;
+            if (sc.flags.find('W') != std::string::npos) continue;
+            readOnly.push_back({sc.addr, sc.addr + sc.size});
+        }
+    }
+
     // Publishing every known entry point is what makes a call render as a
     // name. PLT stubs carry the imported name, which is the useful one.
     std::vector<std::pair<u64, std::string>> funcs;
@@ -86,7 +107,8 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
 
     std::string err;
     if (!GhidraDecomp::instance().open(path, c.arch, c.bin.data.data(), c.bin.data.size(),
-                                       segs, funcs, c.strings, c.elf.armMapping, err)) {
+                                       segs, readOnly, funcs, c.strings,
+                                       c.elf.armMapping, err)) {
         ghidraNote_ = err.empty() ? "could not build the architecture" : err;
         return false;
     }
@@ -99,49 +121,290 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
 // fact is what turns
 //     (**(code **)(*param_1 + 0x720))(param_1)
 // into (*env)->ExceptionCheck(env), and this library does it 526 times.
-static bool takesJniEnv(const std::vector<AsmLine>& lines, const std::string& arch) {
-    if (arch != "ARM64") return false;         // only ARM64 is pattern-matched here
-    std::string tableReg;                      // register holding *env
-    std::vector<u64> slots;                    // the offsets called through it
+// "x0, [x1, #8]" -> {"x0", "[x1, #8]"}
+static std::vector<std::string> splitOperands(const std::string& ops) {
+    std::vector<std::string> out;
+    int depth = 0;
+    std::string cur;
+    for (char c : ops) {
+        if (c == '[') { ++depth; cur += c; }
+        else if (c == ']') { --depth; cur += c; }
+        else if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    for (auto& t : out) {
+        while (!t.empty() && t.front() == ' ') t.erase(0, 1);
+        while (!t.empty() && t.back() == ' ') t.pop_back();
+    }
+    return out;
+}
+
+// What one argument is used for, followed through the registers it is copied
+// into. A single forward walk answers both questions we have about it: are the
+// interface slots it is called through real JNI functions, and which calls is
+// it handed on to.
+//
+// Deliberately a straight-line walk with no joins. A value that survives to a
+// use along the fall-through path is the case worth catching, and treating
+// anything else as unknown keeps a wrong claim out: the cost of being
+// conservative is a helper left untyped, the cost of being wrong is printing a
+// call the code never makes.
+struct JniTrace {
+    std::vector<u64> slots;                    // interface offsets called through it
+    std::vector<std::pair<u64, int>> calls;    // (callee, argument index) it reaches
+};
+
+static void traceJniEnv(const std::vector<AsmLine>& lines, int envArg, JniTrace& out) {
+    if (envArg < 0 || envArg > 7) return;
+    bool isEnv[31] = {false};                  // holds the JNIEnv itself
+    bool isTable[31] = {false};                // holds *JNIEnv, the function table
+    std::map<i64, bool> slotIsEnv;             // frame offset -> spilled env
+
+    auto regNum = [](const std::string& r) -> int {
+        if (r.size() < 2 || (r[0] != 'x' && r[0] != 'w')) return -1;
+        if (r.find_first_not_of("0123456789", 1) != std::string::npos) return -1;
+        int n = atoi(r.c_str() + 1);
+        return (n >= 0 && n <= 30) ? n : -1;
+    };
+    // "[sp, #16]" / "[x29, #-8]" -> the frame offset, if that is what it is
+    auto frameOff = [](const std::string& ops, i64& off) -> bool {
+        size_t lb = ops.find('[');
+        if (lb == std::string::npos) return false;
+        std::string inner = ops.substr(lb + 1);
+        if (inner.rfind("sp", 0) != 0 && inner.rfind("x29", 0) != 0) return false;
+        size_t h = inner.find('#');
+        size_t rb = inner.find(']');
+        if (h == std::string::npos || rb == std::string::npos || h > rb) { off = 0; return true; }
+        bool neg = inner[h + 1] == '-';
+        size_t ds = h + (neg ? 2 : 1);
+        u64 v = strtoull(inner.c_str() + ds, nullptr,
+                         inner.compare(ds, 2, "0x") == 0 ? 16 : 10);
+        off = neg ? -i64(v) : i64(v);
+        return true;
+    };
+    // "[x19, #0x720]" -> base register and displacement
+    auto memBase = [&](const std::string& ops, int& base, u64& disp) -> bool {
+        size_t lb = ops.find('[');
+        if (lb == std::string::npos) return false;
+        size_t rb = ops.find(']', lb);
+        if (rb == std::string::npos) return false;
+        std::string inner = ops.substr(lb + 1, rb - lb - 1);
+        size_t comma = inner.find(',');
+        std::string reg = (comma == std::string::npos) ? inner : inner.substr(0, comma);
+        while (!reg.empty() && reg.back() == ' ') reg.pop_back();
+        base = regNum(reg);
+        disp = 0;
+        if (base < 0) return false;
+        if (comma != std::string::npos) {
+            size_t h = inner.find('#', comma);
+            if (h == std::string::npos) return false;   // register offset: not a slot
+            disp = strtoull(inner.c_str() + h + 1, nullptr,
+                            inner.compare(h + 1, 2, "0x") == 0 ? 16 : 10);
+        }
+        return true;
+    };
+
+    isEnv[envArg] = true;
 
     for (const AsmLine& l : lines) {
-        if (l.mnem != "ldr" && l.mnem != "blr") continue;
-        if (l.mnem == "ldr") {
-            size_t comma = l.ops.find(',');
-            if (comma == std::string::npos) continue;
-            std::string dst = l.ops.substr(0, comma);
-            if (l.ops.find("[x0]") != std::string::npos) { tableReg = dst; continue; }
-            if (tableReg.empty()) continue;
-            // ldr xN, [<table>, #imm] — a slot in the interface
-            std::string want = "[" + tableReg + ",";
-            size_t br = l.ops.find(want);
-            if (br == std::string::npos) continue;
-            size_t hash = l.ops.find('#', br);
-            if (hash == std::string::npos) continue;
-            u64 off = strtoull(l.ops.c_str() + hash + 1,
-                               nullptr, l.ops.compare(hash + 1, 2, "0x") == 0 ? 16 : 10);
-            slots.push_back(off);
-        }
-    }
-    if (slots.empty()) return false;
+        const std::string& m = l.mnem;
 
-    // Every offset has to name a real function. A C++ virtual call on `this`
-    // has the same shape, so the discriminator is where the offsets land: the
-    // four reserved slots and anything past the end of the table are proof
-    // this is some other kind of object, and a wrong JNIEnv* claim would
-    // invent a call that is not there.
-    const u64 kFirst = 4 * 8;                                  // past reserved0..3
-    const u64 kLast  = u64(jni::kNativeInterfaceCount) * 8;
+        if (m == "bl" || m == "blr") {
+            if (m == "bl") {
+                size_t p = l.ops.find("0x");
+                u64 t = (p == std::string::npos) ? 0
+                                                 : strtoull(l.ops.c_str() + p + 2, nullptr, 16);
+                if (t) for (int i = 0; i <= 7; ++i) if (isEnv[i]) out.calls.push_back({t, i});
+            }
+            // AAPCS64: x0-x18 do not survive a call, x19-x28 do.
+            for (int i = 0; i <= 18; ++i) { isEnv[i] = false; isTable[i] = false; }
+            continue;
+        }
+
+        auto toks = splitOperands(l.ops);
+        if (toks.empty()) continue;
+        int d = regNum(toks[0]);
+
+        if (m == "str" || m == "stur" || m == "strb" || m == "strh") {
+            i64 off;
+            if (d >= 0 && frameOff(l.ops, off)) slotIsEnv[off] = isEnv[d];
+            continue;                          // a store defines no register
+        }
+        if (d < 0) continue;
+
+        if (m == "mov" && toks.size() >= 2) {
+            int sn = regNum(toks[1]);
+            isEnv[d] = (sn >= 0 && isEnv[sn]);
+            isTable[d] = (sn >= 0 && isTable[sn]);
+            continue;
+        }
+        if (m == "ldr" || m == "ldur") {
+            i64 off;
+            int base; u64 disp;
+            if (frameOff(l.ops, off)) {
+                auto it = slotIsEnv.find(off);
+                isEnv[d] = (it != slotIsEnv.end() && it->second);
+                isTable[d] = false;
+            } else if (memBase(l.ops, base, disp)) {
+                // "ldr x8, [x8]" is ordinary, so read what the base held before
+                // the destination is cleared — they are often the same register.
+                bool baseWasEnv = isEnv[base];
+                bool baseWasTable = isTable[base];
+                // *env is the function table; *(table + slot) is one function.
+                isEnv[d] = false;
+                isTable[d] = (disp == 0 && baseWasEnv);
+                if (disp != 0 && baseWasTable) out.slots.push_back(disp);
+            } else {
+                isEnv[d] = false;
+                isTable[d] = false;
+            }
+            continue;
+        }
+        isEnv[d] = false;                      // any other definition kills both
+        isTable[d] = false;
+    }
+}
+
+// Every slot called through the pointer has to name a real JNI function. A C++
+// virtual call on `this` has exactly this shape, so where the offsets land is
+// the only thing that tells the two apart: one in the four reserved slots, or
+// past the end of the table, is proof the object is something else.
+static bool slotsLookLikeJni(const std::vector<u64>& slots) {
+    if (slots.empty()) return false;
+    const u64 kFirst = 4 * 8;
+    const u64 kLast = u64(jni::kNativeInterfaceCount) * 8;
     for (u64 off : slots)
         if (off % 8 != 0 || off < kFirst || off >= kLast) return false;
     return true;
 }
 
+// Every slot this function calls through a double indirection, whatever the
+// pointer came from. Once a parameter is declared JNIEnv* the decompiler
+// resolves calls through it by type, including ones the argument trace did not
+// follow, so the trace's own coverage is not enough to vouch for the claim: a
+// function that mixes an interface pointer with a C++ vtable would have the
+// vtable slots printed as JNI functions too.
+static void allIndirectSlots(const std::vector<AsmLine>& lines, std::vector<u64>& out) {
+    std::map<std::string, bool> isTable;       // register holds a *something table
+    for (const AsmLine& l : lines) {
+        if (l.mnem == "bl" || l.mnem == "blr") { isTable.clear(); continue; }
+        if (l.mnem != "ldr" && l.mnem != "ldur") continue;
+        auto toks = splitOperands(l.ops);
+        if (toks.size() < 2) continue;
+        size_t lb = l.ops.find('['), rb = l.ops.find(']');
+        if (lb == std::string::npos || rb == std::string::npos) continue;
+        std::string inner = l.ops.substr(lb + 1, rb - lb - 1);
+        size_t comma = inner.find(',');
+        std::string base = (comma == std::string::npos) ? inner : inner.substr(0, comma);
+        while (!base.empty() && base.back() == ' ') base.pop_back();
+        if (base == "sp" || base == "x29") { isTable.erase(toks[0]); continue; }
+        if (comma == std::string::npos) { isTable[toks[0]] = true; continue; }
+        size_t h = inner.find('#', comma);
+        if (h == std::string::npos) { isTable.erase(toks[0]); continue; }
+        auto it = isTable.find(base);
+        bool baseWasTable = (it != isTable.end() && it->second);
+        u64 disp = strtoull(inner.c_str() + h + 1, nullptr,
+                            inner.compare(h + 1, 2, "0x") == 0 ? 16 : 10);
+        if (baseWasTable && disp) out.push_back(disp);
+        isTable.erase(toks[0]);
+    }
+}
+
+// Which argument, if any, is a JNIEnv*.
+static int detectJniEnvArg(const std::vector<AsmLine>& lines, const std::string& arch) {
+    if (arch != "ARM64") return -1;            // only ARM64 is pattern-matched here
+    std::vector<u64> all;
+    allIndirectSlots(lines, all);
+    if (!all.empty() && !slotsLookLikeJni(all)) return -1;
+    for (int a = 0; a <= 7; ++a) {
+        JniTrace t;
+        traceJniEnv(lines, a, t);
+        if (slotsLookLikeJni(t.slots)) return a;
+    }
+    return -1;
+}
+
+// Seed from what is certain, then follow the pointer across calls until
+// nothing new is learned. An entry point's signature is fixed by the JNI
+// specification and its name; a helper that loads the interface table out of
+// one of its arguments identifies itself; everything after that is reached by
+// seeing one of those hand the pointer on.
+void Engine::computeJniEnvArgs(Ctx& c) {
+    if (c.jniEnvArgDone) return;
+    c.jniEnvArgDone = true;
+    if (c.arch != "ARM64" || c.backend.empty()) return;
+
+    auto disasmOf = [&](const FuncInfo& fn) -> std::vector<AsmLine> {
+        u64 o = vaToOff(c, fn.addr);
+        if (o == ~u64(0) || o >= c.bin.data.size()) return {};
+        u64 sz = std::min<u64>(fn.size ? fn.size : 512, 65536);
+        sz = std::min<u64>(sz, u64(c.bin.data.size()) - o);
+        if (!sz) return {};
+        return c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr, 4096);
+    };
+
+    std::map<u64, const FuncInfo*> byAddr;
+    for (auto& fn : c.funcs) byAddr[fn.addr] = &fn;
+
+    std::vector<u64> work;
+    auto learn = [&](u64 addr, int arg) {
+        if (arg < 0 || arg > 7) return;
+        if (!byAddr.count(addr)) return;
+        if (c.jniEnvArg.count(addr)) return;   // first claim wins; no oscillation
+        c.jniEnvArg[addr] = arg;
+        work.push_back(addr);
+    };
+
+    // Seeds. A Java_* export takes (JNIEnv*, jobject, ...) by definition.
+    for (auto& fn : c.funcs) {
+        if (fn.name.rfind("Java_", 0) == 0) { learn(fn.addr, 0); continue; }
+        auto lines = disasmOf(fn);
+        if (lines.empty()) continue;
+        int a = detectJniEnvArg(lines, c.arch);
+        if (a >= 0) learn(fn.addr, a);
+    }
+    size_t seeded = c.jniEnvArg.size();
+
+    // Fixpoint. Bounded so a pathological call graph cannot spin.
+    size_t guard = 0;
+    while (!work.empty() && guard++ < 200000) {
+        u64 addr = work.back();
+        work.pop_back();
+        auto fit = byAddr.find(addr);
+        if (fit == byAddr.end()) continue;
+        auto lines = disasmOf(*fit->second);
+        if (lines.empty()) continue;
+        JniTrace t;
+        traceJniEnv(lines, c.jniEnvArg[addr], t);
+        // Propagation proposes; the callee's own code decides. If it calls a
+        // slot through that argument which no JNI function occupies, then
+        // whatever it was handed is not an interface pointer — withdraw the
+        // claim rather than print a call to a reserved slot, and do not spread
+        // it further.
+        std::vector<u64> all;
+        allIndirectSlots(lines, all);
+        if (!all.empty() && !slotsLookLikeJni(all)) {
+            c.jniEnvArg.erase(addr);
+            continue;
+        }
+        for (auto& cl : t.calls) learn(cl.first, cl.second);
+    }
+
+    if (!c.jniEnvArg.empty())
+        c.notes.push_back("JNIEnv reaches " + std::to_string(c.jniEnvArg.size()) +
+                          " functions (" + std::to_string(seeded) + " found directly, " +
+                          std::to_string(c.jniEnvArg.size() - seeded) + " by propagation)");
+}
+
 std::string Engine::ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn,
                                  const std::vector<AsmLine>& lines) {
     if (!ghidraReady(c, path)) return std::string();
+    computeJniEnvArgs(c);
     std::string err;
-    bool env = takesJniEnv(lines, c.arch);
+    auto it = c.jniEnvArg.find(fn.addr);
+    int env = (it != c.jniEnvArg.end()) ? it->second
+                                        : detectJniEnvArg(lines, c.arch);
     std::string text = GhidraDecomp::instance().decompile(fn.addr, fn.name, err, env);
     if (text.empty()) ghidraNote_ = err.empty() ? "no output" : err;
     return text;
@@ -958,6 +1221,7 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
     const bool wantHdr = (kind == "h-all");
     const bool wantOne = (kind == "c-one");
     const bool useGhidra = !wantAsm && ghidraReady(c, path);
+    if (useGhidra) computeJniEnvArgs(c);
 
     std::string base = c.bin.path;
     size_t slash = base.find_last_of('/');
@@ -1051,8 +1315,10 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
         // matches what the user was looking at when they exported it.
         if (useGhidra) {
             std::string err;
-            out.pseudo = GhidraDecomp::instance().decompile(
-                fn.addr, fn.name, err, takesJniEnv(out.lines, c.arch));
+            auto ea = c.jniEnvArg.find(fn.addr);
+            int env = (ea != c.jniEnvArg.end()) ? ea->second
+                                                : detectJniEnvArg(out.lines, c.arch);
+            out.pseudo = GhidraDecomp::instance().decompile(fn.addr, fn.name, err, env);
             if (!out.pseudo.empty()) {
                 out.mode = "Ghidra";
                 out.size = sz;

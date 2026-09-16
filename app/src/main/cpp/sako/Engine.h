@@ -73,6 +73,10 @@ private:
         // v2
         AddrNames names;
         CallGraph cg;
+        // Function address -> index of the parameter carrying a JNIEnv*.
+        // Computed once, the first time a decompiler backend asks for it.
+        std::map<u64, int> jniEnvArg;
+        bool jniEnvArgDone = false;
     };
 
     bool ensureCtx(const std::string& path);
@@ -82,6 +86,9 @@ private:
     // false when it is unavailable for any reason, which is not an error:
     // every caller falls back to the IR lifter.
     bool ghidraReady(Ctx& c, const std::string& path);
+    // Work out which functions are handed a JNIEnv*, and in which argument,
+    // by following the pointer across calls until nothing new is learned.
+    void computeJniEnvArgs(Ctx& c);
     // Decompiled text for one function, or "" when the backend cannot serve it.
     std::string ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn,
                              const std::vector<AsmLine>& lines);

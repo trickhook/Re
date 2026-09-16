@@ -43,6 +43,11 @@ public:
     bool open(const std::string& key, const std::string& arch,
               const u8* image, size_t size,
               const std::vector<GhidraSeg>& segs,
+              // Address ranges the image says are not written at runtime.
+              // Sections, not segments: a linker routinely puts .rodata in a
+              // writable PT_LOAD, and constants are only folded through memory
+              // the decompiler believes is read-only.
+              const std::vector<std::pair<u64, u64>>& readOnly,
               const std::vector<std::pair<u64, std::string>>& funcs,
               const std::vector<FoundString>& strings,
               // ARM32 only: ($a|$t|$d, address) mapping symbols, sorted. The
@@ -56,15 +61,15 @@ public:
     std::string backendName() const;
 
     // Decompiled C for one function, or "" with `err` set. Never throws.
-    // `jniEnvArg0` types the first parameter as JNIEnv*, which is what turns
-    // this library's most common line into a named call. The caller decides:
-    // only it has the disassembly to recognise the pattern.
+    // `jniEnvArg` is the index of the parameter that carries a JNIEnv*, or
+    // -1 for none. Typing it is what turns an Android library's most common
+    // line into a named call. The caller decides: only it has the call graph.
     std::string decompile(u64 addr, const std::string& name, std::string& err,
-                          bool jniEnvArg0 = false);
+                          int jniEnvArg = -1);
 
 private:
     // Takes a ghidra::Funcdata* as void* so this header stays Ghidra-free.
-    void applyJniPrototype(void* fd, const std::string& name, bool jniEnvArg0);
+    void applyJniPrototype(void* fd, const std::string& name, int jniEnvArg);
 
     GhidraDecomp() = default;
     ~GhidraDecomp();
