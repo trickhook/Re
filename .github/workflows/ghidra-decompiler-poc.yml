@@ -1,0 +1,187 @@
+# Proof of concept only — measures what adopting Ghidra's decompiler core as
+# Nocturne's analysis engine would cost. It does not touch the app: nothing
+# here is linked into Nocturne.
+#
+# Ghidra's decompiler is a standalone C++ program (Apache-2.0) under
+# Ghidra/Features/Decompiler/src/decompile/cpp. It has no Java or JNI
+# dependency; the Java side drives it over a pipe. It is driven per
+# architecture by a compiled SLEIGH specification, so this job builds the
+# SLEIGH compiler for the host, compiles the AARCH64 and ARM specs with it,
+# and cross-compiles the decompiler library itself for arm64-v8a.
+name: Ghidra decompiler size PoC
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'ghidra git ref to build'
+        default: 'master'
+  push:
+    paths: ['.github/workflows/ghidra-decompiler-poc.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghidra-poc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: Cross-compile the Ghidra decompiler for arm64-v8a
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: '27.2.12479018'
+      GHIDRA_REF: ${{ github.event.inputs.ref || 'master' }}
+      API: '26'          # Nocturne's minSdk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install NDK
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+
+      - name: Fetch only the decompiler and the processor specs
+        run: |
+          # Ghidra is a very large repository and the decompiler is a small
+          # corner of it, so take a blobless sparse checkout of just the parts
+          # this PoC needs.
+          git clone --filter=blob:none --no-checkout --depth 1 \
+            --branch "$GHIDRA_REF" \
+            https://github.com/NationalSecurityAgency/ghidra.git ghidra
+          cd ghidra
+          git sparse-checkout init --cone
+          git sparse-checkout set \
+            Ghidra/Features/Decompiler/src/decompile \
+            Ghidra/Processors/AARCH64/data \
+            Ghidra/Processors/ARM/data \
+            Ghidra/Processors/x86/data
+          git checkout
+          echo "ghidra $GHIDRA_REF at $(git rev-parse --short HEAD)"
+          du -sh Ghidra/Features/Decompiler/src/decompile
+
+      - name: Build the SLEIGH compiler for the host
+        working-directory: ghidra/Ghidra/Features/Decompiler/src/decompile/cpp
+        run: |
+          start=$(date +%s)
+          make -j"$(nproc)" sleigh_opt 2>&1 | tail -5
+          echo "sleigh compiler built in $(( $(date +%s) - start ))s"
+          ls -la sleigh_opt
+
+      - name: Compile the processor specifications
+        id: specs
+        run: |
+          SLEIGH="$PWD/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_opt"
+          compile() {
+            d="ghidra/Ghidra/Processors/$1/data/languages"
+            [ -f "$d/$2" ] || { echo "missing $d/$2"; return 0; }
+            ( cd "$d" && "$SLEIGH" "$2" >/dev/null 2>&1 || true )
+          }
+          compile AARCH64 AARCH64.slaspec
+          compile ARM     ARM7_le.slaspec
+          compile x86     x86-64.slaspec
+          mkdir -p specs
+          find ghidra/Ghidra/Processors -name '*.sla' -exec cp {} specs/ \;
+          # The decompiler also reads the compiler and processor spec XML.
+          find ghidra/Ghidra/Processors \
+            \( -name '*.cspec' -o -name '*.pspec' -o -name '*.ldefs' \) \
+            -exec cp {} specs/ \; 2>/dev/null || true
+          ls -la specs/ || true
+
+      - name: Cross-compile the decompiler for arm64-v8a
+        id: build
+        working-directory: ghidra/Ghidra/Features/Decompiler/src/decompile/cpp
+        run: |
+          NDK="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "TOOLCHAIN=$TC" >> "$GITHUB_ENV"
+          start=$(date +%s)
+          # The bundled Makefile hardcodes host flags, so build the library
+          # objects directly. This is the same source set the Makefile's
+          # libdecomp.a target uses: everything except the terminal front ends.
+          mkdir -p android_obj
+          SRCS=$(ls *.cc | grep -vE '^(consolemain|ghidra_process|sleighexample|test|testfunction|slghparse|slghscan|slgh_compile|pcodeparse|pcodecompile|callgraph|ifacedecomp|ifaceterm|interface|ruleparse|ruleaction_test)\.cc$')
+          echo "$SRCS" | wc -l
+          fail=0
+          for s in $SRCS; do
+            "$TC/bin/aarch64-linux-android${API}-clang++" -std=c++11 -O2 -fPIC \
+              -Wno-everything -D__TERMINAL__ -c "$s" -o "android_obj/${s%.cc}.o" \
+              || { echo "FAILED: $s"; fail=$((fail+1)); }
+          done
+          echo "failed translation units: $fail"
+          "$TC/bin/llvm-ar" rcs libdecomp-android.a android_obj/*.o
+          # Also link a shared object, which is what an APK would actually ship.
+          "$TC/bin/aarch64-linux-android${API}-clang++" -shared -O2 \
+            -o libdecomp-android.so android_obj/*.o -lm || echo "shared link failed"
+          echo "seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+          echo "failures=$fail" >> "$GITHUB_OUTPUT"
+          ls -la libdecomp-android.a libdecomp-android.so 2>/dev/null || true
+
+      - name: Measure
+        run: |
+          STRIP="$TOOLCHAIN/bin/llvm-strip"
+          CPP=ghidra/Ghidra/Features/Decompiler/src/decompile/cpp
+          mkdir -p measured
+          for f in "$CPP/libdecomp-android.so" "$CPP/libdecomp-android.a"; do
+            [ -f "$f" ] && cp "$f" measured/
+          done
+          cp -r specs measured/specs 2>/dev/null || true
+
+          {
+            echo "## Ghidra decompiler on arm64-v8a — size PoC"
+            echo
+            echo "ghidra \`${GHIDRA_REF}\` · NDK ${NDK_VERSION} · API ${API} · -O2 · Apache-2.0"
+            echo
+            echo "| artefact | unstripped | stripped |"
+            echo "|----------|-----------:|---------:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          so=0
+          if [ -f measured/libdecomp-android.so ]; then
+            a=$(stat -c%s measured/libdecomp-android.so)
+            "$STRIP" --strip-unneeded measured/libdecomp-android.so \
+              -o measured/libdecomp-android.so.stripped 2>/dev/null \
+              || cp measured/libdecomp-android.so measured/libdecomp-android.so.stripped
+            so=$(stat -c%s measured/libdecomp-android.so.stripped)
+            printf '| `libdecomp-android.so` | %s | %s |\n' \
+              "$(numfmt --to=iec --suffix=B $a)" "$(numfmt --to=iec --suffix=B $so)" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          spec=0
+          printf '%-28s %12s\n' spec bytes
+          for f in specs/*.sla; do
+            [ -f "$f" ] || continue
+            b=$(stat -c%s "$f"); spec=$((spec + b))
+            printf '%-28s %12s\n' "$(basename "$f")" "$b"
+            printf '| `%s` (asset) | %s | — |\n' "$(basename "$f")" \
+              "$(numfmt --to=iec --suffix=B $b)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          {
+            echo
+            echo "**Engine $(numfmt --to=iec --suffix=B $so) stripped per ABI, plus $(numfmt --to=iec --suffix=B $spec) of SLEIGH specs shared across ABIs.**"
+            echo
+            echo "Translation units that failed to cross-compile: **${{ steps.build.outputs.failures }}**."
+            echo "Build took **${{ steps.build.outputs.seconds }}s** on a 4-core runner."
+            echo
+            echo "For comparison: Nocturne ships **9.3 MiB** of \`libnocturne.so\` per ABI today,"
+            echo "and the rizin PoC measured **30.3 MiB** per ABI (12.1 MiB without \`librz_asm\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the built artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghidra-decompiler-arm64-poc
+          path: |
+            measured/libdecomp-android.so.stripped
+            measured/specs/*.sla
+          if-no-files-found: warn
+          retention-days: 7
