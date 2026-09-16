@@ -41,20 +41,36 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.ZipFile
 
-enum class Tab(val title: String) {
-    ASSEMBLY("Assembly"),
-    PSEUDO("Pseudo-C"),
-    GRAPH("Graph"),
-    CALLGRAPH("CallGraph"),
-    FUNCTIONS("Functions"),
-    STRINGS("Strings"),
-    HEX("Hex"),
-    MAP("Map"),
-    APK("APK"),
-    DEBUGGER("Debugger"),
-    AI("AI"),
-    PLUGINS("Plugins"),
-    CONSOLE("Console")
+/**
+ * Destinations are grouped so navigation fits a phone. Thirteen tabs in one
+ * scrolling strip meant the list could never be seen at once; the drawer shows
+ * the groups, and the strip under the header only carries the current one.
+ */
+enum class TabGroup(val title: String) {
+    CODE("Code"),
+    EXPLORE("Explore"),
+    ANALYZE("Analyze"),
+    OUTPUT("Output")
+}
+
+enum class Tab(val title: String, val group: TabGroup) {
+    ASSEMBLY("Assembly", TabGroup.CODE),
+    PSEUDO("Pseudo-C", TabGroup.CODE),
+    GRAPH("Graph", TabGroup.CODE),
+    CALLGRAPH("Call graph", TabGroup.CODE),
+    FUNCTIONS("Functions", TabGroup.EXPLORE),
+    STRINGS("Strings", TabGroup.EXPLORE),
+    HEX("Hex", TabGroup.EXPLORE),
+    MAP("Map", TabGroup.EXPLORE),
+    APK("APK", TabGroup.ANALYZE),
+    DEBUGGER("Debugger", TabGroup.ANALYZE),
+    AI("AI", TabGroup.ANALYZE),
+    PLUGINS("Plugins", TabGroup.OUTPUT),
+    CONSOLE("Console", TabGroup.OUTPUT);
+
+    companion object {
+        fun of(group: TabGroup): List<Tab> = entries.filter { it.group == group }
+    }
 }
 
 enum class DbgMode { NONE, TRACE, SESSION }

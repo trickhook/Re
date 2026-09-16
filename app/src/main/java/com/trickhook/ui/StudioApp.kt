@@ -35,6 +35,20 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.foundation.Image
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.painterResource
+import com.trickhook.R
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Grid4x4
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.TextFields
+import com.trickhook.vm.TabGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Android
@@ -268,26 +282,27 @@ fun StudioApp(vm: StudioViewModel) {
             if (vm.meta == null) {
                 EmptyState(vm, onOpen = openFile)
             } else {
-                // A hairline rule with a 2dp accent underline, rather than the
-                // default filled tab strip — the accent reads as a position
-                // marker instead of a second header bar.
+                // Only the current group rides the strip — four items at most,
+                // so it never scrolls. Switching group happens in the drawer.
+                val groupTabs = Tab.of(vm.tab.group)
                 ScrollableTabRow(
-                    selectedTabIndex = vm.tab.ordinal,
+                    selectedTabIndex = groupTabs.indexOf(vm.tab).coerceAtLeast(0),
                     edgePadding = 16.dp,
                     containerColor = ide.bg,
                     contentColor = ide.text,
                     divider = { HorizontalDivider(color = ide.border) },
                     indicator = { positions ->
-                        if (vm.tab.ordinal < positions.size) {
+                        val i = groupTabs.indexOf(vm.tab)
+                        if (i in positions.indices) {
                             TabRowDefaults.SecondaryIndicator(
-                                Modifier.tabIndicatorOffset(positions[vm.tab.ordinal]),
+                                Modifier.tabIndicatorOffset(positions[i]),
                                 height = 2.dp,
                                 color = ide.accent
                             )
                         }
                     }
                 ) {
-                    Tab.entries.forEach { t ->
+                    groupTabs.forEach { t ->
                         val selected = vm.tab == t
                         Tab(
                             selected = selected,
@@ -368,10 +383,18 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit) {
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(24.dp))
+                Image(
+                    painter = painterResource(R.drawable.nocturne_mark),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(96.dp)
+                        .clip(RoundedCornerShape(26.dp))
+                )
+                Spacer(Modifier.height(16.dp))
                 Text(
-                    "Nocturne", color = ide.text, fontSize = 34.sp,
-                    fontWeight = FontWeight.Light, letterSpacing = (-1.2).sp
+                    "Nocturne", color = ide.text, fontSize = 32.sp,
+                    fontWeight = FontWeight.Light, letterSpacing = (-1.1).sp
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -596,6 +619,38 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
             }
             HorizontalDivider(color = ide.border)
         }
+
+        // Navigation lives here now: every destination visible at once,
+        // grouped, instead of thirteen tabs behind a horizontal scroll.
+        TabGroup.entries.forEach { group ->
+            item { SectionTitle(group.title) }
+            items(Tab.of(group).size) { i ->
+                val t = Tab.of(group)[i]
+                val active = vm.tab == t
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(if (active) ide.accent.copy(alpha = 0.10f) else Color.Transparent)
+                        .clickable { vm.tab = t; onClose() }
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RowIcon(tabIcon(t), if (active) ide.accent else ide.dim, 16.dp)
+                    Text(
+                        t.title,
+                        color = if (active) ide.accent else ide.text,
+                        fontSize = 13.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (active) {
+                        Box(Modifier.size(5.dp).background(ide.accent, CircleShape))
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(6.dp)); HorizontalDivider(color = ide.border) }
+
         // RECENT PROJECTS
         if (vm.recents.isNotEmpty()) {
             item { SectionTitle("Recent projects (${vm.recents.size})") }
@@ -751,6 +806,22 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+private fun tabIcon(t: Tab): ImageVector = when (t) {
+    Tab.ASSEMBLY  -> Icons.Filled.Code
+    Tab.PSEUDO    -> Icons.Filled.DataObject
+    Tab.GRAPH     -> Icons.Filled.AccountTree
+    Tab.CALLGRAPH -> Icons.Filled.Hub
+    Tab.FUNCTIONS -> Icons.Filled.Functions
+    Tab.STRINGS   -> Icons.Filled.TextFields
+    Tab.HEX       -> Icons.Filled.Grid4x4
+    Tab.MAP       -> Icons.Filled.Layers
+    Tab.APK       -> Icons.Filled.Android
+    Tab.DEBUGGER  -> Icons.Filled.BugReport
+    Tab.AI        -> Icons.Filled.AutoAwesome
+    Tab.PLUGINS   -> Icons.Filled.Extension
+    Tab.CONSOLE   -> Icons.Filled.Terminal
 }
 
 private fun fileIcon(format: String?): ImageVector = when (format) {
