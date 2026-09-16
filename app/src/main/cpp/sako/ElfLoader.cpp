@@ -54,22 +54,53 @@ ElfInfo parseElf(const Binary& b) {
     bool is64 = (eiClass == 2);
     info.bits = is64 ? 64 : 32;
 
+    // ELF header fields follow EI_DATA, so every structural read has to respect
+    // it — big-endian MIPS/PPC/S390 objects are otherwise parsed as garbage.
+    info.bigEndian = (eiData == 2);
+    const bool be = info.bigEndian;
+    auto R16 = [be](const u8* q) -> u16 { return be ? rd16be(q) : rd16(q); };
+    auto R32 = [be](const u8* q) -> u32 { return be ? rd32be(q) : rd32(q); };
+    auto R64 = [be](const u8* q) -> u64 { return be ? rd64be(q) : rd64(q); };
+
     auto rd = [&](u64 off, int sz) -> u64 {
         if (off + u64(sz) > n) return 0;
         switch (sz) {
             case 1: return p[off];
-            case 2: return rd16(p + off);
-            case 4: return rd32(p + off);
-            default: return rd64(p + off);
+            case 2: return R16(p + off);
+            case 4: return R32(p + off);
+            default: return R64(p + off);
         }
     };
 
+    // e_machine -> (display name, disassembler arch id). The arch id carries
+    // width and endianness because Capstone needs both to pick a mode.
+    // Architectures Capstone 4.0.2 cannot decode get a name but no arch id, so
+    // the rest of the loader still works and only disassembly is unavailable.
     u16 machine = u16(rd(18, 2));
+    const char* beSuffix = be ? "BE" : "";
+    auto setArch = [&](const char* name, const std::string& id) {
+        info.archName = name;
+        info.archEnum = id;
+    };
     switch (machine) {
-        case 0xB7: info.archName = "AArch64"; info.archEnum = "ARM64";   break;
-        case 0x28: info.archName = "ARM";     info.archEnum = "ARM";     break;
-        case 0x3E: info.archName = "x86-64";  info.archEnum = "X86_64";  break;
-        case 0x03: info.archName = "i386";    info.archEnum = "X86";     break;
+        case 2:   setArch("SPARC",        is64 ? "SPARCV9" : "SPARC");            break;
+        case 3:   setArch("i386",         "X86");                                 break;
+        case 4:   setArch("Motorola 68k", "M68K");                                break;
+        case 8:   setArch(is64 ? "MIPS64" : "MIPS",
+                          std::string(is64 ? "MIPS64" : "MIPS32") + beSuffix);    break;
+        case 18:  setArch("SPARC32PLUS",  "SPARC");                               break;
+        case 20:  setArch("PowerPC",      std::string("PPC32") + beSuffix);       break;
+        case 21:  setArch("PowerPC64",    std::string("PPC64") + beSuffix);       break;
+        case 22:  setArch("IBM S/390",    "SYSZ");                                break;
+        case 40:  setArch("ARM",          std::string("ARM") + beSuffix);         break;
+        case 43:  setArch("SPARC V9",     "SPARCV9");                             break;
+        case 62:  setArch("x86-64",       "X86_64");                              break;
+        case 140: setArch("TI C6000",     "TMS320C64X");                          break;
+        case 183: setArch("AArch64",      std::string("ARM64") + beSuffix);       break;
+        // Recognised, but Capstone 4.0.2 has no decoder for these.
+        case 42:  setArch("SuperH",       "");                                    break;
+        case 50:  setArch("IA-64",        "");                                    break;
+        case 243: setArch("RISC-V",       "");                                    break;
         default: {
             char buf[32];
             snprintf(buf, sizeof buf, "machine_%u", machine);
@@ -77,6 +108,8 @@ ElfInfo parseElf(const Binary& b) {
             info.archEnum = "";
         }
     }
+
+    const bool isArm32 = (machine == 40);
 
     info.entry  = rd(24, is64 ? 8 : 4);
     info.eFlags = u32(rd(is64 ? 48 : 36, 4));
@@ -178,11 +211,11 @@ ElfInfo parseElf(const Binary& b) {
             const u8* sp = p + s.offset + j * ent;
             u32 nameIdx; u64 value, sz64; u8 infoB; u16 shndx;
             if (is64) {
-                nameIdx = rd32(sp); infoB = sp[4]; shndx = rd16(sp + 6);
-                value = rd64(sp + 8); sz64 = rd64(sp + 16);
+                nameIdx = R32(sp); infoB = sp[4]; shndx = R16(sp + 6);
+                value = R64(sp + 8); sz64 = R64(sp + 16);
             } else {
-                nameIdx = rd32(sp); value = rd32(sp + 4); sz64 = rd32(sp + 8);
-                infoB = sp[12]; shndx = rd16(sp + 14);
+                nameIdx = R32(sp); value = R32(sp + 4); sz64 = R32(sp + 8);
+                infoB = sp[12]; shndx = R16(sp + 14);
             }
             Symbol sym;
             if (stb && nameIdx < stl)
@@ -192,6 +225,21 @@ ElfInfo parseElf(const Binary& b) {
             sym.kind = kind == 1 ? "OBJECT" : kind == 2 ? "FUNC" : kind == 0 ? "NOTYPE" : "OTHER";
             sym.bind = bind == 1 ? "GLOBAL" : bind == 2 ? "WEAK" : "LOCAL";
             sym.addr = value; sym.size = sz64; sym.defined = (shndx != 0);
+
+            if (isArm32) {
+                // ARM ELF encodes Thumb-ness in bit 0 of st_value; the bit is an
+                // addressing convention, not part of the address.
+                if (kind == 2 && (value & 1)) { sym.thumb = true; sym.addr = value & ~u64(1); }
+                // $a / $t / $d mapping symbols delimit ARM, Thumb and literal-pool
+                // regions. They are the authoritative source for decode mode, so
+                // collect them rather than guessing from function symbols alone.
+                if (sym.name.size() >= 2 && sym.name[0] == '$' && kind != 2) {
+                    char m = sym.name[1];
+                    if ((m == 'a' || m == 't' || m == 'd') &&
+                        (sym.name.size() == 2 || sym.name[2] == '.'))
+                        info.armMapping.emplace_back(value & ~u64(1), m);
+                }
+            }
             info.symbols.push_back(sym);
             if (s.type == 11) {
                 if (sym.defined && (bind == 1 || bind == 2) && !sym.name.empty())
@@ -215,13 +263,13 @@ ElfInfo parseElf(const Binary& b) {
             u64 rOff, rInfo; i64 rAdd = 0;
             if (s.type == 4) {
                 if (is64) {
-                    rOff = rd64(rp); rInfo = rd64(rp + 8); rAdd = i64(rd64(rp + 16));
+                    rOff = R64(rp); rInfo = R64(rp + 8); rAdd = i64(R64(rp + 16));
                 } else {
-                    rOff = rd32(rp); rInfo = rd32(rp + 4); rAdd = i64(i32(rd32(rp + 8)));
+                    rOff = R32(rp); rInfo = R32(rp + 4); rAdd = i64(i32(R32(rp + 8)));
                 }
             } else {
-                if (is64) { rOff = rd64(rp); rInfo = rd64(rp + 8); }
-                else { rOff = rd32(rp); rInfo = rd32(rp + 4); }
+                if (is64) { rOff = R64(rp); rInfo = R64(rp + 8); }
+                else { rOff = R32(rp); rInfo = R32(rp + 4); }
             }
             if (s.type == 4) info.relas.push_back(Rela{rOff, rInfo, rAdd});
             u32 symIdx = u32(rInfo >> 32);
@@ -298,8 +346,8 @@ ElfInfo parseElf(const Binary& b) {
         for (size_t j = 0; j < cnt; ++j) {
             const u8* dp = p + info.dynamicOff + j * ent;
             u64 tag, val;
-            if (is64) { tag = rd64(dp); val = rd64(dp + 8); }
-            else { tag = rd32(dp); val = rd32(dp + 4); }
+            if (is64) { tag = R64(dp); val = R64(dp + 8); }
+            else { tag = R32(dp); val = R32(dp + 4); }
             if (tag == 0) break;
             if (tag == 5) strtabVa = val;
             entries.emplace_back(tag, val);
@@ -325,6 +373,19 @@ ElfInfo parseElf(const Binary& b) {
                 }
             }
         }
+    }
+
+    // Mapping symbols arrive in symtab order; the decoder binary-searches them.
+    if (!info.armMapping.empty()) {
+        std::sort(info.armMapping.begin(), info.armMapping.end(),
+                  [](const std::pair<u64, char>& a, const std::pair<u64, char>& b) {
+                      return a.first < b.first;
+                  });
+        auto last = std::unique(info.armMapping.begin(), info.armMapping.end(),
+                                [](const std::pair<u64, char>& a, const std::pair<u64, char>& b) {
+                                    return a.first == b.first;
+                                });
+        info.armMapping.erase(last, info.armMapping.end());
     }
 
     info.ok = true;

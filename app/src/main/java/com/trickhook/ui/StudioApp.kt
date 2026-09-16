@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -63,8 +63,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
-import com.sakore.studio.vm.StudioViewModel
-import com.sakore.studio.vm.Tab
+import com.trickhook.vm.StudioViewModel
+import com.trickhook.vm.Tab
 import kotlinx.coroutines.launch
 
 @Composable
@@ -472,7 +472,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = ide.panel,
-        title = { Text("Sako RE Studio v2.0", color = ide.accent) },
+        title = { Text("Nocturne v2.0", color = ide.accent) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("Advanced reverse-engineering studio: ELF / PE / DEX / APK", color = ide.text, fontSize = 12.sp)
@@ -482,7 +482,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                 KeyValue("Analysis", "call graph · PLT/GOT/IAT resolution · demangler · auto-comments")
                 KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
                 KeyValue("Debugger", "ptrace session: spawn/attach, breakpoints, regs, memory, stack, threads")
-                KeyValue("Plugins", "SakoScript interpreter + bundled sample plugins")
+                KeyValue("Plugins", "NocturneScript interpreter + bundled sample plugins")
                 KeyValue("AI", "offline heuristic explain + optional OpenAI-compatible LLM endpoint")
                 Spacer(Modifier.height(8.dp))
                 Text(

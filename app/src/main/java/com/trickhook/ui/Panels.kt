@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,8 +37,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.model.AsmLine
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.model.AsmLine
+import com.trickhook.vm.StudioViewModel
 import kotlinx.coroutines.launch
 
 // ========================================================== Assembly panel ==

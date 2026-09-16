@@ -1,4 +1,4 @@
-package com.sakore.studio.model
+package com.trickhook.model
 
 import org.json.JSONObject
 

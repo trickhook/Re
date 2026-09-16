@@ -1,12 +1,12 @@
-package com.sakore.studio.engine
+package com.trickhook.engine
 
 /**
- * JNI bridge to the native C++ engine (libsako.so).
+ * JNI bridge to the native C++ engine (libnocturne.so).
  * Engine side: app/src/main/cpp/
  */
 object NativeBridge {
     init {
-        System.loadLibrary("sako")
+        System.loadLibrary("nocturne")
     }
 
     external fun nativeAnalyze(path: String): String

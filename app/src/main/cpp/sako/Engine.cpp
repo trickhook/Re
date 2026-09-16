@@ -125,6 +125,22 @@ bool Engine::ensureCtx(const std::string& path) {
 
     if (!c.arch.empty() && c.dis.open(c.arch)) {
         c.backend = c.dis.backend();
+        if (c.fmt == Fmt::ELF && c.dis.armDualMode()) {
+            c.dis.setArmMapping(c.elf.armMapping);
+            // Stripped .so files keep .dynsym but lose the $a/$t mapping symbols
+            // in .symtab. The Thumb bit on dynsym FUNC entries survives, so fall
+            // back to whichever mode the majority of known functions use.
+            size_t thumbFns = 0;
+            for (auto& f : c.funcs) if (f.thumb) ++thumbFns;
+            c.dis.setDefaultThumb(thumbFns * 2 > c.funcs.size());
+            if (!c.elf.armMapping.empty())
+                c.notes.push_back("ARM mapping symbols: " +
+                                  std::to_string(c.elf.armMapping.size()) +
+                                  " ARM/Thumb/data regions");
+            else if (thumbFns)
+                c.notes.push_back("ARM: no mapping symbols, " +
+                                  std::to_string(thumbFns) + " Thumb functions from dynsym");
+        }
     } else {
         c.backend.clear();
         if (c.fmt == Fmt::ELF || c.fmt == Fmt::PE)
@@ -380,6 +396,10 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     }
     u64 size = std::min<u64>(fn->size ? fn->size : 512, 65536);
     size = std::min<u64>(size, u64(c.bin.data.size()) - off);
+
+    // For ARM32 the enclosing function's Thumb bit decides the mode wherever the
+    // mapping table has nothing to say.
+    if (c.dis.armDualMode()) c.dis.setDefaultThumb(fn->thumb);
 
     auto lines = c.dis.disassemble(c.bin.data.data() + off, size_t(size), fn->addr, 4096);
 

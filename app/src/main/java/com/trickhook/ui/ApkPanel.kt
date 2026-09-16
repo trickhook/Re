@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
@@ -28,7 +28,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.vm.StudioViewModel
 import java.util.zip.ZipFile
 
 // ============================================================== APK panel ==

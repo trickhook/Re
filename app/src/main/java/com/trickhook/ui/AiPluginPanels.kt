@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -30,7 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.vm.StudioViewModel
 
 // ============================================================ AI assistant ==
 @Composable
@@ -160,7 +160,7 @@ fun PluginsPanel(vm: StudioViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "PLUGINS (SakoScript)",
+                "PLUGINS (NocturneScript)",
                 color = ide.text, fontSize = 12.sp,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontFamily = Mono
             )

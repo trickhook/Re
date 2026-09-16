@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,7 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.vm.StudioViewModel
 
 // ========================================================= Call graph panel ==
 @Composable

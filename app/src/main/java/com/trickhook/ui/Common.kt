@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column

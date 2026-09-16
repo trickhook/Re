@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
@@ -44,8 +44,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.model.CfgBlock
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.model.CfgBlock
+import com.trickhook.vm.StudioViewModel
 
 private data class NodePos(
     val block: CfgBlock, val x: Float, val y: Float, val depth: Int, val kind: String

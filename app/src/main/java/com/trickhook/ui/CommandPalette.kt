@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,8 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.sakore.studio.vm.StudioViewModel
-import com.sakore.studio.vm.Tab
+import com.trickhook.vm.StudioViewModel
+import com.trickhook.vm.Tab
 
 data class Command(
     val title: String,

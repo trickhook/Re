@@ -1,4 +1,4 @@
-// JNI bridge — com.sakore.studio.engine.NativeBridge
+// JNI bridge — com.trickhook.engine.NativeBridge
 #include <jni.h>
 #include <string>
 #include <vector>
@@ -19,33 +19,33 @@ static jstring toJString(JNIEnv* env, const std::string& s) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeAnalyze(JNIEnv* env, jobject, jstring jpath) {
+Java_com_trickhook_engine_NativeBridge_nativeAnalyze(JNIEnv* env, jobject, jstring jpath) {
     std::string path = toStdString(env, jpath);
     return toJString(env, sako::Engine::instance().analyze(path));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeFunction(JNIEnv* env, jobject, jstring jpath,
+Java_com_trickhook_engine_NativeBridge_nativeFunction(JNIEnv* env, jobject, jstring jpath,
                                                           jlong addr) {
     std::string path = toStdString(env, jpath);
     return toJString(env, sako::Engine::instance().functionDetail(path, u64(addr)));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeCallGraph(JNIEnv* env, jobject, jstring jpath,
+Java_com_trickhook_engine_NativeBridge_nativeCallGraph(JNIEnv* env, jobject, jstring jpath,
                                                            jlong focus) {
     std::string path = toStdString(env, jpath);
     return toJString(env, sako::Engine::instance().callGraph(path, u64(focus)));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeDbgCmd(JNIEnv* env, jobject, jstring jcmd) {
+Java_com_trickhook_engine_NativeBridge_nativeDbgCmd(JNIEnv* env, jobject, jstring jcmd) {
     std::string cmd = toStdString(env, jcmd);
     return toJString(env, sako::Engine::instance().dbgCmd(cmd));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeScriptRun(JNIEnv* env, jobject,
+Java_com_trickhook_engine_NativeBridge_nativeScriptRun(JNIEnv* env, jobject,
                                                            jstring jsource, jstring jpath) {
     std::string src = toStdString(env, jsource);
     std::string path = toStdString(env, jpath);
@@ -53,7 +53,7 @@ Java_com_sakore_studio_engine_NativeBridge_nativeScriptRun(JNIEnv* env, jobject,
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeDebugRun(JNIEnv* env, jobject,
+Java_com_trickhook_engine_NativeBridge_nativeDebugRun(JNIEnv* env, jobject,
                                                           jstring jargvLines, jint maxEvents) {
     // argv passed as newline-separated tokens
     std::string lines = toStdString(env, jargvLines);
@@ -70,6 +70,6 @@ Java_com_sakore_studio_engine_NativeBridge_nativeDebugRun(JNIEnv* env, jobject,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_sakore_studio_engine_NativeBridge_nativeDebugStop(JNIEnv*, jobject) {
+Java_com_trickhook_engine_NativeBridge_nativeDebugStop(JNIEnv*, jobject) {
     sako::Engine::instance().debugStop();
 }

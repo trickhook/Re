@@ -1,26 +1,29 @@
 <div align="center">
 
-<img src="assets/banner.svg" width="100%" alt="Sako RE Studio — Mobile-first Interactive Disassembler & Decompiler Framework"/>
+<img src="assets/banner.svg" width="100%" alt="Nocturne — Mobile-first Interactive Disassembler & Decompiler Framework"/>
 
-<img src="assets/app-icon.png" width="128" alt="Sako RE Studio app icon"/>
+<img src="assets/app-icon.png" width="128" alt="Nocturne app icon"/>
 
-# 🛡️ Sako RE Studio
+# 🌙 Nocturne
 
 ### Mobile-first Interactive Disassembler & Decompiler Framework
 
+*A fork of [Sako RE Studio](https://github.com/Maxamedxasa/SakoREStudio) by **Maxamed Xasan Muse** — rebranded, rethemed, and extended to decode every
+architecture Capstone supports. Original work and MIT licence: see [Author](#-qoraaga--author).*
+
 **IDA Pro & Ghidra — gacanta ku jira / in your pocket**
 
-[![Release](https://img.shields.io/github/v/release/Maxamedxasa/SakoREStudio?style=for-the-badge&color=22D3EE&label=Download)](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)
-[![Platform](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)
-[![APK](https://img.shields.io/badge/APK-~10_MB-success?style=for-the-badge)](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)
+[![Release](https://img.shields.io/github/v/release/trickhook/Re?style=for-the-badge&color=FB1B69&label=Download)](https://github.com/trickhook/Re/releases/latest)
+[![Platform](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/trickhook/Re/releases/latest)
+[![Arch](https://img.shields.io/badge/Decodes-ARM64_·_ARM/Thumb_·_x86_·_MIPS_·_PPC_·_SPARC_·_SysZ_·_m68k-C792EA?style=for-the-badge)](#-known-limitations)
 [![Made In Somalia](https://img.shields.io/badge/%F0%9F%87%B8%F0%9F%87%B4_MADE_IN-SOMALIA-4189DD?style=for-the-badge)](#-qoraaga--author)
 [![Author](https://img.shields.io/badge/Author-Maxamed_Xasan_Muse-34D399?style=for-the-badge)](#-qoraaga--author)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/trickhook/Re/build.yml?style=for-the-badge&label=Build%20APK&logo=githubactions&logoColor=white)](https://github.com/trickhook/Re/actions/workflows/build.yml)
 
-**[⬇️ DOWNLOAD APK](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** · [🌐 Website/Landing](https://maxamedxasa.github.io/SakoREStudio/) · [🇸🇴 Soomaali](#soomaali) · [🇬🇧 English](#english)
+**[⬇️ DOWNLOAD APK](https://github.com/trickhook/Re/actions/workflows/build.yml)** · [🇸🇴 Soomaali](#soomaali) · [🇬🇧 English](#english)
 
-<img src="assets/demo.gif" width="300" alt="Sako RE Studio demo — disassembly, call graph, decompiler"/>
+<img src="assets/demo.gif" width="300" alt="Nocturne demo — disassembly, call graph, decompiler"/>
 
 </div>
 
@@ -29,9 +32,9 @@
 <a name="soomaali"></a>
 ## 🇸🇴 SOOMAALI
 
-### 🧠 Waa maxay Sako RE Studio?
+### 🧠 Waa maxay Nocturne?
 
-**Sako RE Studio** waa qalab buuxa oo *reverse engineering* ah oo mobile-ka lagu shaqeeyo — disassembler, decompiler, call graph, debugger, APK analyzer iyo nidaam plugins oo dhan ayaa isku hal app ku dhex jira. Hadalka uga gaabkan: **waa IDA Pro ama Ghidra, laakiin telefoonkaada gacanta ku jira.** Engine-ka waa C++17 (NDK) oo ku shaqeeya Capstone 4.0.2, UI-guna waa Kotlin Jetpack Compose oo casri ah. Waxaa lagu falanqayn karaa **APK · ELF · PE · DEX** — ARM64 iyo x86-64ba wax walba oo app-ka dhexdiisa ah ayaa goobo la'aan shaqeeya (falanqayntu way offline tahay).
+**Nocturne** waa qalab buuxa oo *reverse engineering* ah oo mobile-ka lagu shaqeeyo — disassembler, decompiler, call graph, debugger, APK analyzer iyo nidaam plugins oo dhan ayaa isku hal app ku dhex jira. Hadalka uga gaabkan: **waa IDA Pro ama Ghidra, laakiin telefoonkaada gacanta ku jira.** Engine-ka waa C++17 (NDK) oo ku shaqeeya Capstone 4.0.2, UI-guna waa Kotlin Jetpack Compose oo casri ah. Waxaa lagu falanqayn karaa **APK · ELF · PE · DEX** — **ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · SystemZ · m68k** (little- iyo big-endian labadaba). Wax walba app-ka dhexdiisa ayay ka dhacaan (falanqayntu way offline tahay).
 
 App-kan waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed — waa qalabkii ugu horreeyay ee noocaan ah oo ka soo saarma Soomaaliya 🇸🇴
 
@@ -45,13 +48,13 @@ App-kan waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed — waa qalabkii u
 | 4 | 🕸️ **Graph View** | CFG isdhexgal ah: jiid (drag) nodes-ka, zoom, midabada block-yada (green=entry, red=exit, amber=branch), raadin iyo **minimap** |
 | 5 | 🐞 **Debugger Dhab Ah** | ptrace session: **Spawn / Attach PID**, software breakpoints (BRK / 0xCC), registers (akhris/qorid), memory read/write, stack view, thread list |
 | 6 | 📦 **APK Analyzer** | Manifest (AXML binary parser): package, version, **permissions** (kuwo khatar ah ayaa ⚠ lagu calaamadaynayaa), activities/services/receivers + intent-filters, DEX classes, native libs, resources wata image preview |
-| 7 | 🧩 **Plugin System (SakoScript)** | Luuqad programming oo app-ka ku dhex jirta (variables, if/while/for, functions) + host API 20+ oo function ah. 4 plugin ayaa la soo shubay |
+| 7 | 🧩 **Plugin System (NocturneScript)** | Luuqad programming oo app-ka ku dhex jirta (variables, if/while/for, functions) + host API 20+ oo function ah. 4 plugin ayaa la soo shubay |
 | 8 | 🤖 **AI Assistant** | *Explain (offline)* — sharaxaad function kasta oo internet la'aan shaqeysa; ama ku xir **OpenAI / DeepSeek / Ollama** endpoint gaar ah |
 | 9 | 📱 **UI Casri Ah** | 13 tab, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), shortcuts buuxa (F1 = caawimo) |
 
 ### 📲 Sida Loo Rakibo
 
-1. Fur **[Releases](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** → soo dejiso `SakoREStudio-v2.0.3.apk` (~10 MB) — ama APK-ga ugu cusub ka soo qaado [**Actions → Build APK → Artifacts**](https://github.com/trickhook/Re/actions/workflows/build.yml)
+1. APK-ga ka soo qaado [**Actions → Build APK → Artifacts**](https://github.com/trickhook/Re/actions/workflows/build.yml) (`Nocturne-debug-apk`) ama [**Releases**](https://github.com/trickhook/Re/releases/latest)
 2. Fur APK-ga → hadduu browser-ku ama file manager-ku dhib ku qado → ogol **"Install unknown apps"**
 3. Rakib → fur → **diyaar!** (Android 8.0+ · arm64-v8a & x86_64 · ma u baahna root — debugger-keliya ayaa root u baahan)
 
@@ -90,7 +93,7 @@ Tab-ka **Plugins** → 4 plugin ayaa diyaar: `security-auditor`, `arm-analyzer`,
 **11 · Kaydi**
 `Ctrl+S` → mashruuca SQLite-ga ayaa la kaydiyaa → drawer-ka **RECENT PROJECTS** ka fur markale.
 
-### 🧩 SakoScript — Luuqada Plugins-ka
+### 🧩 NocturneScript — Luuqada Plugins-ka
 
 ```js
 ## Tusaale: baarista APIs-ka khatar ah
@@ -136,9 +139,9 @@ for i in 0..n-1 {
 <a name="english"></a>
 ## 🇬🇧 ENGLISH
 
-### 🧠 What is Sako RE Studio?
+### 🧠 What is Nocturne?
 
-**Sako RE Studio** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64 and x86-64**, and all analysis runs 100% offline — nothing leaves your device unless you configure your own AI endpoint.
+**Nocturne** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64, ARM/Thumb, x86, x86-64, MIPS, PowerPC, SPARC, SystemZ and m68k** — little- and big-endian alike — and all analysis runs 100% offline — nothing leaves your device unless you configure your own AI endpoint.
 
 Built end-to-end by a Somali developer — the first mobile reverse-engineering studio of its kind out of Somalia 🇸🇴
 
@@ -152,13 +155,13 @@ Built end-to-end by a Somali developer — the first mobile reverse-engineering 
 | 4 | 🕸️ **Interactive Graph View** | CFG canvas: drag nodes, zoom, color-coded blocks (green=entry, red=exit, amber=branch), search + **minimap** |
 | 5 | 🐞 **Real Debugger** | ptrace session: **Spawn / Attach PID**, software breakpoints (BRK / 0xCC with auto-rewind), register read/write, memory read/write, stack view, thread list |
 | 6 | 📦 **APK Analyzer** | Binary AXML manifest parser: package/version/SDK, **permissions** (dangerous ones flagged ⚠), components + intent-filters, DEX classes, native libs, resources with image preview |
-| 7 | 🧩 **Plugin System (SakoScript)** | An embedded scripting language (variables, if/while/for, functions) + a 20+-function host API. 4 plugins bundled |
+| 7 | 🧩 **Plugin System (NocturneScript)** | An embedded scripting language (variables, if/while/for, functions) + a 20+-function host API. 4 plugins bundled |
 | 8 | 🤖 **AI Assistant** | *Explain (offline)* — heuristic explanation of any function without internet; or plug in your own **OpenAI / DeepSeek / Ollama** endpoint |
 | 9 | 📱 **Modern UI** | 13 tabs, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), full keyboard shortcuts (F1 = help) |
 
 ### 📲 Install
 
-1. Open **[Releases](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** → download `SakoREStudio-v2.0.3.apk` (~10 MB)
+1. Grab the APK from [**Actions → Build APK → Artifacts**](https://github.com/trickhook/Re/actions/workflows/build.yml) (`Nocturne-debug-apk`), or from [**Releases**](https://github.com/trickhook/Re/releases/latest)
 2. Open the APK → if prompted, allow **"Install unknown apps"**
 3. Install → open → **done!** (Android 8.0+ · arm64-v8a & x86_64 · no root required — only the debugger needs root/debuggable)
 
@@ -173,10 +176,10 @@ Built end-to-end by a Somali developer — the first mobile reverse-engineering 
 7. **APK** — decoded manifest, permissions (dangerous flagged ⚠), components with intent-filters, DEX classes, native libs (**tap = extract + analyze**), resources (**tap image = preview**).
 8. **Debugger** *(root/debuggable device)* — **Spawn** (e.g. `/system/bin/toybox sleep 30`) → **BP @ function** → on hit inspect registers/memory/stack/threads → **Continue**. Or **Attach** to a running PID.
 9. **AI** — select a function → **Explain (offline)**; or **⚙ Settings** → add an OpenAI-compatible endpoint (OpenAI / DeepSeek / Ollama) → **Ask LLM**.
-10. **Plugins** — run the 4 bundled SakoScript plugins (`security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter`); effects are applied straight into the project database.
+10. **Plugins** — run the 4 bundled NocturneScript plugins (`security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter`); effects are applied straight into the project database.
 11. **Save** — `Ctrl+S` persists the SQLite project; reopen later from **RECENT PROJECTS** in the drawer.
 
-### 🧩 SakoScript — the Plugin Language
+### 🧩 NocturneScript — the Plugin Language
 
 ```js
 ## Example: hunt dangerous APIs
@@ -209,8 +212,8 @@ for i in 0..n-1 {
 **Requirements:** Android Studio (Ladybug+) · NDK 27.2.12479018 · CMake 3.22.1 · JDK 17 (bundled with Studio)
 
 ```bash
-git clone https://github.com/Maxamedxasa/SakoREStudio.git
-# Android Studio → File → Open → select the SakoREStudio folder
+git clone https://github.com/trickhook/Re.git
+# Android Studio → File → Open → select the cloned folder
 # wait for Gradle sync → Run ▶  (first sync downloads Gradle 8.10.2 + deps)
 ```
 
@@ -235,8 +238,8 @@ and uploads the APK:
 
 1. Open the [**Build APK**](https://github.com/trickhook/Re/actions/workflows/build.yml)
    workflow (or press **Run workflow** to start one by hand)
-2. Pick the run → **Artifacts** → `SakoREStudio-debug-apk`
-3. Unzip, then `adb install -r SakoREStudio-*-debug.apk` — or copy the APK to the
+2. Pick the run → **Artifacts** → `Nocturne-debug-apk`
+3. Unzip, then `adb install -r Nocturne-*-debug.apk` — or copy the APK to the
    phone and tap it (allow *Install unknown apps* when prompted)
 
 The run summary lists each APK with its size and SHA-256. Pushing a `v*` tag
@@ -250,14 +253,14 @@ installed, so CI skips it and ships the debug APK only.
 
 **Release signing (optional):** create `app/keystore.properties` (gitignored):
 ```properties
-storeFile=sakore-release.jks
+storeFile=nocturne-release.jks
 storePassword=your_password
 keyAlias=your_alias
 keyPassword=your_password
 ```
 Generate a keystore with:
 ```bash
-keytool -genkeypair -v -keystore app/sakore-release.jks -alias your_alias \
+keytool -genkeypair -v -keystore app/nocturne-release.jks -alias your_alias \
   -keyalg RSA -keysize 2048 -validity 10000
 ```
 Without this file, release builds simply produce an unsigned APK — debug builds always work.
@@ -268,9 +271,9 @@ app/src/main/
 ├── cpp/capstone/            vendored Capstone 4.0.2
 ├── cpp/sako/                C++17 engine: loaders (ELF/PE/DEX), disassembler,
 │                            IR decompiler, deep analysis, call graph,
-│                            debug session, SakoScript interpreter, JSON API
+│                            debug session, NocturneScript interpreter, JSON API
 ├── cpp/sako_jni.cpp         JNI bridge
-├── assets/plugins/          bundled SakoScript plugins (4)
+├── assets/plugins/          bundled NocturneScript plugins (4)
 ├── java/com/sakore/studio/
 │   ├── data/ProjectDb.kt    SQLite project database
 │   ├── engine/NativeBridge.kt
@@ -283,7 +286,8 @@ app/src/main/
 ### ⚠️ Known Limitations
 
 - **Debugger** needs a rooted or `ro.debuggable=1` device (SELinux may deny ptrace for system binaries). Breakpoints are software-based; no hardware watchpoints yet.
-- **Decompiler** is a real IR pipeline, but not Hex-Rays: no switch/jump-table recovery, no exception handling, ARM-32 falls back to heuristic output.
+- **Decompiler** is a real IR pipeline, but not Hex-Rays: no switch/jump-table recovery and no exception handling. The IR lifter targets ARM64 and x86-64; other architectures disassemble fully but decompile heuristically.
+- **RISC-V, SuperH and IA-64** ELFs are identified and parsed, but Capstone 4.0.2 has no decoder for them, so no disassembly is produced.
 - **DEX bytecode disassembly** is not included (Capstone has no Dalvik backend) — classes, methods, strings and the invoke-based call graph are fully available.
 - **resources.arsc** names are not decoded yet (entries listed + image previews work).
 
@@ -298,7 +302,7 @@ app/src/main/
 
 *Horumariye Soomaaliyeed — Somali Developer*
 
-> *"Sako RE Studio waa app-ka ugu horreeya ee noocaan ah oo Soomaaliya laga soo saaro.
+> *"Nocturne waa app-ka ugu horreeya ee noocaan ah oo Soomaaliya laga soo saaro.
 > Cilmiga reverse engineering-ka waa inuu gaaraa qof kasta — telefoonka kaliya."*
 
 **GitHub:** [github.com/Maxamedxasa](https://github.com/Maxamedxasa)

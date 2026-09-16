@@ -66,5 +66,5 @@ esac
 
 echo "==> Installing $(du -h "$APK" | cut -f1) on $FIRST ($ABI)"
 "${ADB[@]}" install -r "$APK"
-"${ADB[@]}" shell monkey -p com.sakore.studio -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+"${ADB[@]}" shell monkey -p com.trickhook -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
 echo "==> Done — Sako RE Studio launched."

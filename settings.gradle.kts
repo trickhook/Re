@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "SakoREStudio"
+rootProject.name = "Nocturne"
 include(":app")

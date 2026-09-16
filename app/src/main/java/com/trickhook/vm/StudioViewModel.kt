@@ -1,4 +1,4 @@
-package com.sakore.studio.vm
+package com.trickhook.vm
 
 import android.content.Context
 import android.net.Uri
@@ -10,27 +10,27 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sakore.studio.data.Bookmark
-import com.sakore.studio.data.ProjectDb
-import com.sakore.studio.data.RecentProject
-import com.sakore.studio.engine.NativeBridge
-import com.sakore.studio.model.ApkEntry
-import com.sakore.studio.model.ApkResourceEntry
-import com.sakore.studio.model.AnalysisMeta
-import com.sakore.studio.model.CallGraphData
-import com.sakore.studio.model.ConsoleLine
-import com.sakore.studio.model.DbgState
-import com.sakore.studio.model.DebugResult
-import com.sakore.studio.model.FunctionDetail
-import com.sakore.studio.model.ManifestInfo
-import com.sakore.studio.model.PluginDef
-import com.sakore.studio.model.ApkAnalyzer
-import com.sakore.studio.model.parseCallGraph
-import com.sakore.studio.model.parseDbg
-import com.sakore.studio.model.parseDebug
-import com.sakore.studio.model.parseDetail
-import com.sakore.studio.model.parseMeta
-import com.sakore.studio.model.parseScriptResult
+import com.trickhook.data.Bookmark
+import com.trickhook.data.ProjectDb
+import com.trickhook.data.RecentProject
+import com.trickhook.engine.NativeBridge
+import com.trickhook.model.ApkEntry
+import com.trickhook.model.ApkResourceEntry
+import com.trickhook.model.AnalysisMeta
+import com.trickhook.model.CallGraphData
+import com.trickhook.model.ConsoleLine
+import com.trickhook.model.DbgState
+import com.trickhook.model.DebugResult
+import com.trickhook.model.FunctionDetail
+import com.trickhook.model.ManifestInfo
+import com.trickhook.model.PluginDef
+import com.trickhook.model.ApkAnalyzer
+import com.trickhook.model.parseCallGraph
+import com.trickhook.model.parseDbg
+import com.trickhook.model.parseDebug
+import com.trickhook.model.parseDetail
+import com.trickhook.model.parseMeta
+import com.trickhook.model.parseScriptResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -121,7 +121,7 @@ class StudioViewModel : ViewModel() {
     }
 
     init {
-        log("INFO", "SAKO RE Studio v2 diyaar — engine loaded (IR decompiler, callgraph, debugger, plugins)")
+        log("INFO", "Nocturne v2 diyaar — engine loaded (IR decompiler, callgraph, debugger, plugins)")
     }
 
     fun log(level: String, msg: String) {
@@ -507,7 +507,7 @@ class StudioViewModel : ViewModel() {
                 val marker = File(dir, ".bundled")
                 if (!marker.exists()) {
                     context.assets.list("plugins")?.forEach { name ->
-                        if (name.endsWith(".sakoplugin")) {
+                        if (name.endsWith(".nocturneplugin")) {
                             context.assets.open("plugins/$name").use { ins ->
                                 File(dir, name).outputStream().use { ins.copyTo(it) }
                             }
@@ -516,7 +516,7 @@ class StudioViewModel : ViewModel() {
                     }
                     marker.writeText("1")
                 }
-                val list = dir.listFiles { f -> f.name.endsWith(".sakoplugin") }
+                val list = dir.listFiles { f -> f.name.endsWith(".nocturneplugin") }
                     ?.mapNotNull { f ->
                         try {
                             val o = JSONObject(f.readText())

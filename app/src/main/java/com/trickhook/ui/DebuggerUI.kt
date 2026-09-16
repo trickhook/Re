@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,8 +29,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.vm.DbgMode
-import com.sakore.studio.vm.StudioViewModel
+import com.trickhook.vm.DbgMode
+import com.trickhook.vm.StudioViewModel
 import kotlinx.coroutines.delay
 
 // ============================================================== Debugger ==
@@ -290,7 +290,7 @@ private fun HexDump(title: String, hexData: String, ide: IdeColors) {
 @Composable
 private fun TraceView(vm: StudioViewModel) {
     val ide = LocalIde.current
-    var args by remember { mutableStateOf("/system/bin/toybox echo hello-sako") }
+    var args by remember { mutableStateOf("/system/bin/toybox echo hello-nocturne") }
     var maxEvents by remember { mutableStateOf("200") }
     Column {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {

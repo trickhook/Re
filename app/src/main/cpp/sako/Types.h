@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <memory>
+#include <utility>
 
 namespace sako {
 
@@ -27,6 +28,8 @@ inline u32 rd32(const u8* p) { return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) 
 inline u64 rd64(const u8* p) { return u64(rd32(p)) | (u64(rd32(p + 4)) << 32); }
 inline u32 rd24(const u8* p) { return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16); }
 inline u32 rd32be(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
+inline u16 rd16be(const u8* p) { return u16(u16(p[0]) << 8 | p[1]); }
+inline u64 rd64be(const u8* p) { return (u64(rd32be(p)) << 32) | rd32be(p + 4); }
 
 inline bool printable(u8 c) { return c >= 0x20 && c < 0x7F; }
 // Sign-extend the low `bits` bits of v (masks first, so already-extended
@@ -60,7 +63,8 @@ struct FoundString { u64 addr = 0; std::string value; };
 // ---- loader result types ----
 struct Section { std::string name, type, flags; u64 addr = 0, offset = 0, size = 0; };
 struct Segment { std::string type, flags; u64 vaddr = 0, offset = 0, filesz = 0, memsz = 0; };
-struct Symbol  { std::string name, kind, bind; u64 addr = 0, size = 0; bool defined = false; };
+struct Symbol  { std::string name, kind, bind; u64 addr = 0, size = 0; bool defined = false;
+                 bool thumb = false; };   // thumb: ARM32 symbol had st_value bit 0 set
 
 struct Rela { u64 off = 0, info = 0; i64 addend = 0; };
 
@@ -68,7 +72,11 @@ struct ElfInfo {
     bool ok = false;
     std::string error;
     int bits = 64;
+    bool bigEndian = false;           // EI_DATA == ELFDATA2MSB
     std::string archName, archEnum;   // "AArch64"/"ARM64" etc
+    // ARM mapping symbols: (address, 'a' = ARM | 't' = Thumb | 'd' = data), sorted.
+    // These are what tell an ARM32 disassembler which mode each region is in.
+    std::vector<std::pair<u64, char>> armMapping;
     u64 entry = 0, base = 0;
     u32 eFlags = 0;
     u64 dynamicOff = 0, dynamicSz = 0;
@@ -110,7 +118,7 @@ struct DexInfo {
 struct AsmLine { u64 addr = 0; std::string bytes, mnem, ops, comment; };
 struct CfgBlock { int id = 0; u64 start = 0, end = 0; int nInstr = 0; std::vector<int> succ; };
 struct Xref { u64 from = 0, to = 0; std::string type; };
-struct FuncInfo { u64 addr = 0, size = 0; std::string name, from; };
+struct FuncInfo { u64 addr = 0, size = 0; std::string name, from; bool thumb = false; };
 
 struct FunctionDetail {
     bool ok = false;

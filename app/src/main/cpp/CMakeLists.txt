@@ -1,6 +1,6 @@
-# Sako RE Studio — native engine
+# Nocturne — native engine
 cmake_minimum_required(VERSION 3.22.1)
-project(sako CXX)
+project(nocturne CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,15 +16,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/capstone/CMakeLists.txt")
     set(CAPSTONE_X86_SUPPORT     ON  CACHE BOOL "" FORCE)
     set(CAPSTONE_ARM_SUPPORT     ON  CACHE BOOL "" FORCE)
     set(CAPSTONE_ARM64_SUPPORT   ON  CACHE BOOL "" FORCE)
-    set(CAPSTONE_MIPS_SUPPORT    OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_PPC_SUPPORT     OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_SPARC_SUPPORT   OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_SYSZ_SUPPORT    OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_XCORE_SUPPORT   OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_M68K_SUPPORT    OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_TMS320C64X_SUPPORT OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_M680X_SUPPORT   OFF CACHE BOOL "" FORCE)
-    set(CAPSTONE_EVM_SUPPORT     OFF CACHE BOOL "" FORCE)
+    set(CAPSTONE_MIPS_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_PPC_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_SPARC_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_SYSZ_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_XCORE_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_M68K_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_TMS320C64X_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_M680X_SUPPORT   ON  CACHE BOOL "" FORCE)
+    set(CAPSTONE_EVM_SUPPORT   ON  CACHE BOOL "" FORCE)
     if(POLICY CMP0091)
         cmake_policy(SET CMP0091 NEW)
     endif()
@@ -36,7 +36,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/capstone/CMakeLists.txt")
     endif()
 endif()
 
-add_library(sako SHARED
+add_library(nocturne SHARED
     sako_jni.cpp
     sako/Types.cpp
     sako/Binary.cpp
@@ -56,13 +56,13 @@ add_library(sako SHARED
     sako/Debugger.cpp
     sako/Engine.cpp)
 
-target_include_directories(sako PRIVATE
+target_include_directories(nocturne PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sako
     ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
 
 if(SAKO_CAP_LIB)
-    target_compile_definitions(sako PRIVATE SAKO_HAVE_CAPSTONE=1)
-    target_link_libraries(sako PRIVATE ${SAKO_CAP_LIB})
+    target_compile_definitions(nocturne PRIVATE SAKO_HAVE_CAPSTONE=1)
+    target_link_libraries(nocturne PRIVATE ${SAKO_CAP_LIB})
 endif()
 
-target_link_libraries(sako PRIVATE android log)
+target_link_libraries(nocturne PRIVATE android log)

@@ -1,4 +1,4 @@
-package com.sakore.studio.ui
+package com.trickhook.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,8 +31,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sakore.studio.vm.StudioViewModel
-import com.sakore.studio.vm.Tab
+import com.trickhook.vm.StudioViewModel
+import com.trickhook.vm.Tab
 
 // ============================================================== Strings ==
 @Composable
@@ -230,7 +230,7 @@ fun ConsolePanel(vm: StudioViewModel) {
                 .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Console · Console-ka SakoRE", color = ide.text, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            Text("Console · Console-ka Nocturne", color = ide.text, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { vm.console.clear(); vm.log("INFO", "Console cleared") }) {
                 Text("Clear", color = ide.dim)
@@ -263,7 +263,7 @@ fun ConsolePanel(vm: StudioViewModel) {
 @Composable
 fun LegacyTracerPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
-    var args by remember { mutableStateOf("/system/bin/toybox echo hello-sako") }
+    var args by remember { mutableStateOf("/system/bin/toybox echo hello-nocturne") }
     var maxEvents by remember { mutableStateOf("200") }
     Column(Modifier.fillMaxSize()) {
         Row(

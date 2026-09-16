@@ -22,11 +22,24 @@ public:
     Disasm(const Disasm&) = delete;
     Disasm& operator=(const Disasm&) = delete;
 
-    // arch: "ARM64" | "ARM" | "X86_64" | "X86"
+    // arch ids produced by the loaders:
+    //   ARM64[BE] · ARM[BE] · THUMB · X86 · X86_64 · MIPS32[BE] · MIPS64[BE]
+    //   PPC32[BE] · PPC64[BE] · SPARC · SPARCV9 · SYSZ · M68K · XCORE
+    //   TMS320C64X · M680X · EVM
     bool open(const std::string& arch);
     void close();
     bool ready() const { return !backend_.empty(); }
     const std::string& backend() const { return backend_; }
+    const std::string& arch() const { return arch_; }
+
+    // ARM32 only. $a/$t/$d mapping symbols from the ELF symbol table, sorted by
+    // address. With these the decoder follows ARM/Thumb interworking exactly and
+    // skips literal pools instead of decoding them as instructions.
+    void setArmMapping(std::vector<std::pair<u64, char>> m) { armMap_ = std::move(m); }
+    // Mode for addresses no mapping symbol covers (stripped objects): taken from
+    // the enclosing function symbol's Thumb bit when one is known.
+    void setDefaultThumb(bool t) { defaultThumb_ = t; }
+    bool armDualMode() const { return cshAlt_ != 0; }
 
     Disasm(Disasm&& o) noexcept { moveFrom(o); }
     Disasm& operator=(Disasm&& o) noexcept {
@@ -40,12 +53,24 @@ private:
     void moveFrom(Disasm& o) {
         capstone_ = o.capstone_; o.capstone_ = false;
         csh_ = o.csh_; o.csh_ = 0;
+        cshAlt_ = o.cshAlt_; o.cshAlt_ = 0;
+        step_ = o.step_;
+        defaultThumb_ = o.defaultThumb_;
+        armMap_ = std::move(o.armMap_);
         arch_ = std::move(o.arch_);
         backend_ = std::move(o.backend_);
     }
 
+    // 'a' = ARM, 't' = Thumb, 'd' = data. Only meaningful for ARM32.
+    char modeAt(u64 va) const;
+    u64  nextBoundary(u64 va) const;
+
     bool capstone_ = false;
-    size_t csh_ = 0;              // csh handle
+    size_t csh_ = 0;              // primary csh handle
+    size_t cshAlt_ = 0;           // ARM32: the Thumb handle
+    size_t step_ = 1;             // resync stride after an undecodable byte
+    bool defaultThumb_ = false;
+    std::vector<std::pair<u64, char>> armMap_;
     std::string arch_, backend_;
 };
 

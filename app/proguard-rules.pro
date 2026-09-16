@@ -1,2 +1,2 @@
-# Sako RE Studio proguard rules (minify disabled by default)
--keep class com.sakore.studio.engine.NativeBridge { *; }
+# Nocturne proguard rules (minify disabled by default)
+-keep class com.trickhook.engine.NativeBridge { *; }

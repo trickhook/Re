@@ -1,4 +1,4 @@
-package com.sakore.studio.data
+package com.trickhook.data
 
 import android.content.ContentValues
 import android.content.Context
@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 /**
- * Project database — the SakoRE equivalent of IDA/Ghidra's project DB.
+ * Project database — the Nocturne equivalent of IDA/Ghidra's project DB.
  *
  * Tables:
  *  projects   – one row per opened binary (keyed by canonical path)
@@ -18,7 +18,7 @@ import android.database.sqlite.SQLiteOpenHelper
 class ProjectDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
 
     companion object {
-        const val DB_NAME = "sako_analysis.db"
+        const val DB_NAME = "nocturne_analysis.db"
         const val DB_VERSION = 2
     }
 

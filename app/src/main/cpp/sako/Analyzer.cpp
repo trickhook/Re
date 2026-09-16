@@ -25,6 +25,7 @@ std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e) {
         FuncInfo f;
         f.addr = s.addr;
         f.size = s.size;
+        f.thumb = s.thumb;
         f.name = s.name.empty() ? "SUB_" + hexAddr(s.addr) : s.name;
         f.from = "symtab";
         auto it = byAddr.find(s.addr);
