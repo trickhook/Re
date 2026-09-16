@@ -1,6 +1,8 @@
 package com.trickhook.ui
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.content.ActivityNotFoundException
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -160,6 +162,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
+import com.trickhook.BuildConfig
 import com.trickhook.R
 import com.trickhook.update.UpdateSheet
 import com.trickhook.update.installIntentFor
@@ -2102,32 +2105,96 @@ fun SectionTitle(text: String) {
 @Composable
 private fun AboutDialog(onDismiss: () -> Unit) {
     val ide = LocalIde.current
+    val ctx = LocalContext.current
+    val open = { url: String ->
+        try {
+            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            // A device with no browser, or a link handler that refuses. Saying
+            // nothing here would look like the row is simply dead.
+            Unit
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = ide.panel,
-        title = { Text("Nocturne v2.0", color = ide.accent) },
+        title = {
+            Text("Nocturne ${BuildConfig.VERSION_NAME}", color = ide.accent, fontSize = Type.title)
+        },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("Reverse-engineering studio for ELF, PE, DEX and APK binaries.", color = ide.text, fontSize = Type.label)
-                Spacer(Modifier.height(Space.m))
-                KeyValue("Engine", "C++17 NDK · Capstone 4.0.2 + built-in fallback")
-                KeyValue(
-                    "Architectures",
-                    "ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · SystemZ · m68k · TI C6000 (LE + BE)"
-                )
-                KeyValue("Decompiler", "ASM → IR → Pseudo-C (typed vars, while/if, calls w/ args)")
-                KeyValue("Analysis", "call graph · PLT/GOT/IAT resolution · demangler · auto-comments")
-                KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
-                KeyValue("Debugger", "ptrace session: spawn/attach, breakpoints, regs, memory, stack, threads")
-                KeyValue("Plugins", "NocturneScript interpreter + bundled sample plugins")
-                Spacer(Modifier.height(Space.m))
                 Text(
-                    "The debugger needs a rooted or debuggable device; SELinux may still deny ptrace. " +
-                        "Pseudo-C is a real IR pipeline, not a full decompiler — no vtable or exception recovery.",
-                    color = ide.amber, fontSize = Type.caption, lineHeight = 14.sp
+                    "Reverse-engineering studio for ELF, PE, DEX and APK binaries.",
+                    color = ide.text, fontSize = Type.label, lineHeight = Type.labelLine
+                )
+                Spacer(Modifier.height(Space.m))
+                KeyValue("Engine", "C++17 NDK · Capstone 4.0.2")
+                KeyValue("Decompilers", "Ghidra p-code (8 architectures) · built-in ASM→IR→C lifter")
+                KeyValue(
+                    "Decompiles",
+                    "ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · m68k"
+                )
+                KeyValue("Disassembles only", "SystemZ · TI C6000 and the rest Capstone covers")
+                KeyValue("Emulator", "Ghidra p-code, sandboxed — run a function, read what it wrote")
+                KeyValue("Analysis", "call graph · xrefs · PLT/GOT/IAT · demangler · JNI prototypes")
+                KeyValue("Debugger", "ptrace: spawn/attach, breakpoints, regs, memory, stack, threads")
+                KeyValue("Interop", "IDAPython and IDC export · imports back from an IDA IDC dump")
+                KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
+                KeyValue("Plugins", "NocturneScript interpreter")
+
+                Spacer(Modifier.height(Space.l))
+                SectionTitle("This build")
+                AboutLink("GitHub", "github.com/trickhook") { open("https://github.com/trickhook") }
+                AboutLink("Telegram", "@trickzqw") { open("https://t.me/trickzqw") }
+                AboutLink("Repository", "github.com/trickhook/Re") { open("https://github.com/trickhook/Re") }
+
+                Spacer(Modifier.height(Space.l))
+                SectionTitle("Built on")
+                Text(
+                    "A fork of Sako RE Studio by Maxamed Xasan Muse, MIT licensed — rebranded, " +
+                        "rethemed and extended. The original work and its copyright stand.",
+                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                )
+                Spacer(Modifier.height(Space.s))
+                AboutLink("Original", "github.com/Maxamedxasa/SakoREStudio") {
+                    open("https://github.com/Maxamedxasa/SakoREStudio")
+                }
+                Spacer(Modifier.height(Space.s))
+                Text(
+                    "Ghidra decompiler and SLEIGH specifications: NSA, Apache-2.0. " +
+                        "Capstone: BSD-3.",
+                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                )
+
+                Spacer(Modifier.height(Space.l))
+                Text(
+                    "The debugger needs a rooted or debuggable device; SELinux may still deny " +
+                        "ptrace. The emulator models a subset of libc and stubs the rest, so a " +
+                        "result it marks approximate is plausible, not certain.",
+                    color = ide.amber, fontSize = Type.caption, lineHeight = Type.captionLine
                 )
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("OK", color = ide.accent) } }
     )
+}
+
+/** A tappable credit row. The label stays quiet; the handle is the affordance. */
+@Composable
+private fun AboutLink(label: String, value: String, onClick: () -> Unit) {
+    val ide = LocalIde.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 40.dp)
+            .clickable(role = Role.Button, onClickLabel = "Open $value") { onClick() }
+            .padding(vertical = Space.xs),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label, color = ide.dim, fontSize = Type.caption, fontFamily = Mono,
+            modifier = Modifier.width(96.dp)
+        )
+        Text(value, color = ide.cyan, fontSize = Type.label, fontFamily = Mono)
+    }
 }
