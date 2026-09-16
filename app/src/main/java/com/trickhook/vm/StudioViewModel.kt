@@ -77,6 +77,13 @@ class StudioViewModel : ViewModel() {
     var meta by mutableStateOf<AnalysisMeta?>(null); private set
     var busy by mutableStateOf(false); private set
     var detailBusy by mutableStateOf(false); private set
+    // What the engine is doing right now, and for how long. The Ghidra
+    // backend can spend several seconds on a large function and every UI
+    // spinner without a number looks the same as a hang; a phase and an
+    // elapsed millisecond count are what tell you the engine is alive.
+    var decompilePhase by mutableStateOf(""); private set
+    var decompileTargetName by mutableStateOf(""); private set
+    var decompileStartMs by mutableStateOf(0L); private set
     var currentPath by mutableStateOf<String?>(null); private set
     var hexData by mutableStateOf<ByteArray?>(null); private set
     var apkEntries by mutableStateOf<List<ApkEntry>>(emptyList()); private set
@@ -355,19 +362,31 @@ class StudioViewModel : ViewModel() {
         selectedFunc = addr
         viewModelScope.launch {
             detailBusy = true
+            // The name comes from the last analysis; a stale one is better
+            // than "—" while the new decompile is in flight, because the
+            // point of the bar is to say what is being worked on.
+            val label = meta?.functions?.firstOrNull { it.addr == addr }?.let { f ->
+                f.displayName.ifBlank { f.name }
+            } ?: "0x%X".format(addr)
+            decompileTargetName = label
+            decompilePhase = if (decompiler == "ghidra" && sleighReady)
+                "Decompiling with Ghidra p-code" else "Lifting to IR"
+            decompileStartMs = System.currentTimeMillis()
             try {
                 val d = withContext(Dispatchers.IO) {
                     parseDetail(NativeBridge.nativeFunction(path, addr))
                 }
                 if (d.ok) {
                     detail = d
-                    // apply user renames to the display
                     val dn = renames["0x%08X".format(addr)]
                 } else log("WARN", d.error ?: "function detail failed")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "detail error")
             } finally {
                 detailBusy = false
+                decompilePhase = ""
+                decompileTargetName = ""
+                decompileStartMs = 0L
             }
         }
     }
@@ -436,6 +455,14 @@ class StudioViewModel : ViewModel() {
         if (path == null) { log("ERROR", "Nothing to export — open a binary first"); return }
         if (exportBusy) return
         exportBusy = true
+        val backend = if (decompiler == "ghidra" && sleighReady) "Ghidra" else "IR lifter"
+        val scope = when (kind) {
+            "c-one" -> "function"; "h-all" -> "header stub"; "asm-all" -> "assembly listing"
+            else -> "whole binary"
+        }
+        decompilePhase = "Exporting $scope · $backend"
+        decompileTargetName = meta?.name ?: ""
+        decompileStartMs = System.currentTimeMillis()
         viewModelScope.launch(Dispatchers.IO) {
             val tmp = File(context.cacheDir, "export.tmp")
             try {
@@ -481,6 +508,11 @@ class StudioViewModel : ViewModel() {
             } finally {
                 tmp.delete()
                 exportBusy = false
+                withContext(Dispatchers.Main) {
+                    decompilePhase = ""
+                    decompileTargetName = ""
+                    decompileStartMs = 0L
+                }
             }
         }
     }

@@ -14,8 +14,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DataObject
@@ -136,6 +146,7 @@ fun DecompilePanel(vm: StudioViewModel) {
                 )
             }
         }
+        DecompileProgress(vm)
         // Which backend produced this, and what it recovered. The chips say
         // where the text came from before they say anything about its shape.
         val mode = d?.pseudoMode ?: ""
@@ -313,5 +324,67 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
                 HorizontalDivider(color = ide.border.copy(alpha = 0.5f))
             }
         }
+    }
+}
+
+
+// A progress row shown while the engine is decompiling — IDA-style, so a
+// long Ghidra pass looks like work in flight rather than a hang. Only what we
+// actually know: the phase, the target and the elapsed time; a plain
+// indeterminate bar for the rest, because the native call is one atomic step
+// from Kotlin's side.
+@Composable
+private fun DecompileProgress(vm: com.trickhook.vm.StudioViewModel) {
+    val ide = LocalIde.current
+    val phase = vm.decompilePhase
+    val target = vm.decompileTargetName
+    val startMs = vm.decompileStartMs
+    if (phase.isBlank() || startMs == 0L) return
+
+    // Repaint once a second so the elapsed number actually moves. Cancelled
+    // when the composable leaves, which is what makes it stop when the
+    // decompile lands.
+    var elapsed by remember(startMs) { mutableStateOf(0L) }
+    LaunchedEffect(startMs) {
+        while (isActive) {
+            elapsed = System.currentTimeMillis() - startMs
+            delay(200)
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(ide.panel2)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                phase, color = ide.text, fontSize = 12.sp,
+                fontFamily = Mono, fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f)
+            )
+            val secs = elapsed / 1000
+            val ms = (elapsed % 1000) / 100
+            Text(
+                "%d.%ds".format(secs, ms),
+                color = ide.amber, fontSize = 12.sp, fontFamily = Mono
+            )
+        }
+        if (target.isNotEmpty())
+            Text(
+                target, color = ide.dim, fontSize = 10.sp,
+                fontFamily = Mono, maxLines = 1,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            color = ide.accent,
+            trackColor = ide.border,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+        )
     }
 }
