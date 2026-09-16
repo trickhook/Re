@@ -56,6 +56,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
@@ -198,17 +200,38 @@ fun StudioApp(vm: StudioViewModel) {
             if (vm.meta == null) {
                 EmptyState(vm, onOpen = openFile)
             } else {
+                // A hairline rule with a 2dp accent underline, rather than the
+                // default filled tab strip — the accent reads as a position
+                // marker instead of a second header bar.
                 ScrollableTabRow(
                     selectedTabIndex = vm.tab.ordinal,
-                    edgePadding = 8.dp,
-                    containerColor = ide.panel,
-                    contentColor = ide.text
+                    edgePadding = 16.dp,
+                    containerColor = ide.bg,
+                    contentColor = ide.text,
+                    divider = { HorizontalDivider(color = ide.border) },
+                    indicator = { positions ->
+                        if (vm.tab.ordinal < positions.size) {
+                            TabRowDefaults.SecondaryIndicator(
+                                Modifier.tabIndicatorOffset(positions[vm.tab.ordinal]),
+                                height = 2.dp,
+                                color = ide.accent
+                            )
+                        }
+                    }
                 ) {
                     Tab.entries.forEach { t ->
+                        val selected = vm.tab == t
                         Tab(
-                            selected = vm.tab == t,
+                            selected = selected,
                             onClick = { vm.tab = t },
-                            text = { Text(t.title, fontSize = 12.sp) }
+                            text = {
+                                Text(
+                                    t.title,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (selected) ide.text else ide.dim
+                                )
+                            }
                         )
                     }
                 }
