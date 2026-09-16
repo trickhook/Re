@@ -136,22 +136,37 @@ fun DecompilePanel(vm: StudioViewModel) {
                 )
             }
         }
-        // Pipeline stats as tinted chips: what the IR actually recovered, at a
-        // glance, instead of a run-on line of text.
+        // Which backend produced this, and what it recovered. The chips say
+        // where the text came from before they say anything about its shape.
         val mode = d?.pseudoMode ?: ""
         val stats = d?.irStats
+        val ghidra = mode == "Ghidra"
         Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            StatChip(if (mode == "IR") "ASM→IR→C" else "ASM→C fallback",
-                if (mode == "IR") ide.violet else ide.dim)
+            StatChip(
+                when {
+                    ghidra -> "Ghidra p-code"
+                    mode == "IR" -> "ASM→IR→C"
+                    else -> "ASM→C fallback"
+                },
+                when {
+                    ghidra -> ide.accent
+                    mode == "IR" -> ide.violet
+                    else -> ide.dim
+                }
+            )
             if (stats != null && mode == "IR") {
                 StatChip("${stats.stmts} IR", ide.cyan)
                 StatChip("${stats.calls} calls", ide.accent)
                 if (stats.whiles > 0) StatChip("${stats.whiles} loops", ide.amber)
                 if (stats.ifs > 0) StatChip("${stats.ifs} if", ide.dim)
             }
+            // When the high-fidelity backend was asked for but could not run,
+            // say why here rather than silently serving different output.
+            if (!ghidra && vm.decompiler == "ghidra" && vm.decompilerNote.isNotEmpty())
+                StatChip(vm.decompilerNote, ide.amber)
         }
         val pseudo = d?.pseudo
         if (pseudo.isNullOrEmpty()) {

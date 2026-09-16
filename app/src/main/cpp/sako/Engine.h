@@ -14,6 +14,16 @@ class Engine {
 public:
     static Engine& instance();
 
+    // Where the SLEIGH specifications were extracted to. The app copies them
+    // out of assets on first run and tells the engine once; until it does,
+    // the Ghidra backend reports itself unavailable and the IR lifter is used.
+    void setSleighDir(const std::string& dir);
+
+    // "ghidra" or "ir". An unknown value, or "ghidra" where no specification
+    // covers the architecture, falls back to the IR lifter per function.
+    void setDecompiler(const std::string& which);
+    std::string decompilerStatus(const std::string& path);
+
     // Full-file analysis → JSON (meta: format, sections, functions, strings,
     // imports, exports, callgraph, notes...)
     std::string analyze(const std::string& path);
@@ -68,8 +78,18 @@ private:
     bool ensureCtx(const std::string& path);
     u64 vaToOff(const Ctx& c, u64 va);
 
+    // Bind the Ghidra backend to the current context, if it can be. Returns
+    // false when it is unavailable for any reason, which is not an error:
+    // every caller falls back to the IR lifter.
+    bool ghidraReady(Ctx& c, const std::string& path);
+    // Decompiled text for one function, or "" when the backend cannot serve it.
+    std::string ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn);
+
     Ctx ctx_;
     std::string ctxPath_;
+    std::string sleighDir_;
+    std::string decompiler_ = "ghidra";
+    std::string ghidraNote_;
     std::mutex mutex_;
     std::atomic<bool> dbgStop_{false};
     std::mutex scriptMutex_;

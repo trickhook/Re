@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "GhidraArch.h"
 #include <fstream>
 #include "Binary.h"
 #include "DebugSession.h"
@@ -27,6 +28,98 @@ static std::string q(const std::string& s) { return "\"" + jsonEscape(s) + "\"";
 static std::string hq(u64 v) { return q(hexAddr(v)); }
 static std::string num(u64 v) {
     std::ostringstream os; os << v; return os.str();
+}
+
+// ------------------------------------------------ decompiler selection --
+void Engine::setSleighDir(const std::string& dir) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sleighDir_ = dir;
+    if (!dir.empty()) GhidraDecomp::instance().setSpecDir(dir);
+}
+
+void Engine::setDecompiler(const std::string& which) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    decompiler_ = (which == "ir") ? "ir" : "ghidra";
+}
+
+// Binds the Ghidra backend to the loaded image. Failure here is never fatal:
+// the caller decompiles with the IR lifter instead and the reason is reported
+// through decompilerStatus().
+bool Engine::ghidraReady(Ctx& c, const std::string& path) {
+    ghidraNote_.clear();
+    if (decompiler_ != "ghidra") { ghidraNote_ = "built-in IR lifter selected"; return false; }
+    if (!GhidraDecomp::compiledIn()) { ghidraNote_ = "engine built without it"; return false; }
+    if (sleighDir_.empty()) { ghidraNote_ = "no SLEIGH specifications installed"; return false; }
+    if (GhidraDecomp::languageFor(c.arch).empty()) {
+        ghidraNote_ = "no SLEIGH specification for " + (c.arch.empty() ? "this target" : c.arch);
+        return false;
+    }
+    if (c.bin.data.empty()) { ghidraNote_ = "no image loaded"; return false; }
+
+    // The decompiler reads through virtual addresses, so it needs the mapping
+    // the loader already worked out.
+    std::vector<GhidraSeg> segs;
+    if (c.fmt == Fmt::ELF) {
+        for (auto& sg : c.elf.segments)
+            if (sg.type == "LOAD" && sg.filesz)
+                segs.push_back({sg.vaddr, sg.offset, sg.filesz,
+                                sg.memsz ? sg.memsz : sg.filesz,
+                                sg.flags.find('W') != std::string::npos});
+    } else if (c.fmt == Fmt::PE) {
+        for (auto& sc : c.pe.sections)
+            if (sc.size)
+                segs.push_back({sc.addr, sc.offset, sc.size, sc.size,
+                                sc.flags.find('W') != std::string::npos});
+    }
+    if (segs.empty())
+        segs.push_back({0, 0, u64(c.bin.data.size()), u64(c.bin.data.size()), true});
+
+    // Publishing every known entry point is what makes a call render as a
+    // name. PLT stubs carry the imported name, which is the useful one.
+    std::vector<std::pair<u64, std::string>> funcs;
+    funcs.reserve(c.funcs.size() + c.elf.pltNames.size());
+    for (auto& f : c.funcs)
+        if (f.addr && !f.name.empty()) funcs.push_back({f.addr, f.name});
+    for (auto& kv : c.elf.pltNames)
+        if (kv.first && !kv.second.empty()) funcs.push_back({kv.first, kv.second});
+
+    std::string err;
+    if (!GhidraDecomp::instance().open(path, c.arch, c.bin.data.data(), c.bin.data.size(),
+                                       segs, funcs, c.strings, err)) {
+        ghidraNote_ = err.empty() ? "could not build the architecture" : err;
+        return false;
+    }
+    return true;
+}
+
+std::string Engine::ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo& fn) {
+    if (!ghidraReady(c, path)) return std::string();
+    std::string err;
+    std::string text = GhidraDecomp::instance().decompile(fn.addr, fn.name, err);
+    if (text.empty()) ghidraNote_ = err.empty() ? "no output" : err;
+    return text;
+}
+
+std::string Engine::decompilerStatus(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ostringstream out;
+    bool ok = false;
+    std::string backend, note;
+    if (!path.empty() && ensureCtx(path)) {
+        ok = ghidraReady(ctx_, path);
+        backend = ok ? GhidraDecomp::instance().backendName() : std::string();
+        note = ghidraNote_;
+    } else {
+        note = GhidraDecomp::compiledIn() ? "no binary analysed"
+                                          : "engine built without the Ghidra decompiler";
+    }
+    out << "{\"compiledIn\":" << (GhidraDecomp::compiledIn() ? "true" : "false")
+        << ",\"selected\":" << q(decompiler_)
+        << ",\"specsInstalled\":" << (sleighDir_.empty() ? "false" : "true")
+        << ",\"active\":" << (ok ? "true" : "false")
+        << ",\"backend\":" << q(backend)
+        << ",\"note\":" << q(note) << "}";
+    return out.str();
 }
 
 u64 Engine::vaToOff(const Ctx& c, u64 va) {
@@ -444,11 +537,19 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     // v2: auto comments
     autoComment(c.arch, lines, c.names, c.strings, fn->addr, fn->addr + size);
 
-    // v2: IR decompiler with heuristic fallback
-    IrResult ir = decompileIR(lines, c.arch, fn->addr, fn->name, c.names, c.strings);
-    std::string pseudo = ir.ok ? ir.text
-                               : genPseudo(lines, c.arch, fn->addr, fn->name, labels);
-    std::string pseudoMode = ir.ok ? "IR" : "heuristic";
+    // Ghidra's p-code decompiler when a specification covers this target,
+    // otherwise the built-in IR lifter, otherwise the heuristic printer.
+    IrResult ir;
+    std::string pseudo = ghidraPseudo(c, path, *fn);
+    std::string pseudoMode = "Ghidra";
+    std::string pseudoBackend = pseudo.empty() ? std::string()
+                                               : GhidraDecomp::instance().backendName();
+    if (pseudo.empty()) {
+        ir = decompileIR(lines, c.arch, fn->addr, fn->name, c.names, c.strings);
+        pseudo = ir.ok ? ir.text : genPseudo(lines, c.arch, fn->addr, fn->name, labels);
+        pseudoMode = ir.ok ? "IR" : "heuristic";
+        pseudoBackend = ghidraNote_;
+    }
 
     // v2: demangled display name
     std::string displayName = fn->name;
@@ -462,6 +563,7 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         << ",\"size\":" << num(fn->size) << ",\"from\":" << q(fn->from)
         << ",\"backend\":" << q(c.backend) << ",\"arch\":" << q(c.arch)
         << ",\"pseudoMode\":" << q(pseudoMode)
+        << ",\"pseudoBackend\":" << q(pseudoBackend)
         << ",\"irStats\":{\"stmts\":" << ir.nStmts << ",\"whiles\":" << ir.nWhile
         << ",\"ifs\":" << ir.nIf << ",\"gotocs\":" << ir.nGoto
         << ",\"calls\":" << ir.nCalls << "}"
@@ -808,6 +910,7 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
     const bool wantAsm = (kind == "asm-all");
     const bool wantHdr = (kind == "h-all");
     const bool wantOne = (kind == "c-one");
+    const bool useGhidra = !wantAsm && ghidraReady(c, path);
 
     std::string base = c.bin.path;
     size_t slash = base.find_last_of('/');
@@ -822,29 +925,54 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
                                  : c.fmt == Fmt::DEX ? "DEX" : "raw") << "\n";
     f << " * Architecture: " << (c.arch.empty() ? "-" : c.arch) << "\n";
     f << " * Disassembler: " << c.backend << "\n";
+    f << " * Decompiler  : "
+      << (useGhidra ? GhidraDecomp::instance().backendName()
+                    : std::string("Nocturne IR lifter"))
+      << "\n";
     f << " *\n";
     f << " * This is reconstructed from machine code, not original source. It will\n";
-    f << " * not recompile as-is. What the lifter does and does not recover:\n";
-    f << " *\n";
-    f << " *   - Every value is typed by its register or access width, never by\n";
-    f << " *     the original C type. Structs, classes and vtables are offsets.\n";
-    f << " *   - An argument list holds the registers this function was seen to\n";
-    f << " *     set up before the call. f(...) means none were, so the callee's\n";
-    f << " *     arguments are unknown rather than absent.\n";
-    f << " *   - Values are tracked within a basic block and along single-\n";
-    f << " *     predecessor edges. A register named bare in an expression (w8,\n";
-    f << " *     x19, fp) reaches that point from a path the lifter did not\n";
-    f << " *     merge, and is declared but never assigned.\n";
-    f << " *   - CC_xx stands for a condition whose flag-setting instruction was\n";
-    f << " *     not traced. A loop prints as do/while only where the back edge\n";
-    f << " *     forms a region with one entry; everything else stays as gotos.\n";
-    f << " *   - Exception handling and unwind tables are not reconstructed.\n";
+    f << " * not recompile as-is.\n";
+    if (useGhidra) {
+        f << " *\n";
+        f << " *   - Types are inferred from how values are used, not read from\n";
+        f << " *     debug information. undefinedN means the width is known and\n";
+        f << " *     nothing more. Structs, classes and vtables stay as offsets.\n";
+        f << " *   - An argument list is only as good as the callee's recovered\n";
+        f << " *     prototype; a call may show fewer arguments than it passes.\n";
+        f << " *   - Blocks the analysis proves unreachable are dropped, and say\n";
+        f << " *     so in a WARNING comment above the function.\n";
+        f << " *   - Exception handling and unwind tables are not reconstructed.\n";
+    } else {
+        f << " * What the lifter does and does not recover:\n";
+        f << " *\n";
+        f << " *   - Every value is typed by its register or access width, never by\n";
+        f << " *     the original C type. Structs, classes and vtables are offsets.\n";
+        f << " *   - An argument list holds the registers this function was seen to\n";
+        f << " *     set up before the call. f(...) means none were, so the callee's\n";
+        f << " *     arguments are unknown rather than absent.\n";
+        f << " *   - Values are tracked within a basic block and along single-\n";
+        f << " *     predecessor edges. A register named bare in an expression (w8,\n";
+        f << " *     x19, fp) reaches that point from a path the lifter did not\n";
+        f << " *     merge, and is declared but never assigned.\n";
+        f << " *   - CC_xx stands for a condition whose flag-setting instruction was\n";
+        f << " *     not traced. A loop prints as do/while only where the back edge\n";
+        f << " *     forms a region with one entry; everything else stays as gotos.\n";
+        f << " *   - Exception handling and unwind tables are not reconstructed.\n";
+    }
     f << " */\n\n";
 
     if (!wantAsm) {
         f << "#include <stdint.h>\n\n";
-        f << "typedef uint8_t  u8;\ntypedef uint16_t u16;\n";
-        f << "typedef uint32_t u32;\ntypedef uint64_t u64;\n\n";
+        if (useGhidra) {
+            // The names Ghidra prints for values whose width is all that is known.
+            f << "typedef uint8_t  undefined1;\ntypedef uint16_t undefined2;\n";
+            f << "typedef uint32_t undefined4;\ntypedef uint64_t undefined8;\n";
+            f << "typedef uint8_t  byte;\ntypedef uint16_t ushort;\n";
+            f << "typedef uint32_t uint;\ntypedef uint64_t ulong;\n\n";
+        } else {
+            f << "typedef uint8_t  u8;\ntypedef uint16_t u16;\n";
+            f << "typedef uint32_t u32;\ntypedef uint64_t u64;\n\n";
+        }
     }
 
     std::map<u64, std::string> labels;
@@ -872,6 +1000,17 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
         }
 
         autoComment(c.arch, out.lines, c.names, c.strings, fn.addr, fn.addr + sz);
+        // Same backend choice the Pseudo-C tab makes, so an exported listing
+        // matches what the user was looking at when they exported it.
+        if (useGhidra) {
+            std::string err;
+            out.pseudo = GhidraDecomp::instance().decompile(fn.addr, fn.name, err);
+            if (!out.pseudo.empty()) {
+                out.mode = "Ghidra";
+                out.size = sz;
+                return true;
+            }
+        }
         IrResult ir = decompileIR(out.lines, c.arch, fn.addr, fn.name, c.names, c.strings);
         out.pseudo = ir.ok ? ir.text : genPseudo(out.lines, c.arch, fn.addr, fn.name, labels);
         out.mode = ir.ok ? "IR" : "heuristic";

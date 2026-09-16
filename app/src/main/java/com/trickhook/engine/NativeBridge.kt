@@ -9,6 +9,22 @@ object NativeBridge {
         System.loadLibrary("nocturne")
     }
 
+    /**
+     * Directory the SLEIGH specifications were extracted to. Until this is
+     * set the Ghidra backend reports itself unavailable and every function
+     * decompiles with the built-in IR lifter.
+     */
+    external fun nativeSetSleighDir(dir: String)
+
+    /** "ghidra" or "ir". Unknown values are treated as "ghidra". */
+    external fun nativeSetDecompiler(which: String)
+
+    /**
+     * JSON: compiledIn, selected, specsInstalled, active, backend, note.
+     * `note` says why the Ghidra backend is not active when it is not.
+     */
+    external fun nativeDecompilerStatus(path: String): String
+
     external fun nativeAnalyze(path: String): String
     external fun nativeFunction(path: String, addr: Long): String
     external fun nativeCallGraph(path: String, focus: Long): String

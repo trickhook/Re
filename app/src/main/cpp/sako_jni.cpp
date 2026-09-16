@@ -18,6 +18,21 @@ static jstring toJString(JNIEnv* env, const std::string& s) {
     return env->NewStringUTF(s.c_str());
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeSetSleighDir(JNIEnv* env, jobject, jstring jdir) {
+    sako::Engine::instance().setSleighDir(toStdString(env, jdir));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeSetDecompiler(JNIEnv* env, jobject, jstring jwhich) {
+    sako::Engine::instance().setDecompiler(toStdString(env, jwhich));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDecompilerStatus(JNIEnv* env, jobject, jstring jpath) {
+    return toJString(env, sako::Engine::instance().decompilerStatus(toStdString(env, jpath)));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeAnalyze(JNIEnv* env, jobject, jstring jpath) {
     std::string path = toStdString(env, jpath);

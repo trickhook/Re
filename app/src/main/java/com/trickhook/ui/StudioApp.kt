@@ -130,6 +130,7 @@ fun StudioApp(vm: StudioViewModel) {
     LaunchedEffect(Unit) {
         vm.refreshRecents(ctx)
         vm.loadPlugins(ctx)
+        vm.installSleigh(ctx)
     }
     LaunchedEffect(vm.darkTheme) {
         (ctx as? Activity)?.window?.let { w ->
@@ -243,6 +244,32 @@ fun StudioApp(vm: StudioViewModel) {
                             onClick = {
                                 showOverflow = false
                                 vm.saveProject(ctx, vm.meta?.name ?: "project")
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        if (vm.decompiler == "ghidra") "Decompiler: Ghidra"
+                                        else "Decompiler: built-in IR",
+                                        color = ide.text, fontSize = 13.sp
+                                    )
+                                    Text(
+                                        if (vm.decompiler == "ghidra")
+                                            "p-code, types and structure — slower"
+                                        else "fast lifter, gotos and raw registers",
+                                        color = ide.dim, fontSize = 10.sp
+                                    )
+                                }
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Memory, null, tint = ide.dim,
+                                    modifier = Modifier.size(18.dp))
+                            },
+                            onClick = {
+                                showOverflow = false
+                                vm.setDecompiler(if (vm.decompiler == "ghidra") "ir" else "ghidra")
+                                vm.detail?.let { vm.selectFunction(it.addr) }
                             }
                         )
                         DropdownMenuItem(

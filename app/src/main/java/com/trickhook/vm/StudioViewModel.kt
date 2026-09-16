@@ -616,6 +616,78 @@ class StudioViewModel : ViewModel() {
     private fun now(): String =
         java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
 
+    // ----------------------------------------------------------- decompiler --
+    var decompiler by mutableStateOf("ghidra"); private set
+    var decompilerBackend by mutableStateOf(""); private set
+    var decompilerNote by mutableStateOf(""); private set
+    var sleighReady by mutableStateOf(false); private set
+
+    /**
+     * Copy the SLEIGH specifications out of assets and hand the directory to
+     * the engine. They are ~1.8 MB and never change for a given build, so a
+     * version marker keeps this to a single pass on first run and after an
+     * update.
+     */
+    fun installSleigh(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val names = context.assets.list("sleigh")?.toList().orEmpty()
+                if (names.isEmpty()) {
+                    log("WARN", "No SLEIGH specifications bundled — using the IR decompiler")
+                    return@launch
+                }
+                val dir = File(context.filesDir, "sleigh").apply { mkdirs() }
+                val stamp = try {
+                    context.packageManager.getPackageInfo(context.packageName, 0).let {
+                        "${'$'}{it.versionName}-${'$'}{names.size}"
+                    }
+                } catch (e: Exception) { "unknown-${'$'}{names.size}" }
+                val marker = File(dir, ".installed")
+                if (marker.takeIf { it.exists() }?.readText() != stamp) {
+                    var bytes = 0L
+                    names.forEach { name ->
+                        context.assets.open("sleigh/${'$'}name").use { ins ->
+                            File(dir, name).outputStream().use { bytes += ins.copyTo(it) }
+                        }
+                    }
+                    marker.writeText(stamp)
+                    log("INFO", "SLEIGH specifications installed: ${'$'}{names.size} files, " +
+                        "${'$'}{bytes / 1024} KB")
+                }
+                NativeBridge.nativeSetSleighDir(dir.absolutePath)
+                NativeBridge.nativeSetDecompiler(decompiler)
+                withContext(Dispatchers.Main) { sleighReady = true }
+                refreshDecompilerStatus()
+            } catch (e: Exception) {
+                log("ERROR", "SLEIGH install: ${'$'}{e.message}")
+            }
+        }
+    }
+
+    fun setDecompiler(which: String) {
+        decompiler = if (which == "ir") "ir" else "ghidra"
+        NativeBridge.nativeSetDecompiler(decompiler)
+        log("INFO", "Decompiler: " + if (decompiler == "ir") "built-in IR lifter" else "Ghidra p-code")
+        refreshDecompilerStatus()
+    }
+
+    fun refreshDecompilerStatus() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val json = try {
+                NativeBridge.nativeDecompilerStatus(currentPath.orEmpty())
+            } catch (e: Exception) { return@launch }
+            try {
+                val o = JSONObject(json)
+                val backend = o.optString("backend")
+                val note = o.optString("note")
+                withContext(Dispatchers.Main) {
+                    decompilerBackend = backend
+                    decompilerNote = note
+                }
+            } catch (e: Exception) { /* status is advisory */ }
+        }
+    }
+
     // -------------------------------------------------------------- plugins --
     fun loadPlugins(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
