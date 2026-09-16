@@ -17,6 +17,32 @@ namespace sako {
 static const size_t kStringCap = 20000;
 // How many of those to put in the analysis JSON the UI reads.
 static const size_t kStringsInJson = 3000;
+// Call edges in the analysis JSON. Measured on a host build (x86-64, warm JVM
+// modelling org.json + parseMeta; a phone is several times slower, though the
+// parse runs on Dispatchers.IO, not the UI thread):
+//
+//   edges   payload     parse   heap after
+//    5203    890 KB     20 ms      ~9 MB   libanort.so (1.7 MB) — complete
+//   12000   2.0 MB      35 ms     ~24 MB   cap
+//   40000   5.8 MB      86 ms     ~47 MB
+//   66059   9.3 MB     135 ms     ~80 MB   libpython3.12.so (9 MB) — complete
+//
+// 12000 covers the binaries this tool is pointed at with room to spare (2.3x
+// the workhorse sample) and keeps the worst case at ~2 MB. Past that the array
+// stops being something a UI can draw or a phone should hold, so it is capped
+// — but never in silence: callEdgesTotal is always emitted next to the array,
+// and a note says how much was left out. Edges are sorted by (caller, target),
+// so what a cap removes is a documented suffix, not an invisible slice.
+static const size_t kCallEdgesInJson = 12000;
+// Edges and nodes in one callGraph() answer. This one is drawn as a graph, so
+// the limit is what a canvas can show, not what the parser can take; the JSON
+// carries edgesTotal / funcsTotal so the panel can say how much is off-screen.
+static const size_t kCallGraphEdgesInJson = 4000;
+static const size_t kCallGraphFuncsInJson = 4000;
+// Call-site rows in one function's xrefsIn/xrefsOut. A bottom sheet is not a
+// place for 300 rows, so this one stays small — but xrefsInTotal /
+// xrefsOutTotal always carry the real count next to the truncated array.
+static const size_t kXrefRowsInJson = 64;
 
 
 Engine& Engine::instance() {
@@ -484,7 +510,9 @@ bool Engine::ensureCtx(const std::string& path) {
             for (auto& fn : c.funcs) c.names.add(fn.addr, fn.name);
             c.cg = buildCallGraph(c.xrefs, c.funcs, c.names);
             if (!c.cg.edges.empty())
-                c.notes.push_back("Call graph: " + std::to_string(c.cg.edges.size()) + " call edges");
+                c.notes.push_back("Call graph: " + std::to_string(c.cg.edges.size())
+                                  + " call edges from " + std::to_string(c.cg.callSites)
+                                  + " call sites");
             // strings from alloc non-exec sections (or whole file fallback).
             // The cap is the decompiler's address->string table, not the list
             // the UI shows: at 3000 it ran out inside .rodata and never reached
@@ -579,6 +607,9 @@ std::string Engine::analyze(const std::string& path) {
 
     bool loaded = ensureCtx(path);
     const Ctx& c = ctx_;
+    // Notes discovered while serialising (i.e. anything the JSON had to leave
+    // out). The notes array is emitted last, so they can still be appended.
+    std::vector<std::string> extraNotes;
 
     out << "{\"ok\":";
     if (!loaded) {
@@ -667,17 +698,28 @@ std::string Engine::analyze(const std::string& path) {
     }
     out << "]";
 
-    // call graph (capped)
-    out << ",\"callEdges\":[";
+    // Call graph. The edge list is sorted by (calling function, target) —
+    // see DeepAnalysis.h — so a cap, if one is ever hit, removes a documented
+    // suffix instead of the silent slice the old target-ordered cap removed.
+    // callEdgesTotal is always emitted: the array length is a rendering
+    // decision, the total is the measurement.
+    out << ",\"callEdgesTotal\":" << num(c.cg.edges.size())
+        << ",\"callSitesTotal\":" << num(c.cg.callSites)
+        << ",\"callEdges\":[";
     {
-        size_t cap = std::min<size_t>(c.cg.edges.size(), 4000);
+        size_t cap = std::min<size_t>(c.cg.edges.size(), kCallEdgesInJson);
         for (size_t i = 0; i < cap; ++i) {
             if (i) out << ",";
             auto& e = c.cg.edges[i];
             out << "{\"from\":" << hq(e.from) << ",\"to\":" << hq(e.to)
+                << ",\"site\":" << hq(e.site) << ",\"sites\":" << e.sites
                 << ",\"fromName\":" << q(e.fromName) << ",\"toName\":" << q(e.toName)
                 << ",\"kind\":" << q(e.kind) << "}";
         }
+        if (cap < c.cg.edges.size())
+            extraNotes.push_back("Call graph: JSON carries " + std::to_string(cap) + " of "
+                                 + std::to_string(c.cg.edges.size())
+                                 + " edges, lowest caller address first");
     }
     out << "]";
 
@@ -746,6 +788,10 @@ std::string Engine::analyze(const std::string& path) {
         if (i) out << ",";
         out << q(c.notes[i]);
     }
+    for (size_t i = 0; i < extraNotes.size(); ++i) {
+        if (i || !c.notes.empty()) out << ",";
+        out << q(extraNotes[i]);
+    }
     out << "]}";
     return out.str();
 }
@@ -760,24 +806,35 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     if (c.fmt == Fmt::DEX) {
         bool found = false;
         for (auto& m : c.dex.methods) {
-            if (m.codeOff != addr) continue;
+            // codeOff 0 means "no code item": such a method is not in
+            // meta.functions either, and reading a code header at file offset 0
+            // returns the DEX magic dressed up as an instruction count.
+            if (!m.codeOff || m.codeOff != addr) continue;
             found = true;
             u32 sz = 0;
             if (addr + 16 <= c.bin.data.size()) sz = 16 + rd32(c.bin.data.data() + addr + 12) * 2;
             std::string nm = dexShortClass(m.clazz) + "." + m.name;
             auto ce = c.cg.callees.find(addr);
             auto cr = c.cg.callers.find(addr);
-            out << "{\"ok\":true,\"addr\":\"" << hq(addr) << "\",\"size\":" << num(sz)
+            // hq() brings its own quotes — this line used to add a second
+            // pair, so every DEX method detail was malformed JSON and the
+            // Kotlin parser rejected all of them.
+            out << "{\"ok\":true,\"addr\":" << hq(addr) << ",\"size\":" << num(sz)
                 << ",\"name\":" << q(nm) << ",\"displayName\":" << q(nm)
                 << ",\"from\":\"dex\",\"backend\":\"dalvik\",\"arch\":\"DEX\""
                 << ",\"pseudoMode\":\"dex\""
+                // Same two numbers, from the same maps, as the functions list:
+                // a DEX method must not read "3 in" on one screen and "0" here.
+                << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
+                << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
                 << ",\"asm\":[]"
                 << ",\"pseudo\":" << q(std::string("// Dalvik bytecode — DEX disassembler backend on the roadmap\n")
                     + "// class: " + m.clazz + "\n// proto: " + m.proto
                     + "\n// code: " + std::to_string(sz) + " bytes\n"
                     + "// callees: " + std::to_string(ce == c.cg.callees.end() ? 0 : (int)ce->second.size())
                     + " · callers: " + std::to_string(cr == c.cg.callers.end() ? 0 : (int)cr->second.size()) + "\n")
-                << ",\"blocks\":[],\"xrefsIn\":[],\"xrefsOut\":[]}";
+                << ",\"blocks\":[],\"xrefsInTotal\":0,\"xrefsIn\":[]"
+                << ",\"xrefsOutTotal\":0,\"xrefsOut\":[]}";
             break;
         }
         if (!found) out << "{\"ok\":false,\"error\":\"No method at this code offset\"}";
@@ -904,22 +961,47 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     }
     out << "]";
 
-    // xrefs in/out
-    out << ",\"xrefsIn\":[";
+    // Cross-references. Two different things are reported here and they are
+    // named apart on purpose:
+    //   nCallers / nCallees — degrees in the call graph, one entry per calling
+    //     or called FUNCTION, identical to the numbers the functions list shows
+    //     (same maps, same definition — see DeepAnalysis.h);
+    //   xrefsIn / xrefsOut  — one row per reference SITE, which is what the
+    //     sheet lists: xrefsIn covers every call or jump landing anywhere in
+    //     this function's body, xrefsOut every call instruction in it. Several
+    //     sites in one caller are several rows here and one edge there, so
+    //     these numbers legitimately differ from the degrees above; they are
+    //     never two answers to the same question.
+    // Both arrays are capped for the sheet; xrefsInTotal / xrefsOutTotal give
+    // the real count so the UI can render "64 of 312" instead of "312".
     {
+        auto ce = c.cg.callees.find(fn->addr);
+        auto cr = c.cg.callers.find(fn->addr);
+        out << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
+            << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()));
+    }
+
+    {
+        // c.xrefs is keyed by TARGET address, so the call sites that land in
+        // this function are one contiguous range of it — no full-map scan.
+        u64 lo = fn->addr, hi = fn->addr + std::max<u64>(fn->size, 4);
+        size_t total = 0;
         std::vector<Xref> in;
-        for (auto& kv : c.xrefs)
-            for (auto& x : kv.second)
-                if (x.to >= fn->addr && x.to < fn->addr + std::max<u64>(fn->size, 4))
-                    { in.push_back(x); if (in.size() >= 64) break; }
+        for (auto it = c.xrefs.lower_bound(lo); it != c.xrefs.end() && it->first < hi; ++it) {
+            total += it->second.size();
+            for (auto& x : it->second)
+                if (in.size() < kXrefRowsInJson) in.push_back(x);
+        }
+        out << ",\"xrefsInTotal\":" << num(total) << ",\"xrefsIn\":[";
         for (size_t i = 0; i < in.size(); ++i) {
             if (i) out << ",";
             out << "{\"from\":" << hq(in[i].from) << ",\"to\":" << hq(in[i].to)
                 << ",\"type\":" << q(in[i].type) << "}";
         }
+        out << "]";
     }
-    out << "],\"xrefsOut\":[";
     {
+        size_t total = 0;
         std::vector<Xref> outs;
         for (auto& l : lines) {
             if ((c.arch == "ARM64" && l.mnem == "bl") || (c.arch.find("X86") == 0 && l.mnem == "call")) {
@@ -927,19 +1009,21 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
                 if (p2 != std::string::npos) {
                     u64 t = strtoull(l.ops.c_str() + p2 + 2, nullptr, 16);
                     if (t) {
-                        outs.push_back(Xref{l.addr, t, "call"});
-                        if (outs.size() >= 64) break;
+                        ++total;
+                        if (outs.size() < kXrefRowsInJson) outs.push_back(Xref{l.addr, t, "call"});
                     }
                 }
             }
         }
+        out << ",\"xrefsOutTotal\":" << num(total) << ",\"xrefsOut\":[";
         for (size_t i = 0; i < outs.size(); ++i) {
             if (i) out << ",";
             out << "{\"from\":" << hq(outs[i].from) << ",\"to\":" << hq(outs[i].to)
                 << ",\"type\":" << q(outs[i].type) << "}";
         }
+        out << "]";
     }
-    out << "]}";
+    out << "}";
     return out.str();
 }
 
@@ -977,26 +1061,38 @@ std::string Engine::callGraph(const std::string& path, u64 focus) {
         return out.str();
     }
 
-    out << "{\"ok\":true,\"focus\":\"" << hexAddr(focus) << "\",\"edges\":[";
-    size_t shown = 0;
+    // Pass 1: which edges belong in the answer. `focus` keeps the edges that
+    // touch that function; an edge's `from` is already the calling function's
+    // start (DeepAnalysis.h), so this is a comparison, not a range search.
+    u64 fa = focus;                       // the focus function's start address
+    if (focus)
+        for (auto& f : c.funcs)
+            if (focus >= f.addr && focus < f.addr + std::max<u64>(f.size, 4)) { fa = f.addr; break; }
+    std::vector<const CallEdge*> keep;
     for (auto& e : c.cg.edges) {
-        if (focus) {
-            // edges touching the focus function's range
-            bool fromIn = false, toIn = false;
-            for (auto& f : c.funcs) {
-                if (e.from >= f.addr && e.from < f.addr + std::max<u64>(f.size, 4)) fromIn = true;
-                if (e.to == f.addr) toIn = true;
-            }
-            if (!fromIn && !toIn) continue;
-        }
-        if (shown++) out << ",";
-        if (shown >= 2000) break;
+        if (focus && e.from != fa && e.to != fa) continue;
+        keep.push_back(&e);
+    }
+
+    // The count is emitted before the array and is the count of everything
+    // found, not of what fits: the old loop wrote its separator before testing
+    // the cap, so a truncated graph also went out as a trailing comma.
+    size_t shown = std::min<size_t>(keep.size(), kCallGraphEdgesInJson);
+    out << "{\"ok\":true,\"focus\":\"" << hexAddr(focus) << "\""
+        << ",\"edgesTotal\":" << num(keep.size())
+        << ",\"funcsTotal\":" << num(c.funcs.size())
+        << ",\"edges\":[";
+    for (size_t i = 0; i < shown; ++i) {
+        if (i) out << ",";
+        const CallEdge& e = *keep[i];
         out << "{\"from\":" << hq(e.from) << ",\"to\":" << hq(e.to)
+            << ",\"site\":" << hq(e.site) << ",\"sites\":" << e.sites
             << ",\"fromName\":" << q(e.fromName) << ",\"toName\":" << q(e.toName)
             << ",\"kind\":" << q(e.kind) << "}";
     }
     out << "],\"funcs\":[";
-    for (size_t i = 0; i < c.funcs.size() && i < 4000; ++i) {
+    size_t nf = std::min<size_t>(c.funcs.size(), kCallGraphFuncsInJson);
+    for (size_t i = 0; i < nf; ++i) {
         if (i) out << ",";
         auto& f = c.funcs[i];
         out << "{\"addr\":" << hq(f.addr) << ",\"name\":" << q(f.name) << "}";

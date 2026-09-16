@@ -6,6 +6,7 @@
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
+#include <algorithm>
 
 namespace sako {
 
@@ -144,40 +145,69 @@ CallGraph buildCallGraph(const std::map<u64, std::vector<Xref>>& xrefs,
     std::set<u64> funcSet;
     for (auto& f : funcs) funcSet.insert(f.addr);
 
-    std::map<u64, std::string> nameOf;
-    for (auto& f : funcs) nameOf[f.addr] = f.name;
+    // addr -> (name, end) so a call site can be attributed to the function that
+    // actually contains it instead of to whatever function happens to start
+    // below it. A size of 0 means "unknown length": the analyzer fills sizes in
+    // from the next symbol, so treat it as one instruction wide.
+    std::map<u64, std::pair<std::string, u64>> funcAt;
+    for (auto& f : funcs)
+        funcAt[f.addr] = {f.name, f.addr + std::max<u64>(f.size, 4)};
 
-    std::set<std::pair<u64, u64>> seen;
+    // Keyed by (calling function, target): this both deduplicates several call
+    // sites between the same pair and yields the edge list already sorted by
+    // (from, to), which is the order the JSON promises.
+    std::map<std::pair<u64, u64>, CallEdge> merged;
     for (auto& kv : xrefs) {
         for (auto& x : kv.second) {
             if (x.type != "call") continue;
-            u64 from = x.from, to = x.to;
-            auto key = std::make_pair(from, to);
-            if (!seen.insert(key).second) continue;
+            u64 site = x.from, to = x.to;
+            ++g.callSites;
 
-            CallEdge e;
-            e.from = from; e.to = to;
-            e.kind = funcSet.count(to) ? "internal" : "import";
+            // Which function does this call site belong to?
+            u64 owner = site;
+            std::string ownerName;
+            auto fit = funcAt.upper_bound(site);
+            if (fit != funcAt.begin()) {
+                --fit;
+                if (site < fit->second.second) {        // inside its body
+                    owner = fit->first;
+                    ownerName = fit->second.first;
+                }
+            }
+            if (ownerName.empty()) ownerName = "sub_" + hexAddr(owner).substr(2);
+
+            auto key = std::make_pair(owner, to);
+            auto ins = merged.emplace(key, CallEdge{});
+            CallEdge& e = ins.first->second;
+            if (!ins.second) {                          // pair already known
+                ++e.sites;
+                if (site < e.site) e.site = site;
+                continue;
+            }
+            e.from = owner; e.to = to; e.site = site; e.sites = 1;
+            e.fromName = ownerName;
+            // "import" means a name sits at exactly this address (a PLT/IAT
+            // entry or a symbol); lookup() would also answer "foo+0x10" for an
+            // address INSIDE something named, and a jump into the middle of a
+            // function is not an import.
+            e.kind = funcSet.count(to) ? "internal"
+                   : names.contains(to) ? "import"
+                   : "unknown";
             std::string nm = names.lookup(to);
             if (nm.empty()) nm = "sub_" + hexAddr(to).substr(2);
             e.toName = nm;
-            // from name: function containing 'from'
-            auto fit = nameOf.upper_bound(from);
-            if (fit != nameOf.begin()) {
-                --fit;
-                e.fromName = fit->second;
-            } else {
-                e.fromName = "sub_" + hexAddr(from).substr(2);
-            }
-            g.edges.push_back(e);
-            if (funcSet.count(to)) {
-                g.callees[from].push_back(to);
-                g.callers[to].push_back(from);
-            }
         }
     }
-    // per-function call counts (from linear scan of edges)
-    for (auto& e : g.edges) g.callCount[e.from]++;
+
+    g.edges.reserve(merged.size());
+    for (auto& kv : merged) {
+        g.edges.push_back(kv.second);
+        // Every edge, whatever its kind, lands in both maps: these are the
+        // degrees the JSON reports, and they must describe the same graph the
+        // edge list describes. See the invariant in DeepAnalysis.h.
+        g.callees[kv.second.from].push_back(kv.second.to);
+        g.callers[kv.second.to].push_back(kv.second.from);
+    }
     g.ok = true;
     return g;
 }
@@ -249,8 +279,10 @@ void buildDexFuncsAndCalls(const std::vector<u8>& data, const DexInfo& dex,
         fit.first->second = f.name;
     }
 
-    // call edges by walking each method body for invoke instructions
-    std::set<std::pair<u64, u64>> seen;
+    // call edges by walking each method body for invoke instructions.
+    // (method, callee) -> index into cg.edges, so a second invoke of the same
+    // callee bumps that edge's site count instead of adding a duplicate.
+    std::map<std::pair<u64, u64>, size_t> seen;
     for (u32 i = 0; i < dex.methods.size(); ++i) {
         const DexMethod& m = dex.methods[i];
         if (!m.codeOff || m.codeOff + 16 > n) continue;
@@ -264,25 +296,39 @@ void buildDexFuncsAndCalls(const std::vector<u8>& data, const DexInfo& dex,
             if (invoke && k + 1 < insns) {
                 u32 midx = rd16(p + io + u64(k + 1) * 2);
                 auto it = codeOf.find(midx);
-                if (it != codeOf.end() && it->second != m.codeOff
-                    && seen.emplace(m.codeOff, it->second).second) {
-                    CallEdge e;
-                    e.from = m.codeOff; e.to = it->second;
-                    e.kind = "internal";
-                    auto fn = nameByAddr.find(e.from);
-                    auto tn = nameByAddr.find(e.to);
-                    e.fromName = fn != nameByAddr.end() ? fn->second : "";
-                    e.toName = tn != nameByAddr.end() ? tn->second : "";
-                    cg.edges.push_back(e);
+                if (it != codeOf.end() && it->second != m.codeOff) {
+                    ++cg.callSites;
+                    auto ins = seen.emplace(std::make_pair(m.codeOff, it->second), cg.edges.size());
+                    if (!ins.second) {
+                        CallEdge& prev = cg.edges[ins.first->second];
+                        ++prev.sites;
+                        u64 at = io + u64(k) * 2;
+                        if (at < prev.site) prev.site = at;
+                    } else {
+                        CallEdge e;
+                        e.from = m.codeOff; e.to = it->second;
+                        e.site = io + u64(k) * 2;       // the invoke instruction
+                        e.sites = 1;
+                        e.kind = "internal";
+                        auto fn = nameByAddr.find(e.from);
+                        auto tn = nameByAddr.find(e.to);
+                        e.fromName = fn != nameByAddr.end() ? fn->second : "";
+                        e.toName = tn != nameByAddr.end() ? tn->second : "";
+                        cg.edges.push_back(e);
+                    }
                 }
             }
             k += dexInsnWidth(op);
         }
     }
+    // Same order and the same degree invariant as the native path: sorted by
+    // (from, to), every edge in both maps. See DeepAnalysis.h.
+    std::sort(cg.edges.begin(), cg.edges.end(), [](const CallEdge& a, const CallEdge& b) {
+        return a.from != b.from ? a.from < b.from : a.to < b.to;
+    });
     for (auto& e : cg.edges) {
         cg.callees[e.from].push_back(e.to);
         cg.callers[e.to].push_back(e.from);
-        cg.callCount[e.from]++;
     }
     cg.ok = !funcs.empty();
 }
