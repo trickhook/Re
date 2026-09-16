@@ -62,6 +62,9 @@ var showShortcutsHelp by mutableStateOf(false)
 /** Raised from the Pseudo-C bar, the overflow menu and the command palette. */
 var showExportSheet by mutableStateOf(false)
 
+/** Raised from the overflow menu and the command palette. */
+var showUpdateSheet by mutableStateOf(false)
+
 /**
  * How many hits of one kind the search dialog draws before it stops and says
  * how many more there are. The number itself matters far less than the fact
@@ -217,6 +220,13 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                         }
 
                         add(Command("Keyboard shortcuts help", "", "F1") { showShortcutsHelp = true })
+                        add(Command(
+                            "Check for updates",
+                            "compare this build against the latest release on GitHub", ""
+                        ) {
+                            showUpdateSheet = true
+                            vm.openUpdates(ctx)
+                        })
                         if (vm.meta != null) {
                             add(Command(
                                 "Export source or an IDA script",

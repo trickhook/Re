@@ -49,7 +49,7 @@
     "APK analyzer with binary AXML manifest parsing",
     "SQLite project database for renames, comments, bookmarks",
     "SakoScript plugin language with 20+ host API functions",
-    "Offline AI-assisted function explanation",
+    "P-code emulation of a single function",
     "Command palette, search-everywhere, goto-address"
   ]
 }
@@ -144,7 +144,7 @@ footer{border-top:1px solid var(--line);padding:26px 20px;text-align:center;colo
   <h1>Sako RE Studio</h1>
   <p class="sub">Mobile-first <strong>Interactive Disassembler &amp; Decompiler Framework</strong>.<br/>
   <span class="type mono" id="typing"></span><span class="caret">&nbsp;</span></p>
-  <p class="sub" style="margin-top:10px">The IDA Pro / Ghidra experience — <strong style="color:var(--green)">in your pocket</strong>. Open any APK, DEX, ELF or PE and explore functions, call graphs, pseudo-C, xrefs and a live debugger — fully offline.</p>
+  <p class="sub" style="margin-top:10px">The IDA Pro / Ghidra experience — <strong style="color:var(--green)">in your pocket</strong>. Open any APK, DEX, ELF or PE and explore functions, call graphs, pseudo-C, xrefs and a live debugger. Your binaries never leave the phone.</p>
   <div class="cta">
     <a class="btn btn-p" href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest" rel="noopener">⬇️ Download APK (v2.0.3)</a>
     <a class="btn btn-g" href="https://github.com/Maxamedxasa/SakoREStudio" rel="noopener">⭐ GitHub Repository</a>
@@ -171,7 +171,7 @@ footer{border-top:1px solid var(--line);padding:26px 20px;text-align:center;colo
     <div class="card"><div class="ic">🐞</div><h3>Real ptrace Debugger</h3><p>Spawn or attach to a PID, software breakpoints (BRK / 0xCC), full register read/write, memory &amp; stack dumps and a thread list.</p></div>
     <div class="card"><div class="ic">📦</div><h3>APK Analyzer</h3><p>Binary AXML manifest parsing: package, permissions (risk-flagged ⚠), all components + intent filters, DEX classes, native libs and resources with image preview.</p></div>
     <div class="card"><div class="ic">🧩</div><h3>SakoScript Plugins</h3><p>A full scripting language inside the app (vars, if/while/for, functions) with a 20+ function host API. 4 security plugins ship bundled.</p></div>
-    <div class="card"><div class="ic">🤖</div><h3>AI Assistant</h3><p>Offline heuristic <em>Explain</em> for any function, or plug in your own OpenAI / DeepSeek / Ollama endpoint for full LLM analysis.</p></div>
+    <div class="card"><div class="ic">🧮</div><h3>P-code emulator</h3><p>Run a function with your own arguments and read back what it wrote — the plaintext a decrypt routine produces, a computed jump resolved, a string assembled at runtime that is nowhere in the file.</p></div>
     <div class="card"><div class="ic">📱</div><h3>Modern Mobile UI</h3><p>13 tabs, command palette (Ctrl+K), search-everywhere (Ctrl+F), goto address (Ctrl+G) and complete keyboard shortcuts — built with Jetpack Compose.</p></div>
   </div>
 </section>
@@ -210,7 +210,7 @@ footer{border-top:1px solid var(--line);padding:26px 20px;text-align:center;colo
   <details open><summary>Is Sako RE Studio free?</summary><p>Yes — free and open source under the MIT license. The signed APK is on the <a href="https://github.com/Maxamedxasa/SakoREStudio/releases/latest">GitHub Releases</a> page.</p></details>
   <details><summary>Does it need root?</summary><p>No. All static analysis (disassembly, decompilation, APK analysis, graphs, plugins) runs without root. Only the ptrace debugger needs a rooted or debuggable device.</p></details>
   <details><summary>Which formats does it support?</summary><p>APK (manifest + DEX + libs + resources), DEX, ELF32/ELF64 and PE32+ — targeting ARM64, x86-64 and ARM code.</p></details>
-  <details><summary>Is it really an IDA Pro / Ghidra alternative on mobile?</summary><p>It is a mobile-first interactive disassembler &amp; decompiler framework inspired by IDA Pro and Ghidra: function discovery, xrefs, call graph, IR decompiler, debugger and a plugin language — all offline on your phone.</p></details>
+  <details><summary>Is it really an IDA Pro / Ghidra alternative on mobile?</summary><p>It is a mobile-first interactive disassembler &amp; decompiler framework inspired by IDA Pro and Ghidra: function discovery, xrefs, call graph, IR decompiler, debugger and a plugin language, all running on your phone. The only network call it ever makes is the update check, when you ask for it.</p></details>
 </section>
 
 <!-- ================= SOMALI ================= -->

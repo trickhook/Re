@@ -32,7 +32,18 @@ architecture Capstone supports. Original work and MIT licence: see [Author](#-au
 
 ### 🧠 What is Nocturne?
 
-**Nocturne** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64, ARM/Thumb, x86, x86-64, MIPS, PowerPC, SPARC and m68k** — little- and big-endian alike — plus SystemZ, which disassembles but does not decompile, because Ghidra ships no z/Architecture processor module and so there is no specification to compile — and every byte of it stays on the device: the app declares no network permission at all.
+**Nocturne** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64, ARM/Thumb, x86, x86-64, MIPS, PowerPC, SPARC and m68k** — little- and big-endian alike — plus SystemZ, which disassembles but does not decompile, because Ghidra ships no z/Architecture processor module and so there is no specification to compile — and every byte of that analysis stays on the device.
+
+**What Nocturne does on the network.** Two permissions, both held for the in-app updater and
+used by nothing else: `INTERNET` and `REQUEST_INSTALL_PACKAGES`. The updater talks to
+`api.github.com` only when you ask it to — **Check for updates**, in the overflow menu or the
+command palette — or once at startup if you turn on *Check on launch*, which ships off. There is
+no timer, no background service, no crash reporting and no analytics of any kind. Nothing else in
+the app opens a socket: no binary you open, no function name you type, no comment, bookmark, note
+or project database ever leaves the phone. What the updater fetches it refuses to install unless
+the file's SHA-256 matches the digest published with the release **and** the APK's signing
+certificate matches the copy of Nocturne already on the device — only then is it handed to
+Android's own installer, which asks you again before anything is replaced.
 
 Built end-to-end by a Somali developer — the first mobile reverse-engineering studio of its kind out of Somalia 🇸🇴
 

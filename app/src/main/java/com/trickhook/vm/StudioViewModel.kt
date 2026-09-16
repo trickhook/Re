@@ -5,12 +5,14 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.trickhook.BuildConfig
 import com.trickhook.data.Bookmark
 import com.trickhook.data.Note
 import com.trickhook.data.ProjectDb
@@ -46,7 +48,27 @@ import com.trickhook.model.parseHexAddr
 import com.trickhook.model.parseIdcAnnotations
 import com.trickhook.model.parseMeta
 import com.trickhook.model.parseScriptResult
+import com.trickhook.update.UpdateException
+import com.trickhook.update.UpdateFailure
+import com.trickhook.update.UpdateState
+import com.trickhook.update.deleteUpdateApk
+import com.trickhook.update.downloadApk
+import com.trickhook.update.failInstallPermission
+import com.trickhook.update.failNoInstaller
+import com.trickhook.update.failUnexpected
+import com.trickhook.update.fetchLatestRelease
+import com.trickhook.update.freshUpdateApk
+import com.trickhook.update.humanBytes
+import com.trickhook.update.storeUpdateCheckOnLaunch
+import com.trickhook.update.updateCheckOnLaunch
+import com.trickhook.update.updateUserAgent
+import com.trickhook.update.verifyDigest
+import com.trickhook.update.verifySigning
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -89,6 +111,14 @@ enum class DbgMode { NONE, TRACE, SESSION }
 
 /** How many places back the chevron can walk before the oldest is dropped. */
 private const val NAV_LIMIT = 64
+
+/**
+ * How often a download may move the progress bar. A 64 KB read on a fast
+ * connection fires hundreds of times a second, and each one would otherwise be
+ * a hop to the main thread and a recomposition to draw a bar three pixels
+ * further along.
+ */
+private const val UPDATE_PROGRESS_MS = 120L
 
 /** One step of the back stack: where the user was before a jump. */
 data class NavEntry(val tab: Tab, val addr: Long?)
@@ -199,6 +229,27 @@ class StudioViewModel : ViewModel() {
     // declaration order and log() now feeds notify().
     var toast by mutableStateOf<Toast?>(null); private set
     private val toastSeq = AtomicLong(0L)
+
+    // --------------------------------------------------------------- updates --
+    // The in-app updater. Nothing here runs by itself: [checkForUpdate] is
+    // reached from the overflow menu and the command palette, and on launch
+    // only when [updateOnLaunch] has been switched on by hand. This is the only
+    // feature in the app that uses the network at all.
+    var updateState by mutableStateOf<UpdateState>(UpdateState.Idle); private set
+
+    /**
+     * Download progress, held apart from [updateState] on purpose: it moves
+     * several times a second, and folding it into the state object would
+     * rebuild the whole sheet on every tick.
+     */
+    var updateBytes by mutableLongStateOf(0L); private set
+    var updateTotal by mutableLongStateOf(0L); private set
+
+    /** The opt-in launch check. Off until someone says otherwise. */
+    var updateOnLaunch by mutableStateOf(false); private set
+
+    /** Whatever the updater has in flight — one check or one download, never both. */
+    private var updateJob: Job? = null
 
     // ------------------------------------------------------------ cross-panel --
     /** An address another panel asked us to reveal; the panel consumes it. */
@@ -1783,6 +1834,262 @@ class StudioViewModel : ViewModel() {
                 pseudoAltBusy = false
             }
         }
+    }
+
+    // -------------------------------------------------------------- updates --
+    /**
+     * Read the launch preference and clear any APK a previous run left behind.
+     *
+     * A pending download at startup is always stale: either it installed — in
+     * which case this process is the new build — or it was abandoned. Nothing
+     * may reuse it either way, because nothing would re-verify it, so it goes.
+     */
+    fun loadUpdatePrefs(context: Context) {
+        val app = context.applicationContext
+        viewModelScope.launch {
+            val on = withContext(Dispatchers.IO) { updateCheckOnLaunch(app) }
+            // Tested back on the main thread, where [updateJob] is the only
+            // thing that writes it: a download started while this preference
+            // was being read off disk must not have its file deleted underneath
+            // it. In practice this runs before the first frame, but the check
+            // costs nothing and the failure it prevents is silent.
+            if (updateJob == null) withContext(Dispatchers.IO) { deleteUpdateApk(app) }
+            updateOnLaunch = on
+            if (on && updateState is UpdateState.Idle) checkForUpdate(app, manual = false)
+        }
+    }
+
+    /**
+     * Turn the launch-time check on or off. Named `apply…` rather than `set…`
+     * because `var updateOnLaunch` already compiles to `setUpdateOnLaunch`.
+     */
+    fun applyUpdateOnLaunch(context: Context, on: Boolean) {
+        updateOnLaunch = on
+        val app = context.applicationContext
+        viewModelScope.launch(Dispatchers.IO) { storeUpdateCheckOnLaunch(app, on) }
+        log(
+            "INFO",
+            if (on) "Update check on launch: on — Nocturne will ask GitHub once per start"
+            else "Update check on launch: off — updates are checked only when you ask"
+        )
+    }
+
+    /**
+     * Raised by the overflow menu and the command palette. A result already in
+     * hand is kept rather than re-fetched: GitHub allows 60 unauthenticated
+     * requests an hour and opening a sheet is not a reason to spend one.
+     */
+    fun openUpdates(context: Context) {
+        when (updateState) {
+            is UpdateState.Idle, is UpdateState.Failed -> checkForUpdate(context, manual = true)
+            else -> Unit
+        }
+    }
+
+    /**
+     * Ask GitHub what the latest release is and compare it with this build.
+     *
+     * [manual] is the difference between a question the user asked and one the
+     * launch preference asked on their behalf: a failure they asked for goes to
+     * the toast channel, a failure they did not goes to the console only. A
+     * tool that shouts about a network call it made on its own initiative is
+     * worse than one that stays quiet about it.
+     */
+    fun checkForUpdate(context: Context, manual: Boolean) {
+        if (updateJob?.isActive == true) return
+        val app = context.applicationContext
+        updateState = UpdateState.Checking
+        updateBytes = 0L
+        updateTotal = 0L
+        updateJob = viewModelScope.launch {
+            try {
+                val rel = fetchLatestRelease(
+                    BuildConfig.UPDATE_REPO,
+                    BuildConfig.UPDATE_MANIFEST_ASSET,
+                    updateUserAgent(BuildConfig.VERSION_NAME)
+                )
+                val mine = BuildConfig.VERSION_CODE.toLong()
+                if (rel.versionCode <= mine) {
+                    updateState = UpdateState.UpToDate(BuildConfig.VERSION_NAME, mine)
+                    if (manual) log("OK", "Nocturne ${BuildConfig.VERSION_NAME} is the newest published build")
+                } else {
+                    updateState = UpdateState.Available(rel)
+                    log(
+                        "INFO",
+                        "Update available: Nocturne ${rel.versionName} · ${humanBytes(rel.apkSize)}"
+                    )
+                }
+            } catch (e: UpdateException) {
+                updateState = UpdateState.Failed(e.failure, null)
+                reportUpdateFailure(e.failure, manual)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val failure = failUnexpected(e.message)
+                updateState = UpdateState.Failed(failure, null)
+                reportUpdateFailure(failure, manual)
+            }
+        }
+    }
+
+    /**
+     * Fetch the release APK into app-private storage and put it through both
+     * verification checks before anyone is offered a button that installs it.
+     *
+     * The order is the whole point. The file is written, then hashed off the
+     * disk, then its signing certificate is read off the disk, and only then
+     * does [UpdateState.Ready] appear. A file that fails either check is
+     * deleted before the message about it is raised, so there is never a moment
+     * where a rejected APK is sitting on the device with a story attached.
+     */
+    fun downloadUpdate(context: Context) {
+        val standing = updateState
+        val rel = when (standing) {
+            is UpdateState.Available -> standing.rel
+            is UpdateState.Failed -> standing.rel
+            else -> null
+        } ?: return
+        if (updateJob?.isActive == true) return
+        val app = context.applicationContext
+        updateBytes = 0L
+        updateTotal = rel.apkSize
+        updateState = UpdateState.Downloading(rel)
+        updateJob = viewModelScope.launch {
+            try {
+                val dest = withContext(Dispatchers.IO) { freshUpdateApk(app) }
+                var lastTick = 0L
+                downloadApk(rel, dest, updateUserAgent(BuildConfig.VERSION_NAME)) { got, total ->
+                    val now = System.currentTimeMillis()
+                    if (got >= total || now - lastTick >= UPDATE_PROGRESS_MS) {
+                        lastTick = now
+                        withContext(Dispatchers.Main) {
+                            updateBytes = got
+                            updateTotal = total
+                        }
+                    }
+                }
+
+                // Check 2 of 3: the digest of the bytes that actually landed.
+                updateState = UpdateState.Verifying(rel, "SHA-256")
+                val digestFailure = withContext(Dispatchers.IO) { verifyDigest(dest, rel) }
+                if (digestFailure != null) {
+                    discardUpdate(app)
+                    throw UpdateException(digestFailure)
+                }
+
+                // Check 3 of 3: who signed it, against who signed us.
+                updateState = UpdateState.Verifying(rel, "signing certificate")
+                val signingFailure = withContext(Dispatchers.IO) { verifySigning(app, dest, rel) }
+                if (signingFailure != null) {
+                    discardUpdate(app)
+                    throw UpdateException(signingFailure)
+                }
+
+                updateState = UpdateState.Ready(rel, dest.absolutePath)
+                log("OK", "Update verified — SHA-256 and signing certificate both match")
+            } catch (e: UpdateException) {
+                updateState = UpdateState.Failed(e.failure, rel)
+                log("ERROR", e.failure.title)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                discardUpdate(app)
+                val failure = failUnexpected(e.message)
+                updateState = UpdateState.Failed(failure, rel)
+                log("ERROR", failure.title)
+            }
+        }
+    }
+
+    /**
+     * Stop a download or a verification and take the partial file with it.
+     *
+     * The delete runs in a fresh coroutine after the old job has actually
+     * stopped: issuing it from inside the cancelled job would race the stream
+     * that is still being written.
+     */
+    fun cancelUpdateDownload(context: Context) {
+        val job = updateJob ?: return
+        val standing = updateState
+        val rel = when (standing) {
+            is UpdateState.Downloading -> standing.rel
+            is UpdateState.Verifying -> standing.rel
+            else -> null
+        }
+        updateBytes = 0L
+        updateState = if (rel != null) UpdateState.Available(rel) else UpdateState.Idle
+        val app = context.applicationContext
+        // The cleanup becomes the job in flight. Without that, Download pressed
+        // immediately after Cancel would start writing a new file while this
+        // coroutine was still waiting to delete the old one — and delete the
+        // new one instead.
+        updateJob = viewModelScope.launch {
+            job.cancelAndJoin()
+            discardUpdate(app)
+        }
+        log("INFO", "Update download cancelled — the partial file was deleted")
+    }
+
+    /** The sheet pressed Install and Android has not granted the permission for it. */
+    fun updateInstallBlocked() {
+        log("WARN", failInstallPermission().title)
+    }
+
+    /**
+     * Nothing on this device answered a request to install a package. Rare —
+     * a stripped or managed image — but it throws out of `launch()`, and an
+     * uncaught ActivityNotFoundException there would take the app down at the
+     * last step of a flow that had otherwise gone perfectly.
+     */
+    fun updateNoInstaller() {
+        val standing = updateState
+        val rel = if (standing is UpdateState.Ready) standing.rel else null
+        val failure = failNoInstaller()
+        updateState = UpdateState.Failed(failure, rel)
+        log("ERROR", failure.title)
+    }
+
+    /**
+     * Anything else that went wrong at the moment of hand-over — a FileProvider
+     * that cannot serve the path, a SecurityException on the grant. There is no
+     * way to exercise this from a build machine, so it is caught rather than
+     * trusted: a crash on the last press of a flow that had gone perfectly is
+     * the worst possible place to find out.
+     */
+    fun updateHandoverFailed(message: String?) {
+        val standing = updateState
+        val rel = if (standing is UpdateState.Ready) standing.rel else null
+        val failure = failUnexpected(message)
+        updateState = UpdateState.Failed(failure, rel)
+        log("ERROR", failure.title)
+    }
+
+    /**
+     * The system installer came back. On a successful replace this process is
+     * usually killed before the result ever arrives, so a success here is a
+     * bonus rather than something the flow depends on; a dismissal leaves the
+     * verified APK in place so the button still works.
+     */
+    fun updateInstallerReturned(ok: Boolean) {
+        if (ok) {
+            updateState = UpdateState.Idle
+            log("OK", "The installer accepted the update")
+        } else {
+            // RESULT_CANCELED means they backed out; RESULT_FIRST_USER means the
+            // platform refused it. Neither installed anything, and neither is
+            // worth a toast — the sheet is still open behind the installer with
+            // the verified APK ready to try again.
+            log("INFO", "The installer did not complete — nothing was installed")
+        }
+    }
+
+    private fun reportUpdateFailure(failure: UpdateFailure, manual: Boolean) {
+        if (manual) log("ERROR", failure.title) else log("INFO", "Update check: ${failure.title}")
+    }
+
+    /** NonCancellable so a rejected or cancelled APK is still removed. */
+    private suspend fun discardUpdate(app: Context) {
+        withContext(NonCancellable + Dispatchers.IO) { deleteUpdateApk(app) }
     }
 
     // -------------------------------------------------------------- helpers --

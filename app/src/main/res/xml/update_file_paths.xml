@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one directory the system package installer is ever allowed to read out of
+  Nocturne's private storage: app filesDir/updates, which holds exactly one
+  file, pending-update.apk, and only between a verified download and the
+  install that consumes it. See com.trickhook.update.UpdateInstall.
+
+  A file:// URI for the same path throws FileUriExposedException on API 24 and
+  up, which is why this provider exists at all rather than the APK simply being
+  handed over by path.
+-->
+<paths>
+    <files-path name="updates" path="updates/" />
+</paths>

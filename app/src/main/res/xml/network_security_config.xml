@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nocturne's entire network policy, in one file.
+
+  cleartextTrafficPermitted="false" so no code path in this app can ever open a
+  plain HTTP connection, even by mistake — the platform refuses it below the
+  level any of our code runs at. The updater already checks the scheme on every
+  redirect hop itself; this is the second lock, on the other side of the door.
+
+  Only the system trust store is trusted. User-installed CAs are deliberately
+  not listed: an app targeting API 24 or above already excludes them by
+  default, and saying so here makes it a decision rather than an accident. The
+  practical effect is that an interception proxy cannot read or rewrite an
+  update download on a device whose owner has installed its certificate.
+
+  There is no debug-overrides block. A build that trusts extra certificates in
+  order to be watched is a build that can be fed a different APK, and this is
+  the one code path in the app where that matters.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

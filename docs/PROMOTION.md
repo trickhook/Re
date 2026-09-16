@@ -69,7 +69,7 @@ Repo: https://github.com/Maxamedxasa/SakoREStudio
 Landing page: https://maxamedxasa.github.io/SakoREStudio/
 APK (signed, ~10 MB): https://github.com/Maxamedxasa/SakoREStudio/releases/latest
 
-What it does (all offline, no root needed for static analysis):
+What it does (your binaries never leave the device; no root needed for static analysis):
 • Formats: APK (AXML manifest + DEX + libs + resources), DEX, ELF32/64, PE32+
 • Architectures: ARM64, x86-64, ARM (via Capstone 4.0.2, plus a built-in fallback decoder)
 • Auto-analysis: function discovery (symtab + prologue scan), xrefs, real call graph with
@@ -83,7 +83,7 @@ What it does (all offline, no root needed for static analysis):
 • SakoScript: a small built-in scripting language (20+ host API functions) for automation
 • Command palette, search-everywhere, goto-address — full keyboard support
 
-Tech: C++17 NDK engine + Kotlin/Jetpack Compose UI. No Telemetry, works fully offline.
+Tech: C++17 NDK engine + Kotlin/Jetpack Compose UI. No telemetry, no analytics, no background service — the one network call is the update check, and only when you ask for it.
 
 I'd genuinely appreciate feedback from people here — especially on the IR decompiler side.
 What would you want in a mobile RE tool?
@@ -112,7 +112,7 @@ Interesting engineering bits:
 • UI: Jetpack Compose, 13 tabs, Canvas-based CFG with pan/zoom/minimap, command palette
 • Size: R8 minify brought the APK from ~47 MB to ~10 MB; runs on Android 8.0+ (arm64/x86_64)
 
-Fully offline, MIT licensed. Feedback welcome!
+Your binaries stay on the device. MIT licensed. Feedback welcome!
 ```
 
 ---
@@ -158,7 +158,7 @@ Bilaash oo xarig furan (open source) 🇸🇴
 Hi XDA!
 
 Sako RE Studio is a mobile-first interactive disassembler & decompiler framework — think
-IDA/Ghidra workflow, running on your phone. Fully offline, free & open source (MIT).
+IDA/Ghidra workflow, running on your phone. Analysis stays on the device. Free & open source (MIT).
 
 DOWNLOAD
 • APK (signed, ~10 MB): https://github.com/Maxamedxasa/SakoREStudio/releases/latest

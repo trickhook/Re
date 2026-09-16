@@ -1,6 +1,7 @@
 package com.trickhook.ui
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -99,6 +100,7 @@ import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
@@ -159,6 +161,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import com.trickhook.R
+import com.trickhook.update.UpdateSheet
+import com.trickhook.update.installIntentFor
 import com.trickhook.vm.StudioViewModel
 import com.trickhook.vm.Tab
 import com.trickhook.vm.TabGroup
@@ -204,6 +208,17 @@ fun StudioApp(vm: StudioViewModel) {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { vm.importIdaAnnotations(ctx, it) } }
 
+    // The return leg of the system package installer, registered here for the
+    // same reason as the two above: the update sheet is composed conditionally,
+    // so a launcher created inside it is unregistered before the result lands.
+    // A successful in-place update usually kills this process before the result
+    // arrives at all, so RESULT_OK is a bonus — what this is really for is
+    // telling the user that they dismissed the installer, which otherwise looks
+    // exactly like nothing happening.
+    val installLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result -> vm.updateInstallerReturned(result.resultCode == Activity.RESULT_OK) }
+
     // rememberSaveable, not remember: rotating recreates the Activity, and these
     // four are the only pieces of screen state StudioApp still owns — everything
     // else moved onto the ViewModel, which survives a configuration change by
@@ -223,6 +238,10 @@ fun StudioApp(vm: StudioViewModel) {
         vm.refreshRecents(ctx)
         vm.loadPlugins(ctx)
         vm.installSleigh(ctx)
+        // Reads one preference and deletes any stale download. It contacts
+        // GitHub only if the user has switched the launch check on; by default
+        // this touches nothing but the disk.
+        vm.loadUpdatePrefs(ctx)
     }
     LaunchedEffect(vm.darkTheme) {
         (ctx as? Activity)?.window?.let { w ->
@@ -513,6 +532,26 @@ fun StudioApp(vm: StudioViewModel) {
                                 onClick = { showOverflow = false; showShortcutsHelp = true }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("Check for updates", color = ide.text, fontSize = Type.body)
+                                        Text(
+                                            "asks GitHub once — the only part of Nocturne that uses the network",
+                                            color = ide.dim, fontSize = Type.caption
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.SystemUpdate, null, tint = ide.dim,
+                                        modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOverflow = false
+                                    showUpdateSheet = true
+                                    vm.openUpdates(ctx)
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("About", color = ide.text, fontSize = Type.body) },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Info, null, tint = ide.dim,
@@ -601,6 +640,25 @@ fun StudioApp(vm: StudioViewModel) {
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
     if (showAnnotations) AnnotationsSheet(vm, onDismiss = { showAnnotations = false })
+
+    if (showUpdateSheet) {
+        UpdateSheet(
+            vm,
+            onInstall = { apk ->
+                // A device with no package installer at all throws out of
+                // launch(); the sheet says so rather than the app dying on the
+                // last press of an otherwise complete flow.
+                try {
+                    installLauncher.launch(installIntentFor(ctx, apk))
+                } catch (e: ActivityNotFoundException) {
+                    vm.updateNoInstaller()
+                } catch (e: Exception) {
+                    vm.updateHandoverFailed(e.message)
+                }
+            },
+            onDismiss = { showUpdateSheet = false }
+        )
+    }
 
     // Three contracts so the picker gets a sensible mime per shape; all of them
     // are registered here, where they survive the sheet being dismissed.
