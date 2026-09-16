@@ -143,6 +143,12 @@ class ProjectDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
+    /** Drop one rename, so a plugin run can be rolled back to "no rename". */
+    fun deleteRename(pid: Long, addr: String) {
+        writableDatabase.delete("renames", "project_id=? AND addr=?",
+            arrayOf(pid.toString(), addr))
+    }
+
     fun renames(pid: Long): Map<String, String> =
         readableDatabase.query("renames", arrayOf("addr", "new_name"),
             "project_id=?", arrayOf(pid.toString()), null, null, null).use { c ->

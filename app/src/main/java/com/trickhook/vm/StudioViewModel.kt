@@ -11,19 +11,23 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.trickhook.data.Bookmark
+import com.trickhook.data.Note
 import com.trickhook.data.ProjectDb
 import com.trickhook.data.RecentProject
 import com.trickhook.engine.NativeBridge
 import com.trickhook.model.ApkEntry
 import com.trickhook.model.ApkResourceEntry
 import com.trickhook.model.AnalysisMeta
+import com.trickhook.model.CallEdge
 import com.trickhook.model.CallGraphData
 import com.trickhook.model.ConsoleLine
 import com.trickhook.model.DbgState
 import com.trickhook.model.DebugResult
+import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
 import com.trickhook.model.ManifestInfo
 import com.trickhook.model.PluginDef
+import com.trickhook.model.Section
 import com.trickhook.model.ApkAnalyzer
 import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDbg
@@ -37,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipFile
 
 /**
@@ -72,6 +77,26 @@ enum class Tab(val title: String, val group: TabGroup) {
 
 enum class DbgMode { NONE, TRACE, SESSION }
 
+/** How many places back the chevron can walk before the oldest is dropped. */
+private const val NAV_LIMIT = 64
+
+/** One step of the back stack: where the user was before a jump. */
+data class NavEntry(val tab: Tab, val addr: Long?)
+
+/**
+ * A single transient message. The console is only visible on one of twelve
+ * tabs, so every failure used to be silent; this is what the host screen
+ * shows in a snackbar. [id] is a counter, not a timestamp, so two identical
+ * messages in the same millisecond still count as two toasts.
+ */
+data class Toast(
+    val id: Long,
+    val level: String,
+    val msg: String,
+    val actionLabel: String? = null,
+    val action: (() -> Unit)? = null
+)
+
 class StudioViewModel : ViewModel() {
 
     var meta by mutableStateOf<AnalysisMeta?>(null); private set
@@ -92,6 +117,52 @@ class StudioViewModel : ViewModel() {
     var detail by mutableStateOf<FunctionDetail?>(null); private set
     var tab by mutableStateOf(Tab.ASSEMBLY)
     var darkTheme by mutableStateOf(true)
+
+    /**
+     * What the app as a whole is doing, for the header progress line.
+     * "" means idle. Distinct from [decompilePhase], which is only about the
+     * decompiler: opening, exporting, call-graph building and plugin runs all
+     * happen off the Pseudo-C tab and were invisible before.
+     */
+    var globalPhase by mutableStateOf("")
+
+    // ------------------------------------------------------ hoisted panel state --
+    // Every one of these used to be a `remember` inside a panel, so it died on
+    // each tab switch: scroll position, filter text and graph transform all
+    // reset when you looked at something else and came back.
+    var asmIndex by mutableStateOf(0)
+    var asmOffset by mutableStateOf(0)
+    var hexIndex by mutableStateOf(0)
+    var funcQuery by mutableStateOf("")
+    var stringQuery by mutableStateOf("")
+    /** functions | imports | exports */
+    var symbolsMode by mutableStateOf("functions")
+    /** 0 sections, 1 segments */
+    var mapMode by mutableStateOf(0)
+    var apkMode by mutableStateOf(0)
+    var traceStep by mutableStateOf(-1)
+    var pluginSelected by mutableStateOf("")
+    var graphScale by mutableStateOf(1f)
+    var graphPanX by mutableStateOf(0f)
+    var graphPanY by mutableStateOf(0f)
+
+    // -------------------------------------------------------- backend compare --
+    var compareBackends by mutableStateOf(false)
+    /** The other backend's pseudo-C for the current function, when asked for. */
+    var pseudoAlt by mutableStateOf<String?>(null); private set
+    var pseudoAltBusy by mutableStateOf(false); private set
+
+    // ---------------------------------------------------------------- toasts --
+    // Declared above `init`, which logs: property initializers run in
+    // declaration order and log() now feeds notify().
+    var toast by mutableStateOf<Toast?>(null); private set
+    private val toastSeq = AtomicLong(0L)
+
+    // ------------------------------------------------------------ cross-panel --
+    /** An address another panel asked us to reveal; the panel consumes it. */
+    var gotoAddr by mutableStateOf<Long?>(null); private set
+    var graphZoomReq by mutableStateOf(1f)
+    var graphFitReq by mutableStateOf(false)
 
     // legacy syscall trace
     var debugResult by mutableStateOf<DebugResult?>(null); private set
@@ -117,6 +188,8 @@ class StudioViewModel : ViewModel() {
     var lastPluginName by mutableStateOf(""); private set
     var lastPluginEffects by mutableStateOf(0); private set
     var lastPluginOk by mutableStateOf(true); private set
+    /** True while the last plugin run can still be rolled back. */
+    var lastPluginUndoable by mutableStateOf(false); private set
 
     // v2: APK manifest
     var manifest by mutableStateOf<ManifestInfo?>(null); private set
@@ -146,7 +219,22 @@ class StudioViewModel : ViewModel() {
     fun log(level: String, msg: String) {
         console.add(ConsoleLine(System.currentTimeMillis(), level, msg))
         if (console.size > 800) console.removeRange(0, 200)
+        // Only failures surface as a toast. There are dozens of INFO/OK call
+        // sites and turning those into snackbars makes the screen unusable.
+        if (level == "WARN" || level == "ERROR") notify(level, msg)
     }
+
+    /**
+     * Raise a transient message. The id is a counter rather than a clock so
+     * that the same text twice in a row is still two distinct toasts — a
+     * timestamp collides at millisecond resolution and the second one is
+     * silently swallowed by the snackbar host.
+     */
+    fun notify(level: String, msg: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
+        toast = Toast(toastSeq.incrementAndGet(), level, msg, actionLabel, action)
+    }
+
+    fun dismissToast() { toast = null }
 
     // ------------------------------------------------------------ recents --
     fun refreshRecents(context: Context) {
@@ -159,6 +247,7 @@ class StudioViewModel : ViewModel() {
     // ------------------------------------------------------------ open file --
     fun openUri(context: Context, uri: Uri) = viewModelScope.launch {
         busy = true
+        globalPhase = "Opening"
         try {
             withContext(Dispatchers.IO) {
                 val name = queryName(context, uri) ?: "binary.bin"
@@ -179,18 +268,20 @@ class StudioViewModel : ViewModel() {
             log("ERROR", e.message ?: "open failed")
         } finally {
             busy = false
+            globalPhase = ""
         }
     }
 
     fun openRecent(context: Context, rp: RecentProject) = viewModelScope.launch {
         busy = true
+        globalPhase = "Opening ${rp.name}"
         try {
             withContext(Dispatchers.IO) {
                 val f = File(rp.path)
                 if (!f.exists()) { log("ERROR", "Cached binary missing — fur faylka markale"); return@withContext }
                 if (rp.format == "APK") openApk(f, rp.name) else loadFile(f, rp.name)
             }
-        } finally { busy = false }
+        } finally { busy = false; globalPhase = "" }
     }
 
     private fun openApk(file: File, name: String) {
@@ -265,39 +356,66 @@ class StudioViewModel : ViewModel() {
     }
 
     private fun loadFile(file: File, name: String) {
-        currentPath = file.absolutePath
-        val cap = 8L * 1024 * 1024
-        hexData = file.inputStream().use { ins ->
-            val buf = ByteArray(minOf(file.length(), cap).toInt())
-            var off = 0
-            while (off < buf.size) {
-                val r = ins.read(buf, off, buf.size - off)
-                if (r < 0) break
-                off += r
+        // Restored rather than cleared: an APK walks openApk -> extractApkEntry
+        // -> loadFile, and the outer phase should survive the inner one.
+        val outerPhase = globalPhase
+        globalPhase = "Analyzing $name"
+        try {
+            currentPath = file.absolutePath
+            val cap = 8L * 1024 * 1024
+            hexData = file.inputStream().use { ins ->
+                val buf = ByteArray(minOf(file.length(), cap).toInt())
+                var off = 0
+                while (off < buf.size) {
+                    val r = ins.read(buf, off, buf.size - off)
+                    if (r < 0) break
+                    off += r
+                }
+                if (off < buf.size) buf.copyOf(off) else buf
             }
-            if (off < buf.size) buf.copyOf(off) else buf
-        }
-        val m = parseMeta(NativeBridge.nativeAnalyze(file.absolutePath))
-        if (m.ok) {
-            meta = m
-            log(
-                "OK",
-                "${m.format} · ${m.arch.ifEmpty { "-" }} · ${m.functions.size} functions · " +
-                    "${m.callEdges.size} call edges · ${m.strings.size} strings · backend: ${m.backend.ifEmpty { "-" }}"
-            )
-            m.notes.forEach { log("INFO", it) }
-            selectedFunc = null
-            detail = null
-            db?.let { d ->
-                projectId = d.upsertProject(file.absolutePath, name, m.format, m.arch)
-                syncProjectAnnotations()
+            val m = parseMeta(NativeBridge.nativeAnalyze(file.absolutePath))
+            if (m.ok) {
+                meta = m
+                reindex()
+                log(
+                    "OK",
+                    "${m.format} · ${m.arch.ifEmpty { "-" }} · ${m.functions.size} functions · " +
+                        "${m.callEdges.size} call edges · ${m.strings.size} strings · backend: ${m.backend.ifEmpty { "-" }}"
+                )
+                m.notes.forEach { log("INFO", it) }
+                selectedFunc = null
+                detail = null
+                pseudoAlt = null
+                resetPanelState()
+                db?.let { d ->
+                    projectId = d.upsertProject(file.absolutePath, name, m.format, m.arch)
+                    syncProjectAnnotations()
+                }
+                callGraph = null
+                if (m.functions.isNotEmpty()) selectFunction(m.functions[0].addr)
+                else if (m.format == "DEX") tab = Tab.STRINGS else tab = Tab.ASSEMBLY
+            } else {
+                log("ERROR", m.error ?: "analysis failed")
             }
-            callGraph = null
-            if (m.functions.isNotEmpty()) selectFunction(m.functions[0].addr)
-            else if (m.format == "DEX") tab = Tab.STRINGS else tab = Tab.ASSEMBLY
-        } else {
-            log("ERROR", m.error ?: "analysis failed")
+        } finally {
+            globalPhase = outerPhase
         }
+    }
+
+    /**
+     * A new binary invalidates every hoisted scroll position, filter and
+     * graph transform; the modes (which are preferences, not positions) stay.
+     */
+    private fun resetPanelState() {
+        asmIndex = 0; asmOffset = 0; hexIndex = 0
+        funcQuery = ""; stringQuery = ""
+        traceStep = -1
+        graphScale = 1f; graphPanX = 0f; graphPanY = 0f
+        graphZoomReq = 1f; graphFitReq = false
+        gotoAddr = null
+        clearHistory()
+        lastPluginUndoable = false
+        pluginUndo = null
     }
 
     // ------------------------------------------------- project annotations --
@@ -307,6 +425,14 @@ class StudioViewModel : ViewModel() {
         renames.clear(); renames.putAll(d.renames(projectId))
         comments.clear(); comments.putAll(d.comments(projectId))
         bookmarks = d.bookmarks(projectId)
+        refreshNotes(d)
+    }
+
+    /** Make sure there is a project row to hang annotations off. */
+    private fun ensureProject(d: ProjectDb) {
+        if (projectId < 0 && currentPath != null) {
+            projectId = d.upsertProject(currentPath!!, meta?.name ?: "binary", meta?.format, meta?.arch)
+        }
     }
 
     fun renameFunction(context: Context, addr: Long, newName: String) {
@@ -315,11 +441,13 @@ class StudioViewModel : ViewModel() {
             projectId = d.upsertProject(currentPath!!, meta?.name ?: "binary", meta?.format, meta?.arch)
         }
         val key = "0x%08X".format(addr)
-        val old = meta?.functions?.firstOrNull { it.addr == addr }?.name
+        val old = functionAt(addr)?.name
         d.rename(projectId, key, old, newName)
         renames[key] = newName
         log("OK", "Renamed ${old ?: key} → $newName")
-        // refresh detail to pick up the new name in pseudo-C
+        // Refresh detail to pick up the new name in pseudo-C. selectFunction
+        // deliberately does NOT push navigation history, so renaming in place
+        // never lands a bogus entry on the back stack.
         selectedFunc?.let { if (it == addr) selectFunction(addr) }
     }
 
@@ -349,23 +477,197 @@ class StudioViewModel : ViewModel() {
         bookmarks = database(context).bookmarks(projectId)
     }
 
+    fun removeComment(context: Context, addr: Long) {
+        val key = "0x%08X".format(addr)
+        if (projectId >= 0) database(context).deleteComment(projectId, key)
+        comments.remove(key)
+        log("OK", "Comment removed @ $key")
+    }
+
+    // --------------------------------------------------------------- notes --
+    // Held in state rather than queried per call: a panel reads this during
+    // composition, so it has to be cheap AND it has to change when a note is
+    // added, or the list would sit there stale.
+    private var notesCache by mutableStateOf<List<Note>>(emptyList())
+    private var notesCacheFor = -2L
+
+    /** Free-form notes for the open project. Empty until a binary is opened. */
+    fun notes(context: Context): List<Note> {
+        if (projectId < 0) return emptyList()
+        if (notesCacheFor != projectId) refreshNotes(database(context))
+        return notesCache
+    }
+
+    private fun refreshNotes(d: ProjectDb) {
+        notesCache = if (projectId < 0) emptyList() else d.notes(projectId)
+        notesCacheFor = projectId
+    }
+
+    /**
+     * The first line becomes the title and the rest the body, which is what
+     * the notes table is shaped for; a single-line note has an empty body.
+     */
+    fun addNote(context: Context, text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val d = database(context)
+        ensureProject(d)
+        if (projectId < 0) {
+            log("WARN", "Open a binary before writing notes")
+            return
+        }
+        val title = trimmed.lineSequence().first().take(80)
+        val body = trimmed.removePrefix(title).trim()
+        d.note(projectId, title, body)
+        refreshNotes(d)
+        log("OK", "Note saved")
+    }
+
+    fun deleteNote(context: Context, id: Long) {
+        val d = database(context)
+        d.deleteNote(id)
+        refreshNotes(d)
+        log("OK", "Note deleted")
+    }
+
+    // ------------------------------------------------------------ navigation --
+    // A snapshot list, not an ArrayDeque: `canGoBack` is read during
+    // composition and a plain field would never recompose, so the back
+    // chevron would stay disabled forever.
+    private val navStack = mutableStateListOf<NavEntry>()
+
+    val canGoBack: Boolean get() = navStack.isNotEmpty()
+
+    /**
+     * Push where we are, then move. This is the ONLY writer of history:
+     * [selectFunction] is also reached from restore paths and from the rename
+     * self-refresh, and pushing there would fill the stack with places the
+     * user never chose to visit.
+     */
+    fun navigateTo(tab: Tab? = null, addr: Long? = null) {
+        val toTab = tab ?: this.tab
+        val addrMoves = addr != null && addr != selectedFunc
+        if (toTab == this.tab && !addrMoves) return
+        if (navStack.size >= NAV_LIMIT) navStack.removeAt(0)
+        navStack.add(NavEntry(this.tab, selectedFunc))
+        this.tab = toTab
+        if (addr != null && (addrMoves || detail == null)) selectFunction(addr)
+    }
+
+    /** Pop and restore. Restoring never pushes, so back is not a move. */
+    fun back(): Boolean {
+        if (navStack.isEmpty()) return false
+        // removeAt(size-1), never removeLast(): on API 35 `MutableList.removeLast`
+        // resolves to java.util.List.removeLast and throws NoSuchMethodError
+        // on every device below it.
+        val entry = navStack.removeAt(navStack.size - 1)
+        tab = entry.tab
+        if (entry.addr != null && (entry.addr != selectedFunc || detail == null)) selectFunction(entry.addr)
+        return true
+    }
+
+    fun clearHistory() { navStack.clear() }
+
+    // --------------------------------------------------------- goto requests --
+    fun requestGoto(addr: Long) { gotoAddr = addr }
+
+    /** Returns the pending address and clears it, so one request fires once. */
+    fun consumeGoto(): Long? {
+        val a = gotoAddr
+        gotoAddr = null
+        return a
+    }
+
+    // --------------------------------------------------------------- lookups --
+    // Built once per analysis. A linear scan per composition over 1,300
+    // functions and tens of thousands of call edges is what these replace.
+    private var funcByAddr by mutableStateOf<Map<Long, FuncInfo>>(emptyMap())
+    private var funcsByStart by mutableStateOf<List<FuncInfo>>(emptyList())
+    private var funcStarts by mutableStateOf(LongArray(0))
+    private var callersIndex by mutableStateOf<Map<Long, List<CallEdge>>>(emptyMap())
+    private var calleesIndex by mutableStateOf<Map<Long, List<CallEdge>>>(emptyMap())
+    private var mappedSections by mutableStateOf<List<Section>>(emptyList())
+
+    /** Rebuild every lookup table. Call this at each site that assigns [meta]. */
+    private fun reindex() {
+        val m = meta
+        if (m == null) {
+            funcByAddr = emptyMap()
+            funcsByStart = emptyList()
+            funcStarts = LongArray(0)
+            callersIndex = emptyMap()
+            calleesIndex = emptyMap()
+            mappedSections = emptyList()
+            return
+        }
+        val sorted = m.functions.sortedBy { it.addr }
+        funcsByStart = sorted
+        funcStarts = LongArray(sorted.size) { sorted[it].addr }
+        funcByAddr = m.functions.associateBy { it.addr }
+        calleesIndex = m.callEdges.groupBy { it.from }
+        callersIndex = m.callEdges.groupBy { it.to }
+        // addr == 0 means the section is not mapped into the address space, so
+        // it can never contain a virtual address.
+        mappedSections = m.sections.filter { it.addr != 0L && it.size > 0L }.sortedBy { it.addr }
+    }
+
+    fun functionAt(addr: Long): FuncInfo? = funcByAddr[addr]
+
+    /** The function whose body covers [addr], by binary search over starts. */
+    fun functionContaining(addr: Long): FuncInfo? {
+        val starts = funcStarts
+        if (starts.isEmpty()) return null
+        var i = starts.binarySearch(addr)
+        if (i < 0) {
+            i = -i - 2
+            if (i < 0) return null
+        }
+        val f = funcsByStart[i]
+        if (f.addr == addr) return f
+        return if (f.size > 0L && addr < f.addr + f.size) f else null
+    }
+
+    /** Edges that call [addr]. Matched by address, never by name. */
+    fun callersOf(addr: Long): List<CallEdge> = callersIndex[addr] ?: emptyList()
+
+    fun calleesOf(addr: Long): List<CallEdge> = calleesIndex[addr] ?: emptyList()
+
+    /**
+     * Virtual address to offset in the file on disk. The hex view highlighted
+     * the wrong bytes for every binary with a non-zero load address because it
+     * used the VA directly.
+     */
+    fun fileOffsetOf(vaddr: Long): Long? {
+        for (s in mappedSections) {
+            if (vaddr >= s.addr && vaddr < s.addr + s.size) return s.offset + (vaddr - s.addr)
+        }
+        return null
+    }
+
     fun effectiveFuncName(addr: Long): String {
         val key = "0x%08X".format(addr)
         return renames[key]
-            ?: meta?.functions?.firstOrNull { it.addr == addr }?.name
+            ?: functionAt(addr)?.name
             ?: "sub_" + key.removePrefix("0x").lowercase()
     }
 
     // --------------------------------------------------------- function view --
+    /**
+     * Load one function. This never touches navigation history: it is called
+     * from restore paths, from the rename self-refresh and from [navigateTo]
+     * itself, and only [navigateTo] is allowed to push.
+     */
     fun selectFunction(addr: Long) {
         val path = currentPath ?: return
         selectedFunc = addr
+        // The comparison column belongs to the previous function.
+        pseudoAlt = null
         viewModelScope.launch {
             detailBusy = true
             // The name comes from the last analysis; a stale one is better
             // than "—" while the new decompile is in flight, because the
             // point of the bar is to say what is being worked on.
-            val fn = meta?.functions?.firstOrNull { it.addr == addr }
+            val fn = functionAt(addr)
             val label = fn?.demangled?.takeIf { it.isNotBlank() }
                 ?: fn?.name?.takeIf { it.isNotBlank() }
                 ?: "0x%X".format(addr)
@@ -379,7 +681,7 @@ class StudioViewModel : ViewModel() {
                 }
                 if (d.ok) {
                     detail = d
-                    val dn = renames["0x%08X".format(addr)]
+                    pseudoAlt = null
                 } else log("WARN", d.error ?: "function detail failed")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "detail error")
@@ -397,6 +699,7 @@ class StudioViewModel : ViewModel() {
         val path = currentPath ?: return
         viewModelScope.launch {
             callGraphBusy = true
+            globalPhase = "Building call graph"
             try {
                 val g = withContext(Dispatchers.IO) {
                     parseCallGraph(NativeBridge.nativeCallGraph(path, focus))
@@ -407,7 +710,7 @@ class StudioViewModel : ViewModel() {
                 } else log("WARN", g.error ?: "call graph failed")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "callgraph error")
-            } finally { callGraphBusy = false }
+            } finally { callGraphBusy = false; globalPhase = "" }
         }
     }
 
@@ -462,6 +765,7 @@ class StudioViewModel : ViewModel() {
             else -> "whole binary"
         }
         decompilePhase = "Exporting $scope · $backend"
+        globalPhase = "Exporting"
         decompileTargetName = meta?.name ?: ""
         decompileStartMs = System.currentTimeMillis()
         viewModelScope.launch(Dispatchers.IO) {
@@ -513,6 +817,7 @@ class StudioViewModel : ViewModel() {
                     decompilePhase = ""
                     decompileTargetName = ""
                     decompileStartMs = 0L
+                    globalPhase = ""
                 }
             }
         }
@@ -768,12 +1073,19 @@ class StudioViewModel : ViewModel() {
         lastPluginName = plugin.name
         lastPluginEffects = 0
         lastPluginOk = true
+        lastPluginUndoable = false
+        pluginUndo = null
+        globalPhase = "Running ${plugin.name}"
+        // The undo action outlives this call and is held in VM state, so it
+        // must not capture an Activity.
+        val appCtx = context.applicationContext
         viewModelScope.launch {
             try {
                 val res = withContext(Dispatchers.IO) {
                     parseScriptResult(NativeBridge.nativeScriptRun(plugin.script, currentPath ?: ""))
                 }
                 val sb = StringBuilder()
+                var applied = 0
                 if (res.ok) {
                     sb.appendLine("=== ${plugin.name} v${plugin.version} — OK ===")
                     sb.append(res.log)
@@ -782,17 +1094,39 @@ class StudioViewModel : ViewModel() {
                     if (projectId < 0 && currentPath != null) {
                         projectId = d.upsertProject(currentPath!!, meta?.name ?: "binary", meta?.format, meta?.arch)
                     }
+                    // Every key this run is about to touch is snapshotted
+                    // first, including "there was nothing here", so undo can
+                    // put a hand-typed name back exactly as it was.
+                    val priorRenames = LinkedHashMap<String, String?>()
+                    val priorComments = LinkedHashMap<String, String?>()
+                    val addedBookmarks = ArrayList<Long>()
                     for (fx in res.effects) {
                         val key = "0x%08X".format(fx.addr)
                         when (fx.op) {
-                            "rename" -> { d.rename(projectId, key, null, fx.value); renames[key] = fx.value }
-                            "comment" -> { d.comment(projectId, key, fx.value); comments[key] = fx.value }
-                            "bookmark" -> { d.bookmark(projectId, key, fx.value) }
+                            "rename" -> {
+                                if (!priorRenames.containsKey(key)) priorRenames[key] = renames[key]
+                                d.rename(projectId, key, renames[key] ?: functionAt(fx.addr)?.name, fx.value)
+                                renames[key] = fx.value
+                            }
+                            "comment" -> {
+                                if (!priorComments.containsKey(key)) priorComments[key] = comments[key]
+                                d.comment(projectId, key, fx.value)
+                                comments[key] = fx.value
+                            }
+                            "bookmark" -> {
+                                val rowId = d.bookmark(projectId, key, fx.value)
+                                if (rowId >= 0) addedBookmarks.add(rowId)
+                            }
                         }
                         sb.appendLine("  [${fx.op}] ${key} -> ${fx.value}")
                     }
                     bookmarks = d.bookmarks(projectId)
                     sb.appendLine("=== ${res.effects.size} effects applied ===")
+                    applied = priorRenames.size + priorComments.size + addedBookmarks.size
+                    if (applied > 0) {
+                        pluginUndo = PluginUndo(projectId, plugin.name, priorRenames, priorComments, addedBookmarks)
+                        lastPluginUndoable = true
+                    }
                 } else {
                     sb.appendLine("=== ${plugin.name} FAILED (line ${res.line}): ${res.error} ===")
                 }
@@ -800,10 +1134,116 @@ class StudioViewModel : ViewModel() {
                 lastPluginOk = res.ok
                 lastPluginEffects = res.effects.size
                 log(if (res.ok) "OK" else "ERROR", "Plugin '${plugin.name}' ${if (res.ok) "finished" else "failed: ${res.error}"}")
+                if (lastPluginUndoable) {
+                    notify("OK", "${plugin.name}: $applied changes", "Undo") { undoLastPlugin(appCtx) }
+                }
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "plugin error")
             } finally {
                 pluginRunning = false
+                globalPhase = ""
+            }
+        }
+    }
+
+    // ---------------------------------------------------------- plugin undo --
+    /** What a plugin run overwrote. A null value means the key did not exist. */
+    private data class PluginUndo(
+        val projectId: Long,
+        val pluginName: String,
+        val renames: Map<String, String?>,
+        val comments: Map<String, String?>,
+        val bookmarkIds: List<Long>
+    )
+
+    private var pluginUndo: PluginUndo? = null
+
+    /**
+     * Put back everything the last plugin run changed, in the database and in
+     * the live maps. Effects used to be irreversible and could quietly replace
+     * a hand-typed function name.
+     */
+    fun undoLastPlugin(context: Context) {
+        val u = pluginUndo ?: return
+        val d = database(context)
+        for ((key, prior) in u.renames) {
+            if (prior == null) {
+                d.deleteRename(u.projectId, key)
+                renames.remove(key)
+            } else {
+                d.rename(u.projectId, key, null, prior)
+                renames[key] = prior
+            }
+        }
+        for ((key, prior) in u.comments) {
+            if (prior == null) {
+                d.deleteComment(u.projectId, key)
+                comments.remove(key)
+            } else {
+                d.comment(u.projectId, key, prior)
+                comments[key] = prior
+            }
+        }
+        u.bookmarkIds.forEach { d.deleteBookmark(it) }
+        if (u.projectId >= 0) bookmarks = d.bookmarks(u.projectId)
+        val n = u.renames.size + u.comments.size + u.bookmarkIds.size
+        pluginUndo = null
+        lastPluginUndoable = false
+        dismissToast()
+        log("OK", "Undid ${u.pluginName} · $n change(s) restored")
+        // Only re-read the open function when its own name was rolled back;
+        // a decompile can take seconds and undo should feel instant.
+        val sel = selectedFunc
+        if (sel != null && u.renames.containsKey("0x%08X".format(sel))) selectFunction(sel)
+    }
+
+    // ------------------------------------------------------ backend compare --
+    /**
+     * Decompile the open function with the backend that is NOT selected, into
+     * [pseudoAlt], leaving [decompiler] and [detail] alone. The engine keeps
+     * one global backend selection, so it is flipped for the duration of the
+     * call and flipped back in a finally.
+     */
+    fun loadAlternatePseudo() {
+        val path = currentPath ?: return
+        val d = detail ?: return
+        if (pseudoAltBusy) return
+        val other = if (decompiler == "ghidra") "ir" else "ghidra"
+        if (other == "ghidra" && !sleighReady) {
+            pseudoAlt = null
+            log("WARN", "Ghidra backend unavailable — SLEIGH specifications are not installed")
+            return
+        }
+        val addr = d.addr
+        val current = decompiler
+        viewModelScope.launch {
+            pseudoAltBusy = true
+            try {
+                val alt = withContext(Dispatchers.IO) {
+                    NativeBridge.nativeSetDecompiler(other)
+                    try {
+                        parseDetail(NativeBridge.nativeFunction(path, addr))
+                    } finally {
+                        NativeBridge.nativeSetDecompiler(current)
+                    }
+                }
+                // Drop the result if the user moved to another function
+                // while the other backend was working.
+                if (detail?.addr == addr) {
+                    if (alt.ok) {
+                        pseudoAlt = alt.pseudo
+                        log("INFO", "Comparison backend: " +
+                            if (other == "ir") "built-in IR lifter" else "Ghidra p-code")
+                    } else {
+                        pseudoAlt = null
+                        log("WARN", alt.error ?: "the other backend produced nothing")
+                    }
+                }
+            } catch (e: Exception) {
+                pseudoAlt = null
+                log("ERROR", e.message ?: "comparison decompile failed")
+            } finally {
+                pseudoAltBusy = false
             }
         }
     }
