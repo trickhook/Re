@@ -39,6 +39,71 @@ object NativeBridge {
     external fun nativeExportSource(path: String, kind: String, addr: Long, outPath: String): String
 
     external fun nativeDbgCmd(json: String): String
+
+    /**
+     * Run one function under Ghidra's p-code emulator and report what it did
+     * to memory. This is the only call that executes the analysed binary's
+     * own instructions, so every run is bounded: an instruction budget, a
+     * wall clock, a page cap and a cap on stubbed calls, all reported back.
+     * Call it off the main thread — a run can take as long as `timeoutMs`.
+     *
+     * Request JSON (flat; lists are ';'-separated, the same convention as
+     * [nativeDebugRun]'s newline-separated argv):
+     *
+     *   entry         "0x2a10"       required, the function to run
+     *   args          "0x1;buf:64;hex:aabbcc;str:hello"
+     *                                positional arguments, mapped onto the
+     *                                target's argument registers.
+     *                                  buf:N  allocate N zeroed bytes in the
+     *                                         sandbox heap and pass the
+     *                                         address — this is the output
+     *                                         buffer a decrypt writes into
+     *                                  hex:.. allocate a block holding these
+     *                                         bytes and pass the address
+     *                                  str:.. the same, NUL-terminated
+     *                                  other  a plain scalar, incl. an
+     *                                         address inside the binary
+     *   regs          "x9=0x40;x10=0"  raw register overrides, applied last
+     *   write         "0x4a100=aabb"   raw memory to place before the run
+     *   read          "0x4a100:64"     extra windows to read back at exit
+     *   stopAt        "0x2b40"         halt before executing this address
+     *   maxInstr      200000           instruction budget
+     *   timeoutMs     3000             wall clock
+     *   maxPages      1024             4 KiB pages the run may dirty
+     *   maxCalls      4096             stubbed imports it may call
+     *   strictUserops 0                1 = stop at the first p-code operation
+     *                                  modelled as zero instead of noting it
+     *
+     * Response JSON:
+     *
+     *   ok            true only for "completed" and "stopAddress"
+     *   stop          completed | stopAddress | budget | timeout | memoryCap |
+     *                 callCap | unimplemented | fault | aborted | setup
+     *   detail        one specific sentence — "instruction budget exhausted
+     *                 after 200000 instructions, still at 0x2a5c", never
+     *                 just "failed"
+     *   approximate   true when something was modelled as zero that might not
+     *                 be, so `memory` is plausible rather than certain
+     *   instructions, ms, backend, limits{...}
+     *   retReg, ret   the return register and its value
+     *   regs          [{n,v}]      the architecture's reportable registers
+     *   args          [{i,reg,v,kind,len}]  echoed, with the addresses the
+     *                 sandbox chose for buf:/hex:/str:
+     *   memory        [{addr,label,len,data,text}] — `data` is lowercase hex,
+     *                 `text` the same bytes as printable ASCII. Labels:
+     *                 "argN" (a buffer that was passed in), "window" (asked
+     *                 for by `read`), "wrote" (a range the run changed,
+     *                 worked out by diffing against the file)
+     *   dirtyBytes, dirtyRanges, memoryTruncated
+     *   calls         [{n,at,ret,modelled,note,args}] — the imports that were
+     *                 answered by a model instead of executed; modelled=false
+     *                 means it returned 0 and the answer may be wrong
+     *   callsTotal
+     *   userops       [{n,count,harmless}] p-code operations run as zero
+     *   tail          the last addresses executed, oldest first
+     */
+    external fun nativeEmulate(path: String, requestJson: String): String
+
     external fun nativeScriptRun(source: String, path: String): String
     external fun nativeDebugRun(argvLines: String, maxEvents: Int): String
     external fun nativeDebugStop()

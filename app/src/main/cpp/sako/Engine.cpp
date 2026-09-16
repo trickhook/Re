@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "GhidraArch.h"
+#include "GhidraEmu.h"
 #include "JniTypes.h"
 #include <fstream>
 #include "Binary.h"
@@ -131,12 +132,24 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
     for (auto& kv : c.elf.pltNames)
         if (kv.first && !kv.second.empty()) funcs.push_back({kv.first, kv.second});
 
+    // Building a decompiler Architecture rebinds the one SLEIGH translator
+    // the process keeps for this language, so the emulator has to know when
+    // it happened: it shares that translator and would otherwise read the
+    // next run's bytes through the decompiler's loader. Only a change of
+    // image actually rebuilds, which is exactly when it matters.
+    const bool rebuilt = (ghidraKey_ != path);
+
     std::string err;
     if (!GhidraDecomp::instance().open(path, c.arch, c.bin.data.data(), c.bin.data.size(),
                                        segs, readOnly, funcs, c.strings,
                                        c.elf.armMapping, err)) {
         ghidraNote_ = err.empty() ? "could not build the architecture" : err;
+        ghidraKey_.clear();
         return false;
+    }
+    if (rebuilt) {
+        ghidraKey_ = path;
+        GhidraEmu::instance().translatorRebound();
     }
     return true;
 }
@@ -1121,6 +1134,253 @@ std::string Engine::callGraph(const std::string& path, u64 focus) {
 // ---------------------------------------------------------------- debug2 --
 std::string Engine::dbgCmd(const std::string& json) {
     return DebugSession::instance().cmd(json);
+}
+
+// --------------------------------------------------------------- emulate --
+// Bind the emulator to the loaded image. Unlike the decompiler there is no
+// second-best: if this fails the caller gets the reason, not a fallback.
+bool Engine::ghidraEmuReady(Ctx& c, const std::string& path, std::string& why) {
+    why.clear();
+    if (!GhidraEmu::compiledIn()) { why = "this build has no p-code engine"; return false; }
+    if (sleighDir_.empty()) { why = "no SLEIGH specifications installed"; return false; }
+    if (c.bin.data.empty()) { why = "no image loaded"; return false; }
+    if (c.fmt != Fmt::ELF && c.fmt != Fmt::PE) {
+        why = "only ELF and PE images can be emulated";
+        return false;
+    }
+
+    std::vector<GhidraSeg> segs;
+    if (c.fmt == Fmt::ELF) {
+        for (auto& sg : c.elf.segments)
+            if (sg.type == "LOAD" && sg.filesz)
+                segs.push_back({sg.vaddr, sg.offset, sg.filesz,
+                                sg.memsz ? sg.memsz : sg.filesz,
+                                sg.flags.find('W') != std::string::npos});
+    } else {
+        for (auto& sc : c.pe.sections)
+            if (sc.size)
+                segs.push_back({sc.addr, sc.offset, sc.size, sc.size,
+                                sc.flags.find('W') != std::string::npos});
+    }
+    if (segs.empty())
+        segs.push_back({0, 0, u64(c.bin.data.size()), u64(c.bin.data.size()), true});
+
+    // What must not be executed. A PLT entry in a shared library jumps
+    // through a GOT slot the loader has not filled in, so running it would
+    // branch to whatever the file happens to hold there — usually zero.
+    std::vector<std::pair<u64, std::string>> stubs;
+    for (auto& kv : c.elf.pltNames)
+        if (kv.first && !kv.second.empty()) stubs.push_back({kv.first, kv.second});
+
+    std::string err;
+    if (!GhidraEmu::instance().open(path, c.arch, c.bin.data.data(), c.bin.data.size(),
+                                    segs, stubs, c.elf.armMapping, err)) {
+        why = err.empty() ? "could not build the architecture" : err;
+        return false;
+    }
+    return true;
+}
+
+namespace {
+
+// The request format is the flat one every other JSON command in this engine
+// uses, so the same MiniJson parses it. Lists are ';'-separated because a
+// nested parser would be the only nested parser in the file.
+std::vector<std::string> splitSemi(const std::string& v) {
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at <= v.size()) {
+        size_t n = v.find(';', at);
+        std::string tok = (n == std::string::npos) ? v.substr(at) : v.substr(at, n - at);
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.erase(tok.begin());
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.pop_back();
+        if (!tok.empty()) out.push_back(tok);
+        if (n == std::string::npos) break;
+        at = n + 1;
+    }
+    return out;
+}
+
+std::vector<u8> fromHex(const std::string& h) {
+    std::vector<u8> out;
+    for (size_t i = 0; i + 1 < h.size(); i += 2)
+        out.push_back(u8(strtoul(h.substr(i, 2).c_str(), nullptr, 16)));
+    return out;
+}
+
+u64 parseAddr(const std::string& v) {
+    if (v.rfind("0x", 0) == 0 || v.rfind("0X", 0) == 0)
+        return strtoull(v.c_str() + 2, nullptr, 16);
+    return strtoull(v.c_str(), nullptr, 0);
+}
+
+std::string bytesHex(const std::vector<u8>& b) {
+    std::string out;
+    char h[3];
+    for (u8 c : b) { snprintf(h, sizeof h, "%02x", c); out += h; }
+    return out;
+}
+
+// The same bytes as text, so the panel does not have to decode hex to see
+// that a decrypt worked.
+std::string bytesText(const std::vector<u8>& b) {
+    std::string out;
+    for (u8 c : b) out += (c >= 0x20 && c < 0x7F) ? char(c) : '.';
+    return out;
+}
+
+} // namespace
+
+std::string Engine::emulate(const std::string& path, const std::string& reqJson) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensureCtx(path);
+    Ctx& c = ctx_;
+    std::ostringstream out;
+
+    MiniJson j = MiniJson::parse(reqJson);
+
+    std::string why;
+    if (!ghidraEmuReady(c, path, why)) {
+        out << "{\"ok\":false,\"stop\":\"setup\",\"detail\":" << q(why) << "}";
+        return out.str();
+    }
+
+    EmuRequest req;
+    req.entry = j.num("entry");
+    if (req.entry == 0) {
+        out << "{\"ok\":false,\"stop\":\"setup\",\"detail\":\"no entry address\"}";
+        return out.str();
+    }
+    req.stopAt = j.num("stopAt");
+    if (j.has("maxInstr"))  req.limits.maxInstructions = j.num("maxInstr");
+    if (j.has("timeoutMs")) req.limits.timeoutMs = u32(j.num("timeoutMs"));
+    if (j.has("maxPages"))  req.limits.maxPages = u32(j.num("maxPages"));
+    if (j.has("maxCalls"))  req.limits.maxCalls = u32(j.num("maxCalls"));
+    req.limits.strictUserops = j.num("strictUserops", 0) != 0;
+
+    for (const std::string& a : splitSemi(j.str("args"))) {
+        EmuArg arg;
+        if (a.rfind("buf:", 0) == 0) {
+            arg.kind = EmuArg::Buffer;
+            arg.len = u32(strtoul(a.c_str() + 4, nullptr, 0));
+            if (arg.len > 65536) arg.len = 65536;
+        } else if (a.rfind("hex:", 0) == 0) {
+            arg.kind = EmuArg::Data;
+            arg.data = fromHex(a.substr(4));
+        } else if (a.rfind("str:", 0) == 0) {
+            arg.kind = EmuArg::Data;
+            for (size_t k = 4; k < a.size(); ++k) arg.data.push_back(u8(a[k]));
+            arg.data.push_back(0);
+        } else {
+            arg.kind = EmuArg::Value;
+            arg.value = parseAddr(a);
+        }
+        req.args.push_back(arg);
+        if (req.args.size() >= 16) break;
+    }
+    for (const std::string& r : splitSemi(j.str("regs"))) {
+        size_t eq = r.find('=');
+        if (eq == std::string::npos) continue;
+        req.regs.push_back({r.substr(0, eq), parseAddr(r.substr(eq + 1))});
+    }
+    for (const std::string& w : splitSemi(j.str("write"))) {
+        size_t eq = w.find('=');
+        if (eq == std::string::npos) continue;
+        EmuBytes b;
+        b.addr = parseAddr(w.substr(0, eq));
+        b.bytes = fromHex(w.substr(eq + 1));
+        if (!b.bytes.empty()) req.seeds.push_back(b);
+    }
+    for (const std::string& r : splitSemi(j.str("read"))) {
+        size_t colon = r.rfind(':');
+        if (colon == std::string::npos) continue;
+        req.windows.push_back({parseAddr(r.substr(0, colon)),
+                               u32(strtoul(r.c_str() + colon + 1, nullptr, 0))});
+    }
+
+    EmuResult r = GhidraEmu::instance().run(req);
+
+    // A name for the entry, so the panel does not have to look it up again.
+    std::string fname;
+    for (auto& f : c.funcs) if (f.addr == req.entry) { fname = f.name; break; }
+    if (fname.empty()) {
+        auto it = c.elf.pltNames.find(req.entry);
+        if (it != c.elf.pltNames.end()) fname = it->second;
+    }
+
+    out << "{\"ok\":" << (r.ok ? "true" : "false")
+        << ",\"stop\":" << q(emuStopName(r.stop))
+        << ",\"detail\":" << q(r.detail)
+        << ",\"approximate\":" << (r.approximate ? "true" : "false")
+        << ",\"entry\":" << hq(r.entry)
+        << ",\"name\":" << q(fname)
+        << ",\"instructions\":" << num(r.instructions)
+        << ",\"ms\":" << int(r.ms + 0.5)
+        << ",\"backend\":" << q(r.backend)
+        << ",\"retReg\":" << q(r.retReg)
+        << ",\"ret\":" << hq(r.ret)
+        << ",\"stackBase\":" << hq(r.stackBase)
+        << ",\"heapBase\":" << hq(r.heapBase)
+        << ",\"heapUsed\":" << num(r.heapUsed)
+        << ",\"limits\":{\"maxInstr\":" << num(req.limits.maxInstructions)
+        << ",\"timeoutMs\":" << req.limits.timeoutMs
+        << ",\"maxPages\":" << req.limits.maxPages
+        << ",\"maxCalls\":" << req.limits.maxCalls << "}"
+        << ",\"regs\":[";
+    for (size_t i = 0; i < r.regs.size(); ++i) {
+        if (i) out << ",";
+        out << "{\"n\":" << q(r.regs[i].first) << ",\"v\":" << hq(r.regs[i].second) << "}";
+    }
+    out << "],\"args\":[";
+    for (size_t i = 0; i < r.args.size(); ++i) {
+        if (i) out << ",";
+        const EmuArg& a = r.args[i];
+        out << "{\"i\":" << i << ",\"reg\":" << q(a.reg)
+            << ",\"v\":" << hq(a.value)
+            << ",\"kind\":" << q(a.kind == EmuArg::Buffer ? "buffer"
+                               : a.kind == EmuArg::Data   ? "data" : "value")
+            << ",\"len\":" << a.len << "}";
+    }
+    out << "],\"memory\":[";
+    for (size_t i = 0; i < r.memory.size(); ++i) {
+        if (i) out << ",";
+        out << "{\"addr\":" << hq(r.memory[i].addr)
+            << ",\"label\":" << q(r.memory[i].label)
+            << ",\"len\":" << r.memory[i].bytes.size()
+            << ",\"data\":" << q(bytesHex(r.memory[i].bytes))
+            << ",\"text\":" << q(bytesText(r.memory[i].bytes)) << "}";
+    }
+    out << "],\"dirtyBytes\":" << num(r.dirtyBytes)
+        << ",\"dirtyRanges\":" << r.dirtyRanges
+        << ",\"memoryTruncated\":" << (r.memoryTruncated ? "true" : "false")
+        << ",\"callsTotal\":" << num(r.callsTotal)
+        << ",\"calls\":[";
+    for (size_t i = 0; i < r.calls.size(); ++i) {
+        if (i) out << ",";
+        const EmuCall& cc = r.calls[i];
+        out << "{\"n\":" << q(cc.name) << ",\"at\":" << hq(cc.site)
+            << ",\"ret\":" << hq(cc.ret)
+            << ",\"modelled\":" << (cc.modelled ? "true" : "false")
+            << ",\"note\":" << q(cc.note) << ",\"args\":[";
+        for (size_t k = 0; k < cc.args.size(); ++k) {
+            if (k) out << ",";
+            out << hq(cc.args[k]);
+        }
+        out << "]}";
+    }
+    out << "],\"userops\":[";
+    for (size_t i = 0; i < r.userops.size(); ++i) {
+        if (i) out << ",";
+        out << "{\"n\":" << q(r.userops[i].name) << ",\"count\":" << r.userops[i].count
+            << ",\"harmless\":" << (r.userops[i].harmless ? "true" : "false") << "}";
+    }
+    out << "],\"tail\":[";
+    for (size_t i = 0; i < r.tail.size(); ++i) {
+        if (i) out << ",";
+        out << hq(r.tail[i]);
+    }
+    out << "]}";
+    return out.str();
 }
 
 // ---------------------------------------------------------------- script --

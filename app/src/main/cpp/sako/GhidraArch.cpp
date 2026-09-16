@@ -276,6 +276,15 @@ struct GhidraDecomp::Impl {
     int protosApplied = 0;
     std::string langId;
 
+    // SleighArchitecture keeps this pointer as its `errorstream` and writes to
+    // it from printWarning() for the architecture's whole life — Scope::addFunction
+    // does exactly that when it cannot create a function. It used to be a local
+    // in open(), so every warning after open() returned wrote through a dangling
+    // pointer: asking for the detail of an address that is not a function was a
+    // segfault waiting for the right object layout. It is a member now, destroyed
+    // with the architecture that points at it.
+    std::ostringstream errors;
+
     ~Impl() { delete arch; }
 };
 
@@ -334,7 +343,7 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
     impl_->key = key;
     impl_->language = lang;
 
-    std::ostringstream estream;
+    std::ostringstream& estream = impl_->errors;
     try {
         initLibraryOnce();
         impl_->arch = new MemArchitecture(lang, &estream, image, size, segs, readOnly);

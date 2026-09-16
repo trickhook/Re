@@ -157,6 +157,7 @@ add_library(nocturne SHARED
     sako/Debugger.cpp
     sako/Engine.cpp
     sako/GhidraArch.cpp
+    sako/GhidraEmu.cpp
     sako/JniTypes.cpp
     sako/Prototypes.cpp)
 

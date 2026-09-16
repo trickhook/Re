@@ -70,6 +70,14 @@ Java_com_trickhook_engine_NativeBridge_nativeDbgCmd(JNIEnv* env, jobject, jstrin
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeEmulate(JNIEnv* env, jobject, jstring jpath,
+                                                     jstring jreq) {
+    std::string path = toStdString(env, jpath);
+    std::string req  = toStdString(env, jreq);
+    return toJString(env, sako::Engine::instance().emulate(path, req));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeScriptRun(JNIEnv* env, jobject,
                                                            jstring jsource, jstring jpath) {
     std::string src = toStdString(env, jsource);

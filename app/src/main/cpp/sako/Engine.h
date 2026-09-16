@@ -37,6 +37,13 @@ public:
     // Interactive debugger session command (JSON in, JSON out)
     std::string dbgCmd(const std::string& json);
 
+    // Run one function under Ghidra's p-code emulator. JSON in, JSON out;
+    // NativeBridge.nativeEmulate documents both shapes. This is the one call
+    // in the engine that executes the analysed binary's own instructions, so
+    // it is also the one with a hard instruction budget, a wall clock and a
+    // memory cap — see GhidraEmu.h.
+    std::string emulate(const std::string& path, const std::string& reqJson);
+
     // Produce a source listing from the analysis — the equivalent of IDA's
     // "produce file". Writes to outPath (a real filesystem path, not a content
     // URI) so a whole-binary listing never has to be held in memory as a
@@ -86,6 +93,10 @@ private:
     // false when it is unavailable for any reason, which is not an error:
     // every caller falls back to the IR lifter.
     bool ghidraReady(Ctx& c, const std::string& path);
+    // The same for the emulator, whose failure is an error: nothing else in
+    // the engine can run code, so there is nothing to fall back to. `why` is
+    // filled in with a sentence for the user.
+    bool ghidraEmuReady(Ctx& c, const std::string& path, std::string& why);
     // Work out which functions are handed a JNIEnv*, and in which argument,
     // by following the pointer across calls until nothing new is learned.
     void computeJniEnvArgs(Ctx& c);
@@ -98,6 +109,9 @@ private:
     std::string sleighDir_;
     std::string decompiler_ = "ghidra";
     std::string ghidraNote_;
+    // The image the decompiler backend is currently bound to, so a rebuild
+    // can be told apart from a cache hit.
+    std::string ghidraKey_;
     std::mutex mutex_;
     std::atomic<bool> dbgStop_{false};
     std::mutex scriptMutex_;
