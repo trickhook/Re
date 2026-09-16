@@ -1,5 +1,8 @@
 package com.trickhook.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,19 +13,21 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
@@ -31,8 +36,6 @@ import androidx.compose.material.icons.filled.Functions
 import androidx.compose.material.icons.filled.Grid4x4
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -48,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -61,13 +65,108 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.trickhook.model.ConsoleLine
 import com.trickhook.model.FoundStr
+import com.trickhook.model.FuncInfo
 import com.trickhook.model.Section
 import com.trickhook.model.Segment
+import com.trickhook.model.SymbolInfo
 import com.trickhook.vm.StudioViewModel
 import com.trickhook.vm.Tab
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+// ================================================================== shared ==
+
+private val ChipShape = RoundedCornerShape(6.dp)
+
+/**
+ * One segment of a mode toggle.
+ *
+ * This file used to hold three different answers to the same question — the
+ * map's plain text labels, the console's tinted chips, and nothing at all for
+ * the symbol tables, which is why two of the three binary tables the engine
+ * parses were unreachable. One shape now: a 48dp target, a tinted pill when
+ * selected and [Modifier.surface1] when not, with the colour crossfading
+ * instead of snapping.
+ */
+@Composable
+private fun ModeChip(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    tint: Color,
+    onSelect: () -> Unit
+) {
+    val ide = LocalIde.current
+    val fg by animateColorAsState(
+        targetValue = if (selected) tint else ide.dim2,
+        animationSpec = tween(motionMs(Motion.fast)),
+        label = "modeChip"
+    )
+    Box(
+        Modifier
+            .heightIn(min = 48.dp)
+            .selectable(selected = selected, role = Role.Tab, onClick = onSelect)
+            .padding(horizontal = Space.xs),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "$label $count",
+            color = fg,
+            fontSize = Type.caption, fontFamily = Mono,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            modifier = Modifier
+                .then(
+                    // borderStrong is the token for an edge you can touch; the
+                    // unselected chip is a plain level-1 surface.
+                    if (selected) Modifier
+                        .background(tint.copy(alpha = 0.12f), ChipShape)
+                        .border(1.dp, ide.borderStrong, ChipShape)
+                    else Modifier.surface1(ChipShape)
+                )
+                .padding(horizontal = Space.m, vertical = Space.s)
+        )
+    }
+}
+
+/**
+ * The entry/exit spec for the lists whose contents genuinely come and go as a
+ * filter changes. Durations run through [motionMs], so with animation switched
+ * off system-wide the rows cut instead of easing — the listing and the hex view
+ * stay unanimated either way, because there the row under your finger never
+ * moves and the animation would only cost a frame.
+ */
+@Composable
+private fun LazyItemScope.rowMotion(): Modifier {
+    val fade = motionMs(Motion.fast)
+    val move = motionMs()
+    // With reduce-motion on this is a bare Modifier, not a zero-length tween:
+    // no animation node per row, nothing to tick and nothing to cancel.
+    return if (fade == 0) Modifier
+    else Modifier.animateItem(
+        fadeInSpec = tween(fade),
+        placementSpec = tween(move),
+        fadeOutSpec = tween(fade)
+    )
+}
+
+/**
+ * Put the hex view on a file offset and go there.
+ *
+ * The offset has to come from [StudioViewModel.fileOffsetOf]: a virtual address
+ * used raw lands on the wrong bytes for every binary with a non-zero load
+ * address, the same bug that made the hex selection tint highlight the wrong
+ * range. And it is handed over as an OFFSET, never as a row index — this used
+ * to write `hexIndex = fileOffset / 16`, while the hex view now measures 8, 16
+ * or 32 bytes per row from the screen width. That division landed on half the
+ * intended byte on a phone and on double it on a tablet. Only the panel that
+ * chose the row width can turn an offset into a row.
+ */
+private fun panelJumpToHex(vm: StudioViewModel, fileOffset: Long) {
+    vm.requestHexGoto(fileOffset)
+    vm.navigateTo(tab = Tab.HEX)
+}
 
 // ============================================================== Strings ==
 /**
@@ -83,15 +182,25 @@ fun StringsPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
     val all = vm.meta?.strings ?: emptyList()
     val query = vm.stringQuery
-    val filtered = remember(all, query) {
-        if (query.isBlank()) all else all.filter { it.value.contains(query, ignoreCase = true) }
+    // Keyed on identity and size, never on the list itself: AnalysisMeta and
+    // every list it holds are data classes, so `remember(all, query)` deep-
+    // compared up to 3,000 elements on each keystroke — more work than the
+    // search it was there to avoid. The hits are INDICES into `all` so that the
+    // LazyColumn key is unique by construction and stable across filters; an
+    // address would be neither if the engine ever emitted two strings at one.
+    val hits: List<Int> = remember(System.identityHashCode(all), all.size, query) {
+        when {
+            all.isEmpty() -> emptyList()
+            query.isBlank() -> all.indices.toList()
+            else -> all.indices.filter { all[it].value.contains(query, ignoreCase = true) }
+        }
     }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .surface2(RectangleShape)
+                .padding(horizontal = Space.m, vertical = Space.s),
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedTextField(
@@ -115,19 +224,24 @@ fun StringsPanel(vm: StudioViewModel) {
                     .semantics { contentDescription = "Search strings" },
                 textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Space.m))
             Text(
-                if (query.isBlank()) "${all.size}" else "${filtered.size}/${all.size}",
+                if (query.isBlank()) "${all.size}" else "${hits.size}/${all.size}",
                 color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
             )
         }
         when {
+            // Still reading the file. Ghost rows in the shape of the list say
+            // "working"; the empty panel said "this binary has no strings",
+            // which was a claim the app had not yet earned.
+            vm.busy && all.isEmpty() -> SkeletonLines(14)
+
             all.isEmpty() -> EmptyPanel(
                 "No strings",
                 "Open a binary — the extracted strings from its data sections land here."
             )
 
-            filtered.isEmpty() -> Column(
+            hits.isEmpty() -> Column(
                 Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -140,15 +254,17 @@ fun StringsPanel(vm: StudioViewModel) {
                 }
             }
 
-            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(12.dp)) {
-                items(filtered.size) { i -> StringsHitRow(vm, filtered[i]) }
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
+                items(hits.size, key = { hits[it] }) { i ->
+                    StringsHitRow(vm, all[hits[i]], rowMotion())
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StringsHitRow(vm: StudioViewModel, s: FoundStr) {
+private fun StringsHitRow(vm: StudioViewModel, s: FoundStr, modifier: Modifier = Modifier) {
     val ide = LocalIde.current
     // The containing function is a binary search and the file offset a walk of
     // the section table; both are indexed once per analysis on the ViewModel.
@@ -161,7 +277,7 @@ private fun StringsHitRow(vm: StudioViewModel, s: FoundStr) {
         else -> "no function · not mapped into the file"
     }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .then(
                 if (canJump) Modifier.clickable(
@@ -180,26 +296,26 @@ private fun StringsHitRow(vm: StudioViewModel, s: FoundStr) {
                 } else Modifier
             )
             .heightIn(min = 48.dp)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
             Text(
                 s.value,
                 color = if (canJump) ide.text else ide.dim,
-                fontSize = Type.mono, fontFamily = Mono,
+                fontSize = Type.mono, lineHeight = Type.monoLine, fontFamily = Mono,
                 maxLines = 2, overflow = TextOverflow.Ellipsis
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(hexFmt(s.addr), color = ide.cyan, fontSize = Type.monoSmall, fontFamily = Mono)
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(Space.m))
                 Text(
                     where, color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
         }
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(Space.m))
         if (fn != null && off != null) {
             // The second destination: the raw bytes. Only worth its own button
             // when the tap itself is already spoken for by the code view.
@@ -217,123 +333,386 @@ private fun StringsHitRow(vm: StudioViewModel, s: FoundStr) {
     }
 }
 
-/**
- * Put the hex view on a file offset and go there. The offset has to come from
- * [StudioViewModel.fileOffsetOf]: a virtual address used raw lands on the wrong
- * bytes for every binary with a non-zero load address, which is the same bug
- * that made the hex selection tint highlight the wrong range.
- */
-private fun panelJumpToHex(vm: StudioViewModel, fileOffset: Long) {
-    vm.hexIndex = (fileOffset / 16L).coerceAtLeast(0L).toInt()
-    vm.navigateTo(tab = Tab.HEX)
-}
-
 // ============================================================ Functions ==
+
+// `symbolsMode` is a plain String on the ViewModel because six writers across
+// StudioApp and CommandPalette set it by literal. These are those three values.
+private const val MODE_FUNCTIONS = "functions"
+private const val MODE_IMPORTS = "imports"
+private const val MODE_EXPORTS = "exports"
+
+/**
+ * The three symbol tables of a binary — functions, imports, exports — behind
+ * one toggle.
+ *
+ * `vm.symbolsMode` had six writers and no reader. The palette set it to
+ * "imports" before sending you here, the drawer offered a row reading "open
+ * Functions, then Imports", and this panel listed `meta.functions` and nothing
+ * else. Worse than a dead end: `Analyzer.cpp` deliberately keeps PLT stubs out
+ * of `funcs`, so an import is NEVER in that list, and "Show all 412 in
+ * Functions" arrived at "No function matches" — the tool denying a symbol it
+ * had listed a moment earlier. `meta.exports`, `meta.needed` and `meta.soName`
+ * had no home anywhere in the app at all.
+ */
 @Composable
 fun FunctionsPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
-    val all = vm.meta?.functions ?: emptyList()
+    val meta = vm.meta
+    val funcs = meta?.functions ?: emptyList()
+    val imports = meta?.imports ?: emptyList()
+    val exports = meta?.exports ?: emptyList()
+    val mode = vm.symbolsMode
     val query = vm.funcQuery
-    // Not memoized: the match reads `renames`, and a rename that keeps the map
-    // the same size would leave a remembered list stale while the name on the
-    // row had already changed.
-    val filtered = if (query.isBlank()) all else all.filter {
-        it.name.contains(query, ignoreCase = true) ||
-            (vm.renames["0x%08X".format(it.addr)] ?: "").contains(query, ignoreCase = true)
+    val funcsMode = mode != MODE_IMPORTS && mode != MODE_EXPORTS
+
+    // JNI bindings first, exactly as the palette orders them: on an APK's
+    // native library they are what you opened the file for.
+    val exportsSorted = remember(System.identityHashCode(exports), exports.size) {
+        exports.sortedByDescending { it.name.startsWith("Java_") }
     }
+    val symbols = when (mode) {
+        MODE_IMPORTS -> imports
+        MODE_EXPORTS -> exportsSorted
+        else -> emptyList()
+    }
+    val total = if (funcsMode) funcs.size else symbols.size
+
+    // Deliberately NOT memoized: the match reads `renames`, and a rename that
+    // leaves the map the same size would leave a remembered list stale while
+    // the name on the row had already changed. The predicate is the palette's,
+    // character for character, so that "Show all 412" and the list it opens
+    // cannot disagree about 412.
+    val funcHits: List<Int> = when {
+        !funcsMode || funcs.isEmpty() -> emptyList()
+        query.isBlank() -> funcs.indices.toList()
+        else -> funcs.indices.filter {
+            funcs[it].name.contains(query, ignoreCase = true) ||
+                vm.effectiveFuncName(funcs[it].addr).contains(query, ignoreCase = true)
+        }
+    }
+    // Memoized on identity plus size: AnalysisMeta's lists are data classes and
+    // a value key would deep-compare every symbol on every keystroke. Indices,
+    // not addresses — a symbol table aliases freely, two exports share one
+    // address all the time, and every ELF import sits at address 0, so an
+    // address key would be a duplicate-key crash waiting for the right binary.
+    val symHits: List<Int> = remember(
+        mode, System.identityHashCode(symbols), symbols.size, query
+    ) {
+        when {
+            symbols.isEmpty() -> emptyList()
+            query.isBlank() -> symbols.indices.toList()
+            else -> symbols.indices.filter {
+                symbols[it].name.contains(query, ignoreCase = true)
+            }
+        }
+    }
+    val shown = if (funcsMode) funcHits.size else symHits.size
+
+    val noun = when (mode) {
+        MODE_IMPORTS -> "import"
+        MODE_EXPORTS -> "export"
+        else -> "function"
+    }
+    // `needed` and `soName` are parsed out of every ELF and were rendered
+    // nowhere; each belongs to the mode that explains what it is.
+    val note = when {
+        meta == null -> ""
+        mode == MODE_IMPORTS && meta.needed.isNotEmpty() ->
+            "resolved at load time from " + meta.needed.joinToString(" · ")
+        mode == MODE_EXPORTS && meta.soName.isNotEmpty() -> "SONAME " + meta.soName
+        else -> ""
+    }
+
     Column(Modifier.fillMaxSize()) {
-        Row(
+        // Search, toggle and context line are one block. The context line
+        // exists for two modes of three, so the top of the list moves when you
+        // switch: animateContentSize makes that a slide instead of a jump.
+        Column(
             Modifier
                 .fillMaxWidth()
-                .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .surface2(RectangleShape)
+                .animateContentSize(tween(motionMs()))
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { vm.funcQuery = it },
-                label = { Text("Search functions") },
-                singleLine = true,
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { vm.funcQuery = "" }) {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = "Clear the search",
-                                tint = ide.dim
-                            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Space.m, vertical = Space.s),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { vm.funcQuery = it },
+                    label = { Text("Search ${noun}s") },
+                    singleLine = true,
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { vm.funcQuery = "" }) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Clear the search",
+                                    tint = ide.dim
+                                )
+                            }
                         }
-                    }
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .semantics { contentDescription = "Search functions" },
-                textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                if (query.isBlank()) "${all.size}" else "${filtered.size}/${all.size}",
-                color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
-            )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "Search ${noun}s" },
+                    textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
+                )
+                Spacer(Modifier.width(Space.m))
+                Text(
+                    if (query.isBlank()) "$total" else "$shown/$total",
+                    color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
+                )
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = Space.s)
+                    .selectableGroup(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ModeChip("Functions", funcs.size, funcsMode, ide.accent) {
+                    vm.symbolsMode = MODE_FUNCTIONS
+                }
+                Spacer(Modifier.width(Space.s))
+                ModeChip("Imports", imports.size, mode == MODE_IMPORTS, ide.accent) {
+                    vm.symbolsMode = MODE_IMPORTS
+                }
+                Spacer(Modifier.width(Space.s))
+                ModeChip("Exports", exports.size, mode == MODE_EXPORTS, ide.accent) {
+                    vm.symbolsMode = MODE_EXPORTS
+                }
+            }
+            if (note.isNotEmpty()) {
+                Text(
+                    note,
+                    color = ide.dim2, fontSize = Type.monoSmall, lineHeight = Type.monoSmallLine,
+                    fontFamily = Mono, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Space.l, bottom = Space.m)
+                )
+            }
         }
         when {
-            all.isEmpty() -> EmptyPanel(
-                "No functions",
-                "Open a binary the engine can disassemble and its functions land here."
+            vm.busy && total == 0 -> SkeletonLines(14)
+
+            total == 0 -> EmptyPanel(
+                "No ${noun}s",
+                when {
+                    meta == null -> "Open a binary and its symbol tables land here."
+                    mode == MODE_IMPORTS ->
+                        "Nothing is imported, or this format carries no import table — only ELF and PE do."
+                    mode == MODE_EXPORTS ->
+                        "Nothing is exported, or this format carries no export table — only ELF and PE do."
+                    else ->
+                        "Open a binary the engine can disassemble and its functions land here."
+                }
             )
 
-            filtered.isEmpty() -> Column(
-                Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                EmptyPanel(
-                    "No function matches \"$query\"",
-                    "${all.size} functions in this binary, by name or by the name you gave it."
-                )
-                TextButton(onClick = { vm.funcQuery = "" }) {
-                    Text("Clear search", color = ide.accent, fontSize = Type.label)
+            shown == 0 -> SymbolsNoMatch(vm, query, mode, funcsMode, noun, total, funcs, imports, exports)
+
+            funcsMode -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
+                items(funcHits.size, key = { funcHits[it] }) { i ->
+                    FunctionRow(vm, funcs[funcHits[i]], rowMotion())
                 }
             }
 
-            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(12.dp)) {
-                items(filtered.size) { i ->
-                    val f = filtered[i]
-                    val renamed = vm.renames["0x%08X".format(f.addr)]
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable(
-                                onClickLabel = "Open this function",
-                                role = Role.Button
-                            ) { vm.selectFunction(f.addr) }
-                            .heightIn(min = 48.dp)
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RowIcon(
-                            if (renamed != null) Icons.Filled.DriveFileRenameOutline
-                            else Icons.Filled.Functions,
-                            if (renamed != null) ide.amber else ide.dim, 13.dp,
-                            contentDescription = if (renamed != null) "renamed" else null
-                        )
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                renamed ?: f.name,
-                                color = if (f.addr == vm.selectedFunc) ide.accent else ide.text,
-                                fontSize = Type.mono, fontFamily = Mono,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                "${f.from} · ${f.size} bytes · ${f.nCallees} out / ${f.nCallers} in",
-                                color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Spacer(Modifier.width(6.dp))
-                        Text(hexFmt(f.addr), color = ide.cyan, fontSize = Type.monoSmall, fontFamily = Mono)
-                    }
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
+                items(symHits.size, key = { symHits[it] }) { i ->
+                    SymbolRow(vm, symbols[symHits[i]], mode == MODE_EXPORTS, rowMotion())
                 }
             }
+        }
+    }
+}
+
+/**
+ * The case that made the toggle necessary: your query matches a table you are
+ * not looking at. Saying "no function matches" and stopping there is how the
+ * app used to deny a symbol the palette had just listed; now it names the table
+ * that has the hits and takes one tap to get there.
+ */
+@Composable
+private fun SymbolsNoMatch(
+    vm: StudioViewModel,
+    query: String,
+    mode: String,
+    funcsMode: Boolean,
+    noun: String,
+    total: Int,
+    funcs: List<FuncInfo>,
+    imports: List<SymbolInfo>,
+    exports: List<SymbolInfo>
+) {
+    val ide = LocalIde.current
+    // Only reached when the current table has nothing, so three counting passes
+    // here cost nothing on the typing path.
+    val elsewhere = buildList {
+        if (!funcsMode) {
+            val n = funcs.count { it.name.contains(query, ignoreCase = true) }
+            if (n > 0) add(Triple(MODE_FUNCTIONS, "Functions", n))
+        }
+        if (mode != MODE_IMPORTS) {
+            val n = imports.count { it.name.contains(query, ignoreCase = true) }
+            if (n > 0) add(Triple(MODE_IMPORTS, "Imports", n))
+        }
+        if (mode != MODE_EXPORTS) {
+            val n = exports.count { it.name.contains(query, ignoreCase = true) }
+            if (n > 0) add(Triple(MODE_EXPORTS, "Exports", n))
+        }
+    }
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        EmptyPanel(
+            "No $noun matches \"$query\"",
+            if (funcsMode) "$total functions in this binary, by name or by the name you gave it."
+            else "$total ${noun}s in this binary, none whose name contains that text."
+        )
+        // One offer per line rather than a row of them: three labels at this
+        // size overflow a 360dp screen, and an empty state has vertical space
+        // to spare.
+        for ((target, label, n) in elsewhere) {
+            TextButton(onClick = { vm.symbolsMode = target }) {
+                Text("Show $n in $label", color = ide.cyan, fontSize = Type.label)
+            }
+        }
+        TextButton(onClick = { vm.funcQuery = "" }) {
+            Text("Clear search", color = ide.accent, fontSize = Type.label)
+        }
+    }
+}
+
+@Composable
+private fun FunctionRow(vm: StudioViewModel, f: FuncInfo, modifier: Modifier = Modifier) {
+    val ide = LocalIde.current
+    val renamed = vm.renames["0x%08X".format(f.addr)]
+    // `nCallees`/`nCallers` are built from the engine's INTERNAL-ONLY edge sets,
+    // while the Assembly tab counts every edge: a function calling printf,
+    // malloc, free and one local helper read "1 out" here and "calls out 4"
+    // there, for the same function on two tabs. The call-graph index is the
+    // source the other screen falls back to, and when the row IS the function
+    // currently open its FunctionDetail is better still — xrefInCount and
+    // xrefOutCount are the one rule both screens now share.
+    val d = vm.detail?.takeIf { it.ok && it.addr == f.addr }
+    val outN = if (d != null) vm.xrefOutCount(d) else vm.calleesOf(f.addr).size
+    val inN = if (d != null) vm.xrefInCount(d) else vm.callersOf(f.addr).size
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clickable(onClickLabel = "Open this function", role = Role.Button) {
+                // navigateTo, not selectFunction. This list was the app's only
+                // holdout: selectFunction pushes no history, so Back did not
+                // undo the pick, and it does not change tab either, so tapping
+                // a row only recoloured it while the decompile ran on a screen
+                // you could not see.
+                vm.navigateTo(tab = Tab.ASSEMBLY, addr = f.addr)
+            }
+            .heightIn(min = 48.dp)
+            .padding(horizontal = Space.l, vertical = Space.s),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RowIcon(
+            if (renamed != null) Icons.Filled.DriveFileRenameOutline
+            else Icons.Filled.Functions,
+            if (renamed != null) ide.amber else ide.dim, 13.dp,
+            contentDescription = if (renamed != null) "renamed" else null
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                renamed ?: f.name,
+                color = if (f.addr == vm.selectedFunc) ide.accent else ide.text,
+                fontSize = Type.mono, fontFamily = Mono,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "${f.from} · ${f.size} bytes · $outN out / $inN in",
+                color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(Modifier.width(Space.m))
+        Text(hexFmt(f.addr), color = ide.cyan, fontSize = Type.monoSmall, fontFamily = Mono)
+    }
+}
+
+/**
+ * An import or an export. [SymbolInfo] carries a name and an address and
+ * nothing else — no size, no origin, no edge counts — so this is not the
+ * function row with its fields blanked out.
+ *
+ * Every ELF import has address 0. `ElfLoader` records a dynamic symbol as an
+ * import precisely when it is undefined and its value is 0, because the loader
+ * resolves it at run time and the file genuinely does not say where it will
+ * land. Such a row shows NO address — a grey 00000000 would be a number the
+ * binary never contained — and is not clickable, because there is nothing to
+ * open. That is the normal look of the Imports list for a `.so`, not an edge
+ * case, so the name stays at full strength and only the affordances go.
+ *
+ * For the rest the tap rule is the palette's, unchanged: the function whose
+ * body covers the address, or nothing.
+ */
+@Composable
+private fun SymbolRow(
+    vm: StudioViewModel,
+    s: SymbolInfo,
+    isExport: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val ide = LocalIde.current
+    val fn = if (s.addr != 0L) vm.functionContaining(s.addr) else null
+    val jni = isExport && s.name.startsWith("Java_")
+    val where = when {
+        s.addr == 0L -> "resolved at load time · no address in this file"
+        fn != null -> "in ${vm.effectiveFuncName(fn.addr)}"
+        else -> "no disassembled body at this address"
+    }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (fn != null) Modifier.clickable(
+                    onClickLabel = "Open in Assembly",
+                    role = Role.Button
+                ) {
+                    vm.navigateTo(tab = Tab.ASSEMBLY, addr = fn.addr)
+                    vm.requestGoto(s.addr)
+                } else Modifier
+            )
+            .heightIn(min = 48.dp)
+            .padding(horizontal = Space.l, vertical = Space.s),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RowIcon(
+            if (isExport) Icons.Filled.ArrowUpward else Icons.Filled.ArrowDownward,
+            if (jni) ide.entry else ide.dim, 13.dp,
+            contentDescription = if (isExport) "export" else "import"
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                s.name,
+                color = ide.text,
+                fontSize = Type.mono, fontFamily = Mono,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                if (jni) "JNI entry point · $where" else where,
+                color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (s.addr != 0L) {
+            Spacer(Modifier.width(Space.m))
+            // Cyan is this app's "there is somewhere to go". An address that
+            // exists but has no disassembled body is real information and stays
+            // legible, in dim2, without promising a destination.
+            Text(
+                hexFmt(s.addr),
+                color = if (fn != null) ide.cyan else ide.dim2,
+                fontSize = Type.monoSmall, fontFamily = Mono
+            )
         }
     }
 }
@@ -354,26 +733,39 @@ fun MapPanel(vm: StudioViewModel) {
     val meta = vm.meta
     val sections = meta?.sections ?: emptyList()
     val segments = meta?.segments ?: emptyList()
-    val segs = vm.mapMode == 1
+    // `Engine.cpp` fills `sections` for ELF and PE only, so a DEX — which means
+    // every APK, the app's main flow — has none, and mode 0, the default,
+    // opened an empty grid while the six-row layout the DEX loader DOES emit
+    // sat one tap away under Segments.
+    //
+    // The fallback moves the DEFAULT only. `chose` records that you picked a
+    // mode yourself, and after that the panel shows what you asked for, empty
+    // state and its explanation included.
+    var chose by remember(System.identityHashCode(meta)) { mutableStateOf(false) }
+    val segs = if (!chose && sections.isEmpty() && segments.isNotEmpty()) true else vm.mapMode == 1
     val rows = if (segs) segments.size else sections.size
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(ide.panel2)
-                .padding(horizontal = 6.dp)
+                .surface2(RectangleShape)
+                .padding(horizontal = Space.s)
                 .selectableGroup(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            MapModeLabel("Sections", sections.size, !segs) { vm.mapMode = 0 }
-            MapModeLabel("Segments", segments.size, segs) { vm.mapMode = 1 }
+            ModeChip("Sections", sections.size, !segs, ide.accent) { chose = true; vm.mapMode = 0 }
+            Spacer(Modifier.width(Space.s))
+            ModeChip("Segments", segments.size, segs, ide.accent) { chose = true; vm.mapMode = 1 }
             Spacer(Modifier.weight(1f))
             Text(
                 if (segs) "load map" else "section table",
-                color = ide.dim2, fontSize = Type.caption, maxLines = 1
+                color = ide.dim2, fontSize = Type.caption,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
         when {
+            vm.busy && rows == 0 -> SkeletonLines(6)
+
             meta == null -> EmptyPanel(
                 "No binary open",
                 "The section and segment tables come from the file header — open a file to read them."
@@ -385,32 +777,12 @@ fun MapPanel(vm: StudioViewModel) {
                 else "This file declares no section headers — try the segment view."
             )
 
-            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(12.dp)) {
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
                 items(rows) { i ->
                     if (segs) MapSegmentRow(vm, segments[i]) else MapSectionRow(vm, sections[i])
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun MapModeLabel(text: String, count: Int, selected: Boolean, onSelect: () -> Unit) {
-    val ide = LocalIde.current
-    Box(
-        Modifier
-            .heightIn(min = 48.dp)
-            .selectable(selected = selected, role = Role.Tab, onClick = onSelect)
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            "$text ($count)",
-            color = if (selected) ide.accent else ide.dim2,
-            fontSize = Type.label,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            maxLines = 1
-        )
     }
 }
 
@@ -430,7 +802,7 @@ private fun MapSectionRow(vm: StudioViewModel, s: Section) {
                 ) { panelJumpToHex(vm, s.offset) } else Modifier
             )
             .heightIn(min = 48.dp)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(
@@ -449,7 +821,7 @@ private fun MapSectionRow(vm: StudioViewModel, s: Section) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Space.m))
         MapFlagsText(s.flags)
     }
 }
@@ -468,7 +840,7 @@ private fun MapSegmentRow(vm: StudioViewModel, s: Segment) {
                 ) { panelJumpToHex(vm, s.offset) } else Modifier
             )
             .heightIn(min = 48.dp)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(
@@ -486,7 +858,7 @@ private fun MapSegmentRow(vm: StudioViewModel, s: Segment) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Space.m))
         MapFlagsText(s.flags)
     }
 }
@@ -554,7 +926,15 @@ fun ConsolePanel(vm: StudioViewModel) {
     val lines = vm.console
     val errors = lines.count { it.level == "ERROR" }
     val warns = lines.count { it.level == "WARN" }
-    val filtered = if (level == "ALL") lines.toList() else lines.filter { it.level == level }
+    // Indices into the log, so a row keeps its identity when the level filter
+    // changes under it and animateItem has something to animate. Two lines
+    // logged in the same millisecond share a timestamp, so the line itself
+    // would not be a unique key. (log() drops the oldest 200 past 800, which
+    // shifts every index once; the list is pinned to its tail by then, so that
+    // costs one meaningless frame and never a duplicate key.)
+    val hits: List<Int> =
+        if (level == "ALL") lines.indices.toList()
+        else lines.indices.filter { lines[it].level == level }
     val stamp = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
 
     Column(Modifier.fillMaxSize().background(ide.bg)) {
@@ -569,11 +949,11 @@ fun ConsolePanel(vm: StudioViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (errors > 0) {
                         StatChip("ERR", "$errors", ide.red)
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(Space.m))
                     }
                     if (warns > 0) {
                         StatChip("WARN", "$warns", ide.amber)
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(Space.m))
                     }
                     TextButton(
                         onClick = { confirmClear = true },
@@ -585,17 +965,18 @@ fun ConsolePanel(vm: StudioViewModel) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(ide.panel)
+                .surface1(RectangleShape)
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 6.dp)
+                .padding(horizontal = Space.s)
                 .selectableGroup(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ConsoleLevelFilterChip("ALL", lines.size, level == "ALL", ide.text) { level = "ALL" }
+            ModeChip("ALL", lines.size, level == "ALL", ide.text) { level = "ALL" }
             for (lv in listOf("INFO", "OK", "WARN", "ERROR")) {
-                ConsoleLevelFilterChip(
-                    lv, lines.count { it.level == lv }, level == lv, levelColor(lv, ide)
-                ) { level = lv }
+                Spacer(Modifier.width(Space.s))
+                ModeChip(lv, lines.count { it.level == lv }, level == lv, levelColor(lv, ide)) {
+                    level = lv
+                }
             }
         }
         when {
@@ -604,7 +985,7 @@ fun ConsolePanel(vm: StudioViewModel) {
                 "Opening a file, decompiling and exporting all report here."
             )
 
-            filtered.isEmpty() -> EmptyPanel(
+            hits.isEmpty() -> EmptyPanel(
                 when (level) {
                     "ERROR" -> "No errors"
                     "WARN" -> "No warnings"
@@ -615,14 +996,16 @@ fun ConsolePanel(vm: StudioViewModel) {
 
             else -> {
                 val state = rememberLazyListState()
-                LaunchedEffect(filtered.size, level) {
-                    if (filtered.isNotEmpty()) state.scrollToItem(filtered.size - 1)
+                LaunchedEffect(hits.size, level) {
+                    if (hits.isNotEmpty()) state.scrollToItem(hits.size - 1)
                 }
                 LazyColumn(
                     Modifier.fillMaxSize(), state = state,
-                    contentPadding = bottomInset(12.dp)
+                    contentPadding = bottomInset(Space.l)
                 ) {
-                    items(filtered.size) { i -> ConsoleLineRow(filtered[i], stamp) }
+                    items(hits.size, key = { hits[it] }) { i ->
+                        ConsoleLineRow(lines[hits[i]], stamp, rowMotion())
+                    }
                 }
             }
         }
@@ -637,7 +1020,7 @@ fun ConsolePanel(vm: StudioViewModel) {
                 Text(
                     "${lines.size} lines go, including $errors errors and $warns warnings. " +
                         "The console is the only record of them.",
-                    color = ide.dim, fontSize = Type.body
+                    color = ide.dim, fontSize = Type.body, lineHeight = Type.bodyLine
                 )
             },
             confirmButton = {
@@ -655,44 +1038,11 @@ fun ConsolePanel(vm: StudioViewModel) {
 }
 
 @Composable
-private fun ConsoleLevelFilterChip(
-    level: String,
-    count: Int,
-    selected: Boolean,
-    tint: Color,
-    onSelect: () -> Unit
+private fun ConsoleLineRow(
+    l: ConsoleLine,
+    stamp: SimpleDateFormat,
+    modifier: Modifier = Modifier
 ) {
-    val ide = LocalIde.current
-    Box(
-        Modifier
-            .heightIn(min = 48.dp)
-            .selectable(selected = selected, role = Role.Tab, onClick = onSelect)
-            .padding(horizontal = 3.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            "$level $count",
-            color = if (selected) tint else ide.dim2,
-            fontSize = Type.caption, fontFamily = Mono,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            maxLines = 1,
-            modifier = Modifier
-                .background(
-                    if (selected) tint.copy(alpha = 0.12f) else Color.Transparent,
-                    RoundedCornerShape(6.dp)
-                )
-                .border(
-                    1.dp,
-                    if (selected) ide.borderStrong else ide.border,
-                    RoundedCornerShape(6.dp)
-                )
-                .padding(horizontal = 8.dp, vertical = 5.dp)
-        )
-    }
-}
-
-@Composable
-private fun ConsoleLineRow(l: ConsoleLine, stamp: SimpleDateFormat) {
     val ide = LocalIde.current
     val tint = levelColor(l.level, ide)
     val wash = when (l.level) {
@@ -701,119 +1051,27 @@ private fun ConsoleLineRow(l: ConsoleLine, stamp: SimpleDateFormat) {
         else -> Color.Transparent
     }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .background(wash)
-            .padding(horizontal = 10.dp, vertical = 3.dp)
+            .padding(horizontal = Space.l, vertical = Space.xs)
     ) {
         Text(
             stamp.format(Date(l.ts)),
             color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             l.level, color = tint, fontSize = Type.monoSmall, fontFamily = Mono,
             fontWeight = FontWeight.Bold, maxLines = 1,
             modifier = Modifier.widthIn(min = 42.dp)
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             l.msg,
             color = if (l.level == "ERROR" || l.level == "WARN") tint else ide.text,
-            fontSize = Type.mono, fontFamily = Mono,
+            fontSize = Type.mono, lineHeight = Type.monoLine, fontFamily = Mono,
             modifier = Modifier.weight(1f)
         )
-    }
-}
-
-// ============================================================== Debugger ==
-@Composable
-fun LegacyTracerPanel(vm: StudioViewModel) {
-    val ide = LocalIde.current
-    var args by remember { mutableStateOf("/system/bin/toybox echo hello-nocturne") }
-    var maxEvents by remember { mutableStateOf("200") }
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader(
-            "Debugger — experimental ptrace",
-            trailing = {
-                if (vm.debugRunning) {
-                    CircularProgressIndicator(color = ide.amber, modifier = Modifier.size(16.dp))
-                }
-            }
-        )
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-            Text(
-                "Program + args (newline-separated argv): /system/bin/* · SELinux wuxuu xannibi karaa (root/debuggable u baahan).",
-                color = ide.amber, fontSize = Type.label
-            )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = args,
-                onValueChange = { args = it },
-                label = { Text("argv") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { contentDescription = "Program and arguments" },
-                textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = maxEvents,
-                    onValueChange = { maxEvents = it.filter { c -> c.isDigit() }.take(4) },
-                    label = { Text("Max events") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .width(120.dp)
-                        .semantics { contentDescription = "Maximum number of events" },
-                    textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
-                )
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        val argv = args.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
-                        vm.debugRun(argv, maxEvents.toIntOrNull() ?: 200)
-                    },
-                    enabled = !vm.debugRunning
-                ) { Text("Run trace") }
-                Spacer(Modifier.width(8.dp))
-                TextButton(onClick = { vm.debugStop() }, enabled = vm.debugRunning) {
-                    Text("Stop", color = ide.red)
-                }
-            }
-        }
-        val res = vm.debugResult
-        if (res != null && !res.ok && res.error != null) {
-            Text(
-                "ERROR: ${res.error}",
-                color = ide.red, fontSize = Type.mono, fontFamily = Mono,
-                modifier = Modifier.padding(horizontal = 12.dp)
-            )
-        }
-        val events = res?.events ?: emptyList()
-        if (events.isEmpty()) {
-            EmptyPanel(
-                if (res?.ok == true) "No events" else "No trace yet",
-                if (res?.ok == true) "The process ran and returned without a syscall the tracer caught."
-                else "Give it an argv and run a trace — each syscall lands here as it happens."
-            )
-        } else {
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(12.dp)) {
-                items(events.size) { i ->
-                    val e = events[i]
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
-                        Text(
-                            "#${e.n} ${e.syscall}(ret=${hexFmt(e.ret)})",
-                            color = ide.text, fontSize = Type.mono, fontFamily = Mono
-                        )
-                        Text(
-                            "   ip=${hexFmt(e.ip)} nr=${e.nr} args=[${e.args.joinToString(", ") { hexFmt(it) }}]",
-                            color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 2
-                        )
-                    }
-                }
-            }
-        }
     }
 }

@@ -1,7 +1,10 @@
 package com.trickhook.ui
 
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,7 +26,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CallMade
 import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -34,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,7 +81,7 @@ fun CallGraphPanel(vm: StudioViewModel) {
             Modifier
                 .fillMaxWidth()
                 .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .padding(horizontal = Space.l, vertical = Space.s),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
@@ -87,23 +91,26 @@ fun CallGraphPanel(vm: StudioViewModel) {
                     fontWeight = FontWeight.Bold, fontFamily = Mono, maxLines = 1
                 )
                 Text(
-                    if (edges.isEmpty()) "no edges"
-                    else "${edges.size} edges" + (if (native != null) " · recomputed" else " · from analysis"),
+                    when {
+                        // The spinner that used to sit in this row is now a
+                        // skeleton with the shape of the list below, so the
+                        // header only has to say which state it is in.
+                        vm.callGraphBusy -> "recomputing…"
+                        edges.isEmpty() -> "no edges"
+                        else -> "${edges.size} edges" +
+                            (if (native != null) " · recomputed" else " · from analysis")
+                    },
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
-            if (vm.callGraphBusy) {
-                CircularProgressIndicator(
-                    color = ide.accent,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-            }
+            val refresh = remember { MutableInteractionSource() }
+            val refreshPressed by refresh.collectIsPressedAsState()
             IconButton(
                 onClick = { vm.loadCallGraph(if (focusMode) sel ?: 0L else 0L) },
-                enabled = !vm.callGraphBusy && vm.meta != null
+                enabled = !vm.callGraphBusy && vm.meta != null,
+                interactionSource = refresh,
+                modifier = Modifier.pressScale(refreshPressed)
             ) {
                 Icon(
                     Icons.Filled.Refresh,
@@ -129,6 +136,12 @@ fun CallGraphPanel(vm: StudioViewModel) {
                 "No binary open",
                 "Open a file and the call graph is built with the rest of the analysis."
             )
+            // The native pass replaces the whole edge list, so leaving the old
+            // one on screen under a spinner would be claiming it is current.
+            // The skeleton has the shape of what is coming instead: a flush-left
+            // section label, indented rows under it, a short tail. It brings its
+            // own full-bleed padding, so it is not wrapped in any.
+            vm.callGraphBusy -> SkeletonLines(lines = 12, indent = true)
             edges.isEmpty() -> EmptyPanel(
                 "No call edges in this binary",
                 "The BL/CALL cross-reference scan found nothing to link. " +
@@ -172,7 +185,7 @@ private fun ModeTab(
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1
         )
-        Spacer(Modifier.height(5.dp))
+        Spacer(Modifier.height(Space.s))
         // Selection is not carried by weight and colour alone.
         Box(
             Modifier
@@ -194,21 +207,44 @@ private fun FocusView(
 ) {
     // Both sides come from an address-keyed index built once per analysis, so
     // this is two map lookups rather than a scan per row.
-    val callees = remember(nativeEdges, addr, vm.meta) {
-        (nativeEdges?.filter { it.from == addr } ?: vm.calleesOf(addr)).distinctBy { it.to }
+    //
+    // The keys are IDENTITIES and a size, never the objects themselves:
+    // AnalysisMeta is a data class, so keying on `vm.meta` made every single
+    // recomposition of this view walk its sections, its segments, its four
+    // thousand functions, its three thousand strings and every DEX class and
+    // method — twice — plus a full element-by-element List<CallEdge> compare.
+    // CommandPalette already keys its own lookups this way.
+    val nativeId = System.identityHashCode(nativeEdges)
+    val nativeN = nativeEdges?.size ?: 0
+    val metaId = System.identityHashCode(vm.meta)
+    // No .distinctBy: this panel was the only screen in the app that collapsed
+    // repeated edges, which is why one function could read "calls out 5" on the
+    // Assembly and Pseudo-C strips and "calls (1)" here. One edge, one row, the
+    // same rule as every other list — and `buildCallGraph` already merges the
+    // several call sites between one pair of functions into a single edge, so
+    // there is no second dedup left for the UI to invent.
+    val callees = remember(nativeId, nativeN, addr, metaId) {
+        nativeEdges?.filter { it.from == addr } ?: vm.calleesOf(addr)
     }
-    val callers = remember(nativeEdges, addr, vm.meta) {
-        (nativeEdges?.filter { it.to == addr } ?: vm.callersOf(addr)).distinctBy { it.from }
+    val callers = remember(nativeId, nativeN, addr, metaId) {
+        nativeEdges?.filter { it.to == addr } ?: vm.callersOf(addr)
     }
+
+    // The counts come from the one shared definition when we hold the detail
+    // this panel is describing, so the section headings, the Assembly strip and
+    // the Pseudo-C strip cannot disagree about one function any more.
+    val detail = vm.detail?.takeIf { it.addr == addr }
+    val outCount = detail?.let { vm.xrefOutCount(it) } ?: callees.size
+    val inCount = detail?.let { vm.xrefInCount(it) } ?: callers.size
 
     LazyColumn(
         Modifier
             .fillMaxSize()
             .background(ide.bg),
-        contentPadding = bottomInset(12.dp)
+        contentPadding = bottomInset(Space.l)
     ) {
-        item {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        item(key = "head") {
+            Column(Modifier.padding(horizontal = Space.l, vertical = Space.m)) {
                 Text(
                     vm.effectiveFuncName(addr),
                     color = ide.accent, fontSize = Type.body, fontFamily = Mono,
@@ -220,18 +256,38 @@ private fun FocusView(
                 )
             }
         }
-        item { SectionLabel(ide, Icons.Filled.CallMade, "calls", callees.size) }
-        if (callees.isEmpty()) item { NoneRow(ide, "This function calls nothing.") }
+        item(key = "sec_out") {
+            SectionLabel(rowMotion(), ide, Icons.Filled.CallMade, "calls", outCount)
+        }
+        // Only when both agree there is nothing: "calls nothing" under a heading
+        // that says 7 is the kind of contradiction this pass exists to remove.
+        if (callees.isEmpty() && outCount == 0) item(key = "none_out") {
+            NoneRow(rowMotion(), ide, "This function calls nothing.")
+        }
+        // The heading counts reference SITES and the rows are call-graph EDGES;
+        // Engine.cpp:969-975 says in as many words that those are two different
+        // questions. Two call instructions to the same target are two sites and
+        // one edge, so rather than hide one number the panel names both.
+        if (callees.size != outCount) item(key = "gap_out") {
+            NoneRow(rowMotion(), ide, "$outCount call sites · ${callees.size} distinct targets")
+        }
         items(callees.size, key = { i -> "o_" + callees[i].to + "_" + i }) { i ->
             val e = callees[i]
-            CallRow(vm, ide, e.to, e.kind, e.toName, open)
+            CallRow(vm, ide, rowMotion(), e.to, e.kind, e.toName, open)
         }
-        item { SectionLabel(ide, Icons.Filled.CallReceived, "called by", callers.size) }
-        if (callers.isEmpty()) item { NoneRow(ide, "Nothing in this binary calls it.") }
+        item(key = "sec_in") {
+            SectionLabel(rowMotion(), ide, Icons.Filled.CallReceived, "called by", inCount)
+        }
+        if (callers.isEmpty() && inCount == 0) item(key = "none_in") {
+            NoneRow(rowMotion(), ide, "Nothing in this binary calls it.")
+        }
+        if (callers.size != inCount) item(key = "gap_in") {
+            NoneRow(rowMotion(), ide, "$inCount reference sites · ${callers.size} distinct callers")
+        }
         items(callers.size, key = { i -> "i_" + callers[i].from + "_" + i }) { i ->
             val e = callers[i]
             // A caller is always a real function in this image, never an import.
-            CallRow(vm, ide, e.from, "call", e.fromName, open)
+            CallRow(vm, ide, rowMotion(), e.from, "call", e.fromName, open)
         }
     }
 }
@@ -245,26 +301,38 @@ private fun WholeBinaryView(
     selected: Long?,
     open: (Long) -> Unit
 ) {
-    val groups = remember(edges) { edges.groupBy { it.from }.entries.sortedBy { it.key } }
+    // Identity and size, not the list: `remember(edges)` compared four thousand
+    // CallEdge objects field by field on every recomposition of this panel.
+    val groups = remember(System.identityHashCode(edges), edges.size) {
+        edges.groupBy { it.from }.entries.sortedBy { it.key }
+    }
     LazyColumn(
         Modifier
             .fillMaxSize()
             .background(ide.bg),
-        contentPadding = bottomInset(12.dp)
+        contentPadding = bottomInset(Space.l)
     ) {
         groups.forEach { (caller, list) ->
             item(key = "h_$caller") {
+                // Resolved, not assumed: an edge endpoint is not guaranteed to
+                // be a function start, and effectiveFuncName invents a sub_ name
+                // for anything it cannot find — which is how a header ends up
+                // naming a function that does not exist.
+                val owner = vm.functionAt(caller) ?: vm.functionContaining(caller)
                 Row(
-                    Modifier
+                    rowMotion()
                         .fillMaxWidth()
                         .background(ide.panel2)
-                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                        .padding(horizontal = Space.l, vertical = Space.s),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        vm.effectiveFuncName(caller),
-                        // accent means "this is where you are", nothing else.
-                        color = if (caller == selected) ide.accent else ide.text,
+                        if (owner != null) vm.effectiveFuncName(owner.addr) else hexFmt(caller),
+                        // accent means "this is where you are", nothing else —
+                        // and `selected` being null must never match an owner
+                        // this binary could not resolve.
+                        color = if (selected != null && owner?.addr == selected) ide.accent
+                        else ide.text,
                         fontSize = Type.label, fontFamily = Mono,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
@@ -277,18 +345,24 @@ private fun WholeBinaryView(
             }
             items(list.size, key = { i -> "e_" + caller + "_" + i }) { i ->
                 val e = list[i]
-                CallRow(vm, ide, e.to, e.kind, e.toName, open)
+                CallRow(vm, ide, rowMotion(), e.to, e.kind, e.toName, open)
             }
         }
     }
 }
 
 @Composable
-private fun SectionLabel(ide: IdeColors, icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, n: Int) {
+private fun SectionLabel(
+    modifier: Modifier,
+    ide: IdeColors,
+    icon: ImageVector,
+    label: String,
+    n: Int
+) {
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(icon, ide.dim, 14.dp, null)
@@ -297,69 +371,102 @@ private fun SectionLabel(ide: IdeColors, icon: androidx.compose.ui.graphics.vect
 }
 
 @Composable
-private fun NoneRow(ide: IdeColors, text: String) {
+private fun NoneRow(modifier: Modifier, ide: IdeColors, text: String) {
     Text(
         text,
         color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
-        modifier = Modifier.padding(start = 36.dp, end = 12.dp, top = 2.dp, bottom = 6.dp)
+        // Space.xxl is the RowIcon gutter a CallRow indents by, plus one more
+        // step so the sentence lines up with the row labels and not the arrows.
+        modifier = modifier.padding(
+            start = Space.xxl + Space.l, end = Space.l, top = Space.xs, bottom = Space.m
+        )
     )
 }
 
 /**
- * One edge. Resolution is `functionAt(addr)` — an O(1) map lookup, not the
- * per-row linear scan over `meta.functions` this panel used to do inside a
- * LazyColumn — and a row that cannot resolve to anything is drawn quiet and
- * left un-clickable instead of rippling and then doing nothing.
+ * Entry, exit and placement for the xref lists. Rows really do come and go
+ * here: switching mode, picking another function or recomputing rebuilds both
+ * sides. A fast fade over a base-length move, the same spec the other list
+ * panels use, with every duration through [motionMs].
+ */
+@Composable
+private fun LazyItemScope.rowMotion(): Modifier {
+    val fade = motionMs(Motion.fast)
+    val move = motionMs()
+    // A bare Modifier under reduce-motion, not a zero-length tween: no
+    // animation node per row, nothing to tick and nothing to cancel.
+    return if (fade == 0) Modifier
+    else Modifier.animateItem(
+        fadeInSpec = tween(fade),
+        placementSpec = tween(move),
+        fadeOutSpec = tween(fade)
+    )
+}
+
+/**
+ * One edge. Resolution is `functionAt` and then `functionContaining` — two
+ * cheap lookups, not the per-row linear scan over `meta.functions` this panel
+ * used to do inside a LazyColumn, and not the exact-match-only rule it used
+ * after that: an endpoint of a CallEdge is not guaranteed to be a function
+ * start, so "called by" rows kept failing to resolve and the same caller showed
+ * up as a named, tappable row in the xref sheet and as dead grey text here.
+ *
+ * Whatever resolves is what gets navigated to and what gets named, so
+ * `navigateTo` receives a function start by construction rather than by luck,
+ * and `effectiveFuncName` is never handed an address it would have to invent a
+ * `sub_` name for. A row that resolves to nothing is still drawn quiet and left
+ * un-clickable instead of rippling and then doing nothing.
  */
 @Composable
 private fun CallRow(
     vm: StudioViewModel,
     ide: IdeColors,
+    modifier: Modifier,
     addr: Long,
     kind: String,
     rawName: String,
     open: (Long) -> Unit
 ) {
     val isImport = kind == "import"
-    val target = if (isImport) null else vm.functionAt(addr)
+    val target = if (isImport) null else (vm.functionAt(addr) ?: vm.functionContaining(addr))
     val label = when {
-        isImport -> rawName.ifEmpty { "0x" + hexFmt(addr) }
-        target != null -> vm.effectiveFuncName(addr)
-        else -> rawName.ifEmpty { "0x" + hexFmt(addr) }
+        isImport -> rawName.ifEmpty { hexFmt(addr) }
+        target != null -> vm.effectiveFuncName(target.addr)
+        else -> rawName.ifEmpty { hexFmt(addr) }
     }
-    val tappable = target != null
-    val base = Modifier
+    val goTo = target?.addr
+    val base = modifier
         .fillMaxWidth()
         .then(
-            if (tappable) Modifier.clickable(role = Role.Button, onClickLabel = "Open $label") {
-                open(addr)
+            if (goTo != null) Modifier.clickable(role = Role.Button, onClickLabel = "Open $label") {
+                open(goTo)
             } else Modifier
         )
         .heightIn(min = 48.dp)
-        .padding(start = 24.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
+        .padding(start = Space.xxl, end = Space.l, top = Space.s, bottom = Space.s)
     Row(base, verticalAlignment = Alignment.CenterVertically) {
         Text(
-            if (tappable) "|-> " else "|   ",
+            if (goTo != null) "|-> " else "|   ",
             color = ide.dim, fontSize = Type.label, fontFamily = Mono
         )
         Text(
             label,
             color = when {
                 isImport -> ide.amber
-                tappable -> ide.cyan
+                goTo != null -> ide.cyan
                 else -> ide.dim2
             },
             fontSize = Type.label, fontFamily = Mono,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             if (isImport) "import" else hexFmt(addr),
             color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
             modifier = if (isImport) Modifier
                 .background(ide.amber.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 2.dp)
+                .padding(horizontal = Space.s, vertical = Space.xs)
             else Modifier
         )
     }

@@ -1,15 +1,20 @@
 package com.trickhook.ui
 
 import android.graphics.Typeface
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,10 +48,10 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -59,6 +65,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -70,10 +77,23 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.trickhook.model.CfgBlock
 import com.trickhook.vm.StudioViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 private data class NodePos(
     val block: CfgBlock, val x: Float, val y: Float, val depth: Int, val kind: String
 )
+
+/**
+ * The one in-flight viewport animation, and the only thing the two input paths
+ * share. Fit, the zoom buttons and "centre on this block" spring; a pinch or a
+ * drag writes the transform straight through and cancels whatever is stored
+ * here first, so a spring can never pull against a finger. A plain holder and
+ * not a `mutableStateOf`: nothing in composition reads it.
+ */
+private class ViewportGlide {
+    var job: Job? = null
+}
 
 /**
  * Graph geometry is expressed in density-independent units: one world unit is
@@ -173,10 +193,19 @@ fun GraphPanel(vm: StudioViewModel) {
     val nodeH = 16f + 44f * fs
 
     var listView by remember { mutableStateOf(false) }
-    var showGoto by remember { mutableStateOf(false) }
+    // Not `showGoto`: CommandPalette.kt has a file-scope `showGoto` in this same
+    // package, and a local that happens to shadow a global is a trap for the
+    // next person to move this block.
+    var gotoOpen by remember { mutableStateOf(false) }
     var selected by remember(d?.addr) { mutableStateOf<Int?>(null) }
     var vpW by remember { mutableFloatStateOf(0f) }
     var vpH by remember { mutableFloatStateOf(0f) }
+
+    // 0 when the user has turned animation off system-wide. Every duration in
+    // this file goes through it, including the spring gate below.
+    val motion = motionMs()
+    val scope = rememberCoroutineScope()
+    val glide = remember { ViewportGlide() }
 
     val hasGraph = d != null && d.blocks.isNotEmpty()
     val nodes = remember(d?.addr, d?.blocks?.size, nodeW) {
@@ -188,12 +217,60 @@ fun GraphPanel(vm: StudioViewModel) {
     val worldW = remember(nodes0) { (nodes0.maxOfOrNull { it.x + nodeW } ?: 1f) + 16f }
     val worldH = remember(nodes0) { (nodes0.maxOfOrNull { it.y + nodeH } ?: 1f) + 16f }
 
-    fun applyFit() {
+    /**
+     * Drop the running spring. Called by every gesture before it writes, so a
+     * finger always wins, and by [glideTo] before it starts a new one.
+     */
+    fun stopGlide() {
+        glide.job?.cancel()
+        glide.job = null
+    }
+
+    /** Put the transform there with no animation at all. */
+    fun setTransform(scale: Float, panX: Float, panY: Float) {
+        vm.graphScale = scale
+        vm.graphPanX = panX
+        vm.graphPanY = panY
+    }
+
+    /**
+     * Move the viewport under a critically damped spring, because a *control*
+     * asked for it: Fit, the zoom buttons, the command-palette requests, or a
+     * tap in the block list. Direct manipulation never comes through here.
+     * With animation switched off system-wide this is a straight assignment.
+     */
+    fun glideTo(scale: Float, panX: Float, panY: Float) {
+        stopGlide()
+        if (motion == 0) {
+            setTransform(scale, panX, panY)
+            return
+        }
+        glide.job = scope.launch {
+            // The shared spring: critically damped, StiffnessMediumLow, no
+            // bounce. One definition for the whole app rather than a second
+            // copy of the same two constants here.
+            val spec = Motion.spring<Float>()
+            // Three Animatables, one job: cancelling the parent stops all three
+            // mid-flight, which is what a gesture needs to happen instantly.
+            val s = Animatable(vm.graphScale)
+            val x = Animatable(vm.graphPanX)
+            val y = Animatable(vm.graphPanY)
+            launch { s.animateTo(scale, spec) { vm.graphScale = value } }
+            launch { x.animateTo(panX, spec) { vm.graphPanX = value } }
+            launch { y.animateTo(panY, spec) { vm.graphPanY = value } }
+        }
+    }
+
+    /**
+     * [animated] is false only for the automatic first framing: that one is a
+     * layout decision, not a gesture and not a button, and a graph that slides
+     * into place while you are trying to read an address is a cost with no
+     * benefit.
+     */
+    fun applyFit(animated: Boolean) {
         if (vpW <= 0f || vpH <= 0f || nodes0.isEmpty()) return
         val s = minOf(vpW / (worldW * dens), vpH / (worldH * dens)).coerceIn(0.2f, 1.6f)
-        vm.graphScale = s
-        vm.graphPanX = 12f
-        vm.graphPanY = 12f
+        if (animated) glideTo(s, 12f, 12f) else { stopGlide(); setTransform(s, 12f, 12f) }
     }
 
     fun zoomBy(z: Float) {
@@ -203,17 +280,22 @@ fun GraphPanel(vm: StudioViewModel) {
         // Zoom about the middle of the viewport, not about world (0,0), so the
         // graph does not slide off screen as it grows.
         val k = next / old
-        vm.graphPanX = vpW / 2f - (vpW / 2f - vm.graphPanX) * k
-        vm.graphPanY = vpH / 2f - (vpH / 2f - vm.graphPanY) * k
-        vm.graphScale = next
+        glideTo(
+            next,
+            vpW / 2f - (vpW / 2f - vm.graphPanX) * k,
+            vpH / 2f - (vpH / 2f - vm.graphPanY) * k
+        )
     }
 
     fun centerOn(n: NodePos) {
         val ws = vm.graphScale * dens
         val w = if (vpW > 0f) vpW else 900f
         val h = if (vpH > 0f) vpH else 600f
-        vm.graphPanX = w / 2f - (n.x + nodeW / 2f) * ws
-        vm.graphPanY = h / 2f - (n.y + nodeH / 2f) * ws
+        glideTo(
+            vm.graphScale,
+            w / 2f - (n.x + nodeW / 2f) * ws,
+            h / 2f - (n.y + nodeH / 2f) * ws
+        )
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -221,7 +303,7 @@ fun GraphPanel(vm: StudioViewModel) {
             Modifier
                 .fillMaxWidth()
                 .background(ide.panel2)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .padding(horizontal = Space.l, vertical = Space.s),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -230,58 +312,60 @@ fun GraphPanel(vm: StudioViewModel) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            IconButton(onClick = { showGoto = !showGoto }, enabled = hasGraph) {
-                Icon(
-                    Icons.Filled.Search, contentDescription = "Jump to address",
-                    tint = if (showGoto) ide.accent else ide.dim, modifier = Modifier.size(18.dp)
-                )
+            ToolIcon(
+                Icons.Filled.Search, "Jump to address",
+                if (gotoOpen) ide.accent else ide.dim, hasGraph
+            ) { gotoOpen = !gotoOpen }
+            ToolIcon(Icons.Filled.ZoomOut, "Zoom out", ide.dim, hasGraph) { zoomBy(0.8f) }
+            ToolIcon(Icons.Filled.ZoomIn, "Zoom in", ide.dim, hasGraph) { zoomBy(1.25f) }
+            ToolIcon(Icons.Filled.Fullscreen, "Fit graph to screen", ide.dim, hasGraph) {
+                applyFit(animated = true)
             }
-            IconButton(onClick = { zoomBy(0.8f) }, enabled = hasGraph) {
-                Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out", tint = ide.dim, modifier = Modifier.size(18.dp))
-            }
-            IconButton(onClick = { zoomBy(1.25f) }, enabled = hasGraph) {
-                Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in", tint = ide.dim, modifier = Modifier.size(18.dp))
-            }
-            IconButton(onClick = { applyFit() }, enabled = hasGraph) {
-                Icon(Icons.Filled.Fullscreen, contentDescription = "Fit graph to screen", tint = ide.dim, modifier = Modifier.size(18.dp))
-            }
-            IconButton(onClick = { listView = !listView }, enabled = hasGraph) {
-                Icon(
-                    if (listView) Icons.Filled.AccountTree else Icons.Filled.Subject,
-                    contentDescription = if (listView) "Show the diagram" else "Show the blocks as a list",
-                    tint = if (listView) ide.accent else ide.dim, modifier = Modifier.size(18.dp)
-                )
-            }
+            ToolIcon(
+                if (listView) Icons.Filled.AccountTree else Icons.Filled.Subject,
+                if (listView) "Show the diagram" else "Show the blocks as a list",
+                if (listView) ide.accent else ide.dim, hasGraph
+            ) { listView = !listView }
         }
 
-        if (showGoto && hasGraph) {
-            var search by remember(d?.addr) { mutableStateOf("") }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(ide.panel)
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    placeholder = { Text("address, e.g. 401a20", fontSize = Type.caption, color = ide.dim2) },
-                    singleLine = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .semantics { contentDescription = "Virtual address to jump to, hexadecimal" },
-                    textStyle = TextStyle(fontSize = Type.label, fontFamily = Mono, color = ide.text)
-                )
-                TextButton(
-                    onClick = {
-                        val v = search.trim().removePrefix("0x").removePrefix("0X").toLongOrNull(16)
-                        if (v == null) vm.log("WARN", "Not a hex address: ${search.trim()}")
-                        else vm.requestGoto(v)
-                    },
-                    modifier = Modifier.heightIn(min = 48.dp)
-                ) { Text("Go", fontSize = Type.label) }
+        // The row grows and shrinks instead of shoving the graph down a notch.
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .animateContentSize(tween(motion))
+        ) {
+            if (gotoOpen && hasGraph) {
+                var search by remember(d?.addr) { mutableStateOf("") }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(ide.panel)
+                        .padding(horizontal = Space.l, vertical = Space.s),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = search,
+                        onValueChange = { search = it },
+                        placeholder = { Text("address, e.g. 401a20", fontSize = Type.caption, color = ide.dim2) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .semantics { contentDescription = "Virtual address to jump to, hexadecimal" },
+                        textStyle = TextStyle(fontSize = Type.label, fontFamily = Mono, color = ide.text)
+                    )
+                    TextButton(
+                        onClick = {
+                            // The shared parser, not a fourth inline copy: it
+                            // also takes separators and the top half of the
+                            // address space, which `toLongOrNull(16)` rejects.
+                            val v = parseAddr(search)
+                            if (v == null) vm.log("WARN", "Not a hex address: ${search.trim()}")
+                            else vm.requestGoto(v)
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    ) { Text("Go", fontSize = Type.label) }
+                }
             }
         }
 
@@ -325,7 +409,10 @@ fun GraphPanel(vm: StudioViewModel) {
                     f == null || f.addr == d.addr || gotoTried == g -> {
                         vm.consumeGoto()
                         gotoTried = null
-                        vm.log("WARN", "No block contains 0x${hexFmt(g)}")
+                        // hexFmt is the app's one address format and it carries
+                        // no prefix; the hand-written "0x" that used to be here
+                        // made a single address print two ways across the app.
+                        vm.log("WARN", "No block contains ${hexFmt(g)}")
                     }
                     else -> {
                         gotoTried = g
@@ -343,7 +430,7 @@ fun GraphPanel(vm: StudioViewModel) {
             LaunchedEffect(vm.graphFitReq, vpW, vpH) {
                 if (vm.graphFitReq && vpW > 0f) {
                     vm.graphFitReq = false
-                    applyFit()
+                    applyFit(animated = true)
                 }
             }
             // First sight of a graph, or a viewport the graph has drifted
@@ -355,7 +442,7 @@ fun GraphPanel(vm: StudioViewModel) {
                 val onScreen = vm.graphPanX + worldW * ws > 0f && vm.graphPanX < vpW &&
                     vm.graphPanY + worldH * ws > 0f && vm.graphPanY < vpH
                 val untouched = vm.graphScale == 1f && vm.graphPanX == 0f && vm.graphPanY == 0f
-                if (untouched || !onScreen) applyFit()
+                if (untouched || !onScreen) applyFit(animated = false)
             }
 
             if (listView) {
@@ -397,6 +484,10 @@ fun GraphPanel(vm: StudioViewModel) {
                         .onSizeChanged { vpW = it.width.toFloat(); vpH = it.height.toFloat() }
                         .pointerInput(Unit) {
                             detectTransformGestures { _, pan, zoom, _ ->
+                                // Direct manipulation: 1:1, no spring, ever. The
+                                // pending glide is dropped so the two cannot
+                                // fight over the same three floats.
+                                stopGlide()
                                 vm.graphScale = (vm.graphScale * zoom).coerceIn(0.2f, 4f)
                                 vm.graphPanX += pan.x
                                 vm.graphPanY += pan.y
@@ -423,7 +514,10 @@ fun GraphPanel(vm: StudioViewModel) {
                                 )
                             }
                             .pointerInput(d.addr, nodeW) {
-                                detectDragGestures { change, drag ->
+                                // onDragStart, not inside the loop: one cancel
+                                // per gesture is enough and it lands before the
+                                // first pixel of movement.
+                                detectDragGestures(onDragStart = { stopGlide() }) { change, drag ->
                                     change.consume()
                                     val ws = vm.graphScale * dens
                                     val gx = (change.previousPosition.x - vm.graphPanX) / ws
@@ -474,15 +568,16 @@ fun GraphPanel(vm: StudioViewModel) {
                     Canvas(
                         Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(8.dp)
+                            .padding(Space.m)
                             .size(width = 150.dp, height = 88.dp)
-                            // It floats over the graph and you can drag it, so
-                            // it needs an edge that actually reads as one.
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(ide.panel.copy(alpha = 0.92f))
-                            .border(1.dp, ide.borderStrong, RoundedCornerShape(4.dp))
+                            // One layer token instead of a hand-rolled fill and
+                            // border. surface1 clips to the shape itself, which
+                            // this needs: the node rectangles below are drawn in
+                            // raw canvas space and would otherwise paint over
+                            // the rounded corners.
+                            .surface1(RoundedCornerShape(4.dp))
                             .pointerInput(nodeW) {
-                                detectDragGestures { change, amt ->
+                                detectDragGestures(onDragStart = { stopGlide() }) { change, amt ->
                                     change.consume()
                                     val mm = minOf(150f / worldW, 88f / worldH)
                                     if (mm > 0f) {
@@ -535,10 +630,13 @@ private fun GraphLegend(ide: IdeColors, blocks: Int, instrs: Int) {
             .fillMaxWidth()
             .background(ide.panel)
             // Pinned to the bottom of the window under forced edge-to-edge, so
-            // it has to clear the gesture pill itself.
+            // it has to clear the gesture pill itself. It is also the only
+            // thing in this panel that does: the list above it must not add the
+            // same inset a second time.
             .navigationBarsPadding()
+            .animateContentSize(tween(motionMs()))
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -546,16 +644,16 @@ private fun GraphLegend(ide: IdeColors, blocks: Int, instrs: Int) {
             color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
         )
         BLOCK_KINDS.forEach { k ->
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(Space.l))
             Box(
                 Modifier
-                    .size(9.dp)
+                    .size(Space.m)
                     .background(kindColor(k, ide), RoundedCornerShape(2.dp))
             )
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(Space.s))
             Text(kindLabel(k), color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1)
         }
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Space.l))
         Text(
             "dashed · back edge",
             color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
@@ -579,13 +677,16 @@ private fun BlockList(
         modifier
             .fillMaxWidth()
             .background(ide.bg),
-        contentPadding = bottomInset(12.dp)
+        // A plain gap, NOT bottomInset: the legend sits below this list and
+        // already carries navigationBarsPadding, so taking the inset here too
+        // left a navigation bar of dead space at the end of the blocks.
+        contentPadding = PaddingValues(bottom = Space.l)
     ) {
-        items(nodes.size) { i ->
+        items(nodes.size, key = { i -> nodes[i].block.id }) { i ->
             val n = nodes[i]
             val c = kindColor(n.kind, ide)
             Row(
-                Modifier
+                rowMotion()
                     .fillMaxWidth()
                     .selectable(
                         selected = selected == n.block.id,
@@ -594,7 +695,7 @@ private fun BlockList(
                     )
                     .background(if (selected == n.block.id) ide.panel2 else Color.Transparent)
                     .heightIn(min = 48.dp)
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .padding(horizontal = Space.l, vertical = Space.s)
                     .semantics { contentDescription = blockDesc(n) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -603,9 +704,9 @@ private fun BlockList(
                     color = c, fontSize = Type.caption, fontFamily = Mono, maxLines = 1,
                     modifier = Modifier
                         .background(c.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                        .padding(horizontal = Space.s, vertical = Space.xs)
                 )
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(Space.l))
                 Column(Modifier.weight(1f)) {
                     Text(
                         "L_" + hexFmt(n.block.start),
@@ -624,13 +725,58 @@ private fun BlockList(
                 )
             }
         }
-        item {
+        item(key = "hint") {
             Text(
                 "Tap a block to select it and centre the diagram on it.",
                 color = ide.dim2, fontSize = Type.caption,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                modifier = rowMotion().padding(horizontal = Space.l, vertical = Space.m)
             )
         }
+    }
+}
+
+/**
+ * Entry, exit and placement for the block list, whose rows do come and go when
+ * the graph changes function. A fast fade over a base-length move, the same
+ * spec the other list panels use. Durations run through [motionMs], so with
+ * animation switched off system-wide the rows cut instead of easing.
+ */
+@Composable
+private fun LazyItemScope.rowMotion(): Modifier {
+    val fade = motionMs(Motion.fast)
+    val move = motionMs()
+    // A bare Modifier under reduce-motion, not a zero-length tween: no
+    // animation node per row, nothing to tick and nothing to cancel.
+    return if (fade == 0) Modifier
+    else Modifier.animateItem(
+        fadeInSpec = tween(fade),
+        placementSpec = tween(move),
+        fadeOutSpec = tween(fade)
+    )
+}
+
+/**
+ * One graph toolbar button. Press feedback is [pressScale] and nothing else:
+ * the tint already says whether a mode is on, so the press must not fight it
+ * for the same channel.
+ */
+@Composable
+private fun ToolIcon(
+    icon: ImageVector,
+    description: String,
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        interactionSource = interaction,
+        modifier = Modifier.pressScale(pressed)
+    ) {
+        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(18.dp))
     }
 }
 

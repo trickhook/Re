@@ -4,12 +4,29 @@ import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.using
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -32,7 +49,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -56,6 +75,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FolderOpen
@@ -100,7 +120,6 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRowDefaults
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
@@ -151,6 +170,16 @@ import kotlinx.coroutines.launch
  */
 private val CardShape = RoundedCornerShape(14.dp)
 private val ControlShape = RoundedCornerShape(10.dp)
+
+/**
+ * The group chips are a fixed height rather than a minimum, because the rail
+ * draws them in three layers — static track, sliding pill, labels — and the
+ * three only line up if every chip is exactly the same box.
+ */
+private val RailChipHeight = 28.dp
+
+/** How far back the panel host's own copy of the history goes. */
+private const val NAV_TRACE_LIMIT = 64
 
 @Composable
 fun StudioApp(vm: StudioViewModel) {
@@ -220,8 +249,16 @@ fun StudioApp(vm: StudioViewModel) {
     // drawer if it is open and otherwise walks the ViewModel's navigation
     // history; when there is nothing left to pop the handler disables itself and
     // the system gets the press back, so Back still leaves the app at the root.
+    //
+    // popFlag is how the panel host learns that the move it is about to animate
+    // was a RETURN and not a jump. It is a one-cell array rather than a
+    // MutableState on purpose: the host consumes it from inside a `remember`
+    // calculation, and a snapshot write there would either be rejected or start
+    // a recomposition loop. See PanelHost.
+    val popFlag = remember { booleanArrayOf(false) }
+    val goBack: () -> Unit = { if (vm.back()) popFlag[0] = true }
     BackHandler(enabled = drawer.isOpen || vm.canGoBack) {
-        if (drawer.isOpen) scope.launch { drawer.close() } else vm.back()
+        if (drawer.isOpen) scope.launch { drawer.close() } else goBack()
     }
 
     // ---- keyboard shortcut handler ----
@@ -302,7 +339,7 @@ fun StudioApp(vm: StudioViewModel) {
                         .background(ide.panel)
                         .statusBarsPadding()
                         .heightIn(min = 52.dp)
-                        .padding(horizontal = 2.dp),
+                        .padding(horizontal = Space.xs),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { scope.launch { drawer.open() } }) {
@@ -310,14 +347,14 @@ fun StudioApp(vm: StudioViewModel) {
                     }
                     // Accent when there is somewhere to go, which is the file's
                     // own rule: the accent means state, not decoration.
-                    IconButton(onClick = { vm.back() }, enabled = vm.canGoBack) {
+                    IconButton(onClick = goBack, enabled = vm.canGoBack) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
                             tint = if (vm.canGoBack) ide.accent else ide.dim2
                         )
                     }
-                    Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                    Column(Modifier.weight(1f).padding(horizontal = Space.s)) {
                         Text(
                             "Nocturne",
                             color = ide.text,
@@ -460,12 +497,18 @@ fun StudioApp(vm: StudioViewModel) {
                 // A 2dp line under the header for everything the engine is doing:
                 // opening, analyzing, exporting, building a call graph, running a
                 // plugin. The phase text sits in the header subtitle above it.
-                if (vm.globalPhase.isNotEmpty()) {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
-                        color = ide.accent,
-                        trackColor = ide.accent.copy(alpha = 0.20f)
-                    )
+                //
+                // animateContentSize, because this bar appears and disappears
+                // several times during a single open and each edge used to shove
+                // the whole app down and back up by 2dp.
+                Box(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+                    if (vm.globalPhase.isNotEmpty()) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(2.dp),
+                            color = ide.accent,
+                            trackColor = ide.accent.copy(alpha = 0.20f)
+                        )
+                    }
                 }
 
                 if (vm.meta == null) {
@@ -482,22 +525,7 @@ fun StudioApp(vm: StudioViewModel) {
                     // never said which of the four you were standing in.
                     GroupRail(vm, onPick = { g -> vm.navigateTo(landingFor(g)) })
                     TabStrip(vm)
-                    Box(Modifier.weight(1f).imePadding()) {
-                        when (vm.tab) {
-                            Tab.ASSEMBLY -> AssemblyPanel(vm)
-                            Tab.PSEUDO -> DecompilePanel(vm)
-                            Tab.GRAPH -> GraphPanel(vm)
-                            Tab.CALLGRAPH -> CallGraphPanel(vm)
-                            Tab.FUNCTIONS -> FunctionsPanel(vm)
-                            Tab.STRINGS -> StringsPanel(vm)
-                            Tab.HEX -> HexPanel(vm)
-                            Tab.MAP -> MapPanel(vm)
-                            Tab.APK -> ApkPanel(vm)
-                            Tab.DEBUGGER -> DebuggerPanel(vm)
-                            Tab.PLUGINS -> PluginsPanel(vm)
-                            Tab.CONSOLE -> ConsolePanel(vm)
-                        }
-                    }
+                    PanelHost(vm, popFlag, Modifier.weight(1f).imePadding())
                 }
             }
 
@@ -509,7 +537,7 @@ fun StudioApp(vm: StudioViewModel) {
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .imePadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .padding(horizontal = Space.l, vertical = Space.m)
             ) { data ->
                 val tint = levelColor(toastLevel, ide)
                 val label = data.visuals.actionLabel
@@ -573,11 +601,119 @@ private fun ToastBody(message: String, tint: Color) {
     val ide = LocalIde.current
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(6.dp).background(tint, CircleShape))
-        Spacer(Modifier.width(9.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             message, color = ide.text, fontSize = Type.label,
             lineHeight = 17.sp, maxLines = 3
         )
+    }
+}
+
+// ------------------------------------------------------------- panel host --
+/**
+ * The twelve destinations, and — the point of this composable — the movement
+ * between them. A `when` inside a `Box` cut from one panel to the next with
+ * nothing in between, so every jump looked the same as every other: you could
+ * not tell a bookmark jump from a Back press from a tab tap.
+ *
+ * Direction is derived from the navigation, not guessed from the two tab values
+ * AnimatedContent can see. The same pair means opposite things depending on how
+ * you arrived: tapping Graph while standing on Pseudo-C is a move to the right
+ * along the strip, while the identical pair produced by Back is a return and has
+ * to travel the other way. So:
+ *
+ *  - within a group, the slide follows the tab's index in that group;
+ *  - across groups there is no shared axis, so a jump is a fade with a 0.98→1
+ *    scale — but a RETURN across groups still slides in from the left, because a
+ *    fade there would make Back look exactly like the jump that got you here,
+ *    which is precisely what makes the history hard to follow today;
+ *  - with animation turned off in system settings, motionMs() is 0 and every
+ *    branch collapses to a clean cut. Not a fast slide: no slide.
+ *
+ * [navTrace] mirrors the ViewModel's own NavEntry stack — the last element is
+ * where we are, the ones before it are where we came from — so a move that lands
+ * on the entry underneath the top is a pop. That catches the command palette's
+ * Back command, which lives in a file this one does not own. [popFlag] is the
+ * same answer arriving straight from this screen's own Back affordances, where
+ * it is exact rather than inferred, and it also repairs the trace when something
+ * outside `navigateTo` moved the selection.
+ */
+@Composable
+private fun PanelHost(vm: StudioViewModel, popFlag: BooleanArray, modifier: Modifier = Modifier) {
+    val navTrace = remember { mutableListOf(vm.tab to vm.selectedFunc) }
+
+    // remember(key), not a LaunchedEffect: this has to be settled DURING the
+    // composition that hands AnimatedContent its new target, and the calculation
+    // runs exactly once per move. Nothing here touches snapshot state.
+    val goingBack = remember(vm.tab, vm.selectedFunc) {
+        val here = vm.tab to vm.selectedFunc
+        val under = if (navTrace.size >= 2) navTrace[navTrace.size - 2] else null
+        val pop = (popFlag[0] && under != null) || under == here
+        popFlag[0] = false
+        if (pop) {
+            navTrace.removeAt(navTrace.size - 1)
+            navTrace[navTrace.size - 1] = here
+        } else if (navTrace.last() != here) {
+            if (navTrace.size >= NAV_TRACE_LIMIT) navTrace.removeAt(0)
+            navTrace.add(here)
+        }
+        pop
+    }
+
+    // Read outside the lambda: transitionSpec is not a @Composable scope, so
+    // motionMs() cannot be called from inside it.
+    val ms = motionMs()
+
+    AnimatedContent(
+        targetState = vm.tab,
+        modifier = modifier.fillMaxSize(),
+        label = "panel",
+        transitionSpec = {
+            val sizing = SizeTransform(clip = false) { _, _ -> tween(ms) }
+            val sameGroup = initialState.group == targetState.group
+            // False across groups, so a return from another group comes back
+            // from the left rather than from wherever the ordinals happen to sit.
+            val rightwards = sameGroup &&
+                Tab.of(targetState.group).indexOf(targetState) >
+                Tab.of(initialState.group).indexOf(initialState)
+            when {
+                ms == 0 ->
+                    (fadeIn(tween(0)) togetherWith fadeOut(tween(0))).using(sizing)
+
+                !goingBack && !sameGroup ->
+                    (fadeIn(tween(ms)) + scaleIn(tween(ms), initialScale = 0.98f))
+                        .togetherWith(fadeOut(tween(ms)))
+                        .using(sizing)
+
+                else -> {
+                    val dir = if (rightwards) 1 else -1
+                    // The outgoing panel gives way by a sixth of its width; a
+                    // full counter-slide reads as two screens fighting, and this
+                    // is a reading surface.
+                    (slideInHorizontally(tween(ms)) { w -> w * dir } + fadeIn(tween(ms)))
+                        .togetherWith(
+                            slideOutHorizontally(tween(ms)) { w -> -w * dir / 6 } +
+                                fadeOut(tween(ms))
+                        )
+                        .using(sizing)
+                }
+            }
+        }
+    ) { t ->
+        when (t) {
+            Tab.ASSEMBLY -> AssemblyPanel(vm)
+            Tab.PSEUDO -> DecompilePanel(vm)
+            Tab.GRAPH -> GraphPanel(vm)
+            Tab.CALLGRAPH -> CallGraphPanel(vm)
+            Tab.FUNCTIONS -> FunctionsPanel(vm)
+            Tab.STRINGS -> StringsPanel(vm)
+            Tab.HEX -> HexPanel(vm)
+            Tab.MAP -> MapPanel(vm)
+            Tab.APK -> ApkPanel(vm)
+            Tab.DEBUGGER -> DebuggerPanel(vm)
+            Tab.PLUGINS -> PluginsPanel(vm)
+            Tab.CONSOLE -> ConsolePanel(vm)
+        }
     }
 }
 
@@ -590,37 +726,72 @@ private fun ToastBody(message: String, tint: Color) {
 @Composable
 private fun GroupRail(vm: StudioViewModel, onPick: (TabGroup) -> Unit) {
     val ide = LocalIde.current
-    Row(
+    val groups = TabGroup.entries
+    val selected = groups.indexOf(vm.tab.group).coerceAtLeast(0)
+    val gap = Space.m
+    val ms = motionMs()
+
+    // Three layers, so that the only thing that moves is the selection itself:
+    // the four outlines are a fixed track, the pill slides between them and the
+    // labels sit on top. The chips used to swap fill and border colour outright,
+    // which at 12 taps a minute reads as flicker rather than as a control.
+    BoxWithConstraints(
         Modifier
             .fillMaxWidth()
             .background(ide.panel)
-            .selectableGroup()
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = Space.m, vertical = Space.xs)
     ) {
-        TabGroup.entries.forEach { g ->
-            val on = vm.tab.group == g
-            Box(
-                Modifier
-                    .weight(1f)
-                    .heightIn(min = 28.dp)
-                    .clip(ControlShape)
-                    .background(if (on) ide.accent.copy(alpha = 0.14f) else Color.Transparent)
-                    // borderStrong, not border: this outline is the only edge the
-                    // chip has and it is something you press.
-                    .border(1.dp, if (on) ide.accent else ide.borderStrong, ControlShape)
-                    .selectable(selected = on, role = Role.Tab, onClick = { onPick(g) }),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    g.title.uppercase(),
-                    color = if (on) ide.accent else ide.dim,
-                    fontSize = Type.caption,
-                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
-                    letterSpacing = 0.8.sp,
-                    maxLines = 1
+        val chipW = ((maxWidth - gap * (groups.size - 1)) / groups.size).coerceAtLeast(0.dp)
+        val pillX by animateDpAsState((chipW + gap) * selected, tween(ms), label = "railOffset")
+        val pillW by animateDpAsState(chipW, tween(ms), label = "railWidth")
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
+            groups.forEach { _ ->
+                // borderStrong, not border: this outline is the only edge the
+                // chip has and it is something you press.
+                Box(
+                    Modifier
+                        .width(chipW)
+                        .height(RailChipHeight)
+                        .border(1.dp, ide.borderStrong, ControlShape)
                 )
+            }
+        }
+        Box(
+            Modifier
+                .offset(x = pillX)
+                .width(pillW)
+                .height(RailChipHeight)
+                .clip(ControlShape)
+                .background(ide.accent.copy(alpha = 0.14f))
+                .border(1.dp, ide.accent, ControlShape)
+        )
+        Row(
+            Modifier.fillMaxWidth().selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(gap)
+        ) {
+            groups.forEach { g ->
+                val on = vm.tab.group == g
+                val labelColor by animateColorAsState(
+                    if (on) ide.accent else ide.dim, tween(ms), label = "railLabel"
+                )
+                Box(
+                    Modifier
+                        .width(chipW)
+                        .height(RailChipHeight)
+                        .clip(ControlShape)
+                        .selectable(selected = on, role = Role.Tab, onClick = { onPick(g) }),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        g.title.uppercase(),
+                        color = labelColor,
+                        fontSize = Type.caption,
+                        fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                        letterSpacing = 0.8.sp,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }
@@ -638,17 +809,30 @@ private fun TabStrip(vm: StudioViewModel) {
     val index = groupTabs.indexOf(vm.tab).coerceAtLeast(0)
     ScrollableTabRow(
         selectedTabIndex = index,
-        edgePadding = 12.dp,
+        edgePadding = Space.l,
         containerColor = ide.bg,
         contentColor = ide.text,
         divider = { HorizontalDivider(color = ide.border) },
+        // Hand-rolled rather than TabRowDefaults.tabIndicatorOffset: that helper
+        // does animate (it was not lost in the rewrite onto the low-level Tab
+        // overload), but it hardcodes 250ms and knows nothing about the user's
+        // animation setting, so under reduce-motion it would be the one thing on
+        // screen still sliding. Same two animations, gated on motionMs().
         indicator = { positions ->
             if (index in positions.indices) {
-                TabRowDefaults.SecondaryIndicator(
-                    Modifier.tabIndicatorOffset(positions[index]),
-                    height = 2.dp,
-                    color = ide.accent
-                )
+                val pos = positions[index]
+                val ms = motionMs()
+                val indicatorX by animateDpAsState(pos.left, tween(ms), label = "tabOffset")
+                val indicatorW by animateDpAsState(pos.width, tween(ms), label = "tabWidth")
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .wrapContentSize(Alignment.BottomStart)
+                        .offset(x = indicatorX)
+                        .width(indicatorW)
+                ) {
+                    TabRowDefaults.SecondaryIndicator(height = 2.dp, color = ide.accent)
+                }
             }
         }
     ) {
@@ -667,7 +851,7 @@ private fun TabStrip(vm: StudioViewModel) {
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     color = if (selected) ide.text else ide.dim,
                     maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    modifier = Modifier.padding(horizontal = Space.l, vertical = Space.m)
                 )
             }
         }
@@ -710,10 +894,10 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                 .verticalScroll(rememberScrollState())
         ) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                Modifier.fillMaxWidth().padding(horizontal = Space.xl),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(Space.xxl))
                 Image(
                     painter = painterResource(R.drawable.nocturne_mark),
                     contentDescription = null,
@@ -721,42 +905,51 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                         .size(96.dp)
                         .clip(RoundedCornerShape(26.dp))
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(Space.xl))
                 Text(
                     "Nocturne", color = ide.text, fontSize = Type.display,
                     fontWeight = FontWeight.Light, letterSpacing = (-1.1).sp
                 )
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(Space.s))
                 Text(
                     "Interactive disassembler & decompiler",
                     color = ide.dim, fontSize = Type.label
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(Space.xl))
                 ArchChips()
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(Space.xl))
 
                 // The only filled object on the screen, and the only one that
-                // lifts. A 16dp accent-tinted shadow over an already saturated
-                // accent fill read as bloom rather than elevation.
+                // lifts. The shadow is the platform's neutral one — an
+                // accent-tinted shadow over an already saturated accent fill
+                // read as bloom rather than elevation.
+                val ctaPress = remember { MutableInteractionSource() }
+                val ctaPressed by ctaPress.collectIsPressedAsState()
                 Box(
                     Modifier
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
+                        .pressScale(ctaPressed)
                         .shadow(8.dp, ControlShape, clip = false)
                         .background(ide.accent, ControlShape)
-                        .clickable(enabled = !vm.busy, role = Role.Button) { onOpen() },
+                        .clickable(
+                            interactionSource = ctaPress,
+                            indication = LocalIndication.current,
+                            enabled = !vm.busy,
+                            role = Role.Button
+                        ) { onOpen() },
                     contentAlignment = Alignment.Center
                 ) {
                     if (vm.busy) {
                         Row(
-                            Modifier.padding(vertical = 12.dp),
+                            Modifier.padding(vertical = Space.l),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             CircularProgressIndicator(
                                 color = ide.onAccent,
                                 modifier = Modifier.size(16.dp), strokeWidth = 2.dp
                             )
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(Space.m))
                             Text(
                                 "Analyzing…", color = ide.onAccent,
                                 fontSize = Type.section, fontWeight = FontWeight.SemiBold
@@ -764,14 +957,14 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                         }
                     } else {
                         Row(
-                            Modifier.padding(vertical = 12.dp),
+                            Modifier.padding(vertical = Space.l),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 Icons.Filled.FolderOpen, contentDescription = null,
                                 tint = ide.onAccent, modifier = Modifier.size(18.dp)
                             )
-                            Spacer(Modifier.width(9.dp))
+                            Spacer(Modifier.width(Space.m))
                             Text(
                                 "Open a binary", color = ide.onAccent,
                                 fontSize = Type.section, fontWeight = FontWeight.SemiBold
@@ -780,104 +973,262 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                     }
                 }
 
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(Space.m))
                 Text(
                     "Ctrl+K palette   ·   Ctrl+F search   ·   F1 shortcuts",
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
                 )
+
+                // What the app actually does, for someone who has never opened a
+                // binary in it. It retires itself the moment there is a recent
+                // project: after the first binary this is three lines of advice
+                // nobody needs, standing between you and reopening your work.
+                //
+                // The recents list is read from SQLite one frame after the first
+                // composition, so this block is on screen and then gone; it
+                // shrinks out of the way instead of vanishing between frames.
+                Column(
+                    Modifier.fillMaxWidth().animateContentSize(tween(motionMs())),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (vm.recents.isEmpty()) {
+                        Spacer(Modifier.height(Space.xxl))
+                        ThreeSteps()
+                    }
+                }
+
+                // Analysis failure used to be a console line and a toast that
+                // was gone in four seconds, on a screen that then said nothing
+                // at all — the same blank slate as a cold start. This says which
+                // file, why, and what to do about it.
+                AnalysisFailure(vm, onOpen)
             }
 
             // Recents belong on the first screen, not only behind the drawer —
             // reopening the last binary is the most common way in. One panel
             // block with hairline rules, not four separately framed cards: the
             // group is one object and it should read as one.
-            if (vm.recents.isNotEmpty()) {
-                Spacer(Modifier.height(22.dp))
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Text(
-                        "RECENT", color = ide.dim, fontSize = Type.caption,
-                        fontWeight = FontWeight.Medium, letterSpacing = 1.sp
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "${vm.recents.size}",
-                        color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
-                    )
-                }
-                val shown = vm.recents.take(4)
-                Column(
-                    Modifier
-                        .padding(horizontal = 16.dp)
-                        .fillMaxWidth()
-                        .clip(CardShape)
-                        .background(ide.panel)
-                ) {
-                    shown.forEachIndexed { i, rp ->
-                        if (i > 0) HorizontalDivider(color = ide.border)
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable(role = Role.Button) { vm.openRecent(ctx, rp) }
-                                .heightIn(min = 46.dp)
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                fileIcon(rp.format), contentDescription = null,
-                                tint = ide.dim, modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(11.dp))
-                            Text(
-                                rp.name, color = ide.text, fontSize = Type.mono,
-                                fontFamily = Mono, maxLines = 1,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                rp.format.ifEmpty { "RAW" },
-                                color = ide.dim2, fontSize = Type.monoSmall,
-                                fontFamily = Mono
-                            )
+            //
+            // The list arrives from SQLite a frame after the first composition,
+            // so this whole block used to appear by pushing the console card
+            // down its full height in one go.
+            Column(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+                if (vm.recents.isNotEmpty()) {
+                    Spacer(Modifier.height(Space.xxl))
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .padding(start = Space.xl, end = Space.xl, bottom = Space.m),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Text(
+                            "RECENT", color = ide.dim, fontSize = Type.caption,
+                            fontWeight = FontWeight.Medium, letterSpacing = 1.sp
+                        )
+                        Spacer(Modifier.width(Space.m))
+                        Text(
+                            "${vm.recents.size}",
+                            color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
+                        )
+                    }
+                    val shown = vm.recents.take(4)
+                    Column(
+                        Modifier
+                            .padding(horizontal = Space.xl)
+                            .fillMaxWidth()
+                            // surface1 clips to the shape itself, so the row ripples
+                            // stay inside the card without a second clip.
+                            .surface1(CardShape)
+                            .animateContentSize(tween(motionMs()))
+                    ) {
+                        shown.forEachIndexed { i, rp ->
+                            if (i > 0) HorizontalDivider(color = ide.border)
+                            val press = remember { MutableInteractionSource() }
+                            val pressed by press.collectIsPressedAsState()
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .pressScale(pressed)
+                                    .clickable(
+                                        interactionSource = press,
+                                        indication = LocalIndication.current,
+                                        role = Role.Button
+                                    ) { vm.openRecent(ctx, rp) }
+                                    .heightIn(min = 46.dp)
+                                    .padding(horizontal = Space.l, vertical = Space.m),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    fileIcon(rp.format), contentDescription = null,
+                                    tint = ide.dim, modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(Space.l))
+                                Text(
+                                    rp.name, color = ide.text, fontSize = Type.mono,
+                                    fontFamily = Mono, maxLines = 1,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    rp.format.ifEmpty { "RAW" },
+                                    color = ide.dim2, fontSize = Type.monoSmall,
+                                    fontFamily = Mono
+                                )
+                            }
+                        }
+                        if (vm.recents.size > shown.size) {
+                            HorizontalDivider(color = ide.border)
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(role = Role.Button) { onMoreRecents() }
+                                    .heightIn(min = 40.dp)
+                                    .padding(horizontal = Space.l),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Filled.MoreHoriz, contentDescription = null,
+                                    tint = ide.dim2, modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(Space.l))
+                                Text(
+                                    "${vm.recents.size - shown.size} more in the project drawer",
+                                    color = ide.dim2, fontSize = Type.caption
+                                )
+                            }
                         }
                     }
-                    if (vm.recents.size > shown.size) {
-                        HorizontalDivider(color = ide.border)
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable(role = Role.Button) { onMoreRecents() }
-                                .heightIn(min = 40.dp)
-                                .padding(horizontal = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Filled.MoreHoriz, contentDescription = null,
-                                tint = ide.dim2, modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(11.dp))
-                            Text(
-                                "${vm.recents.size - shown.size} more in the project drawer",
-                                color = ide.dim2, fontSize = Type.caption
-                            )
-                        }
-                    }
+                } else {
+                    Spacer(Modifier.height(Space.xxl))
+                    Text(
+                        ".so    .dex    .exe    .apk",
+                        color = ide.dim2, fontSize = Type.label, fontFamily = Mono,
+                        modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
+                    )
                 }
-            } else {
-                Spacer(Modifier.height(22.dp))
-                Text(
-                    ".so    .dex    .exe    .apk",
-                    color = ide.dim2, fontSize = Type.label, fontFamily = Mono,
-                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
-                )
             }
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(Space.xl))
             ConsoleCard(vm)
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(Space.xl))
             // Real inset instead of a guessed 40dp spacer.
             NavBarSpacer()
+        }
+    }
+}
+
+/**
+ * What this app does, in three lines, for someone looking at it for the first
+ * time. The home screen used to name the formats it accepts and nothing else:
+ * you could not tell from it that there is a decompiler behind the button, or
+ * that anything can come back out.
+ *
+ * Shown only while there are no recent projects, so it costs a returning user
+ * nothing.
+ */
+@Composable
+private fun ThreeSteps() {
+    val ide = LocalIde.current
+    val steps = listOf(
+        Triple(Icons.Filled.FolderOpen, "OPEN", ".so · .dex · .exe · a whole .apk"),
+        Triple(Icons.Filled.Functions, "ANALYSE", "functions · strings · xrefs · call graph · pseudo-C"),
+        Triple(Icons.Filled.FileDownload, "EXPORT", "C source, headers and listings, back out to a file")
+    )
+    Column(Modifier.fillMaxWidth().surface1(CardShape).padding(vertical = Space.m)) {
+        steps.forEachIndexed { i, (icon, title, sub) ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 34.dp)
+                    .padding(horizontal = Space.l, vertical = Space.s),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "${i + 1}", color = ide.dim2, fontSize = Type.monoSmall,
+                    fontFamily = Mono
+                )
+                Spacer(Modifier.width(Space.m))
+                RowIcon(icon, ide.dim, 14.dp)
+                Text(
+                    title, color = ide.text, fontSize = Type.caption,
+                    fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp
+                )
+                Spacer(Modifier.width(Space.m))
+                Text(
+                    sub, color = ide.dim2, fontSize = Type.caption,
+                    maxLines = 2, modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A failed analysis, as a state rather than as a line of console output and a
+ * toast that is gone in four seconds. The screen behind it is the same blank
+ * slate as a cold start, so without this the app simply looks as though nothing
+ * happened when you picked a file.
+ *
+ * Derived, not a new ViewModel field: an open that has finished, left no
+ * metadata behind and put an ERROR on the console is a failed analysis, and that
+ * ERROR is the engine's own reason. [attempted] is what keeps a start-up warning
+ * from being read as one — nothing counts until an open has actually run.
+ */
+@Composable
+private fun AnalysisFailure(vm: StudioViewModel, onOpen: () -> Unit) {
+    val ide = LocalIde.current
+    var attempted by rememberSaveable { mutableStateOf(false) }
+    // Cleared at the start of every open, not just when the text differs: two
+    // files can fail for the same reason, and dismissing the first must not
+    // silently swallow the second.
+    var dismissed by rememberSaveable { mutableStateOf("") }
+    LaunchedEffect(vm.busy) {
+        if (vm.busy) { attempted = true; dismissed = "" }
+    }
+
+    val reason = if (attempted && !vm.busy && vm.meta == null)
+        vm.console.lastOrNull { it.level == "ERROR" }?.msg.orEmpty() else ""
+
+    // The card grows in and out of the layout instead of shoving the recents
+    // list down by its full height in one frame.
+    Column(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+        if (reason.isNotEmpty() && reason != dismissed) {
+            Spacer(Modifier.height(Space.xl))
+            Column(Modifier.fillMaxWidth().surface1(CardShape).padding(Space.l)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RowIcon(Icons.Filled.ErrorOutline, ide.red, 16.dp)
+                    Text(
+                        "ANALYSIS FAILED", color = ide.text, fontSize = Type.caption,
+                        fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    val name = vm.currentPath
+                        ?.substringAfterLast('/')
+                        ?.removePrefix("current_")
+                        ?.removePrefix("apk_")
+                    if (!name.isNullOrEmpty()) {
+                        Text(
+                            name, color = ide.dim2, fontSize = Type.monoSmall,
+                            fontFamily = Mono, maxLines = 1
+                        )
+                    }
+                }
+                Spacer(Modifier.height(Space.m))
+                Text(reason, color = ide.dim, fontSize = Type.label, lineHeight = 17.sp)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { dismissed = reason }) {
+                        Text("Dismiss", color = ide.dim, fontSize = Type.label)
+                    }
+                    TextButton(onClick = onOpen) {
+                        Text(
+                            "Open another binary", color = ide.accent,
+                            fontSize = Type.label, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -894,8 +1245,8 @@ private fun ArchChips() {
         "SPARC" to ide.dim, "SystemZ" to ide.dim, "m68k" to ide.dim
     )
     FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(Space.s, Alignment.CenterHorizontally),
+        verticalArrangement = Arrangement.spacedBy(Space.s)
     ) {
         chips.forEach { (label, tint) ->
             Text(
@@ -904,7 +1255,7 @@ private fun ArchChips() {
                 modifier = Modifier
                     // The pill has no fill, so this hairline is its only edge.
                     .border(1.dp, ide.borderStrong, RoundedCornerShape(999.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .padding(horizontal = Space.m, vertical = Space.s)
             )
         }
     }
@@ -915,17 +1266,20 @@ private fun ConsoleCard(vm: StudioViewModel) {
     val ide = LocalIde.current
     Column(
         Modifier
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = Space.xl)
             .fillMaxWidth()
-            .border(1.dp, ide.borderStrong, CardShape)
-            .background(ide.panel, CardShape)
+            // The depth scale, not a hand-rolled fill and outline: this card sat
+            // on ide.panel with a borderStrong edge while the recents block above
+            // it had no edge at all, which read as two unrelated objects.
+            .surface1(CardShape)
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 11.dp, bottom = 9.dp),
+            Modifier.fillMaxWidth()
+                .padding(start = Space.l, end = Space.l, top = Space.l, bottom = Space.m),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(Modifier.size(6.dp).background(ide.amber, CircleShape))
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Space.m))
             Text(
                 "CONSOLE", color = ide.dim, fontSize = Type.caption,
                 fontWeight = FontWeight.Medium, letterSpacing = 1.sp,
@@ -936,7 +1290,13 @@ private fun ConsoleCard(vm: StudioViewModel) {
                 color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono
             )
         }
-        Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 13.dp)) {
+        // The body is one line at a cold start and two after the first log, so
+        // it grew by a line-height in a single frame every time.
+        Column(
+            Modifier
+                .padding(start = Space.l, end = Space.l, bottom = Space.l)
+                .animateContentSize(tween(motionMs()))
+        ) {
             vm.console.takeLast(2).forEach { line ->
                 Row {
                     Text(
@@ -966,26 +1326,26 @@ private fun ProjectDrawer(
     val ctx = LocalContext.current
     LazyColumn(
         Modifier.fillMaxSize().background(ide.panel),
-        contentPadding = bottomInset(12.dp)
+        contentPadding = bottomInset(Space.l)
     ) {
         // The drawer is full-bleed under edge-to-edge, so the header would
         // otherwise start behind the clock.
         item { Spacer(Modifier.statusBarsPadding()) }
         item {
-            Column(Modifier.fillMaxWidth().background(ide.panel2).padding(12.dp)) {
+            Column(Modifier.fillMaxWidth().background(ide.panel2).padding(Space.l)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         meta?.let { fileIcon(it.format) } ?: Icons.Filled.FolderOpen,
                         contentDescription = null, tint = ide.accent,
                         modifier = Modifier.size(24.dp)
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Space.m))
                     Text(
                         meta?.name ?: "No file", color = ide.text, fontSize = Type.section,
                         fontWeight = FontWeight.Bold, maxLines = 1
                     )
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(Space.s))
                 KeyValue("Format", "${meta?.format ?: "-"} · ${meta?.arch ?: "-"}")
                 KeyValue(
                     "Entry / Base",
@@ -1026,7 +1386,7 @@ private fun ProjectDrawer(
                             vm.navigateTo(t); onClose()
                         }
                         .heightIn(min = 40.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(tabIcon(t), if (active) ide.accent else ide.dim, 16.dp)
@@ -1038,12 +1398,14 @@ private fun ProjectDrawer(
                         modifier = Modifier.weight(1f)
                     )
                     if (active) {
-                        Box(Modifier.size(5.dp).background(ide.accent, CircleShape))
+                        // 6dp, like the console dot and the toast dot: the same
+                        // mark at three sizes reads as three different marks.
+                        Box(Modifier.size(6.dp).background(ide.accent, CircleShape))
                     }
                 }
             }
         }
-        item { Spacer(Modifier.height(6.dp)); HorizontalDivider(color = ide.border) }
+        item { Spacer(Modifier.height(Space.s)); HorizontalDivider(color = ide.border) }
 
         // Every list below is capped so the drawer stays scrollable. The counts
         // in the headers used to be the true totals while the list silently
@@ -1059,7 +1421,7 @@ private fun ProjectDrawer(
                         .fillMaxWidth()
                         .clickable(role = Role.Button) { vm.openRecent(ctx, rp); onClose() }
                         .heightIn(min = 36.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(fileIcon(rp.format), ide.dim, 13.dp)
@@ -1089,7 +1451,7 @@ private fun ProjectDrawer(
                             onClose()
                         }
                         .heightIn(min = 36.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(Icons.Filled.Star, ide.amber, 13.dp)
@@ -1117,7 +1479,7 @@ private fun ProjectDrawer(
                         .fillMaxWidth()
                         .clickable(role = Role.Button) { vm.openApkEntry(e); onClose() }
                         .heightIn(min = 36.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(
@@ -1154,7 +1516,7 @@ private fun ProjectDrawer(
                             onClose()
                         }
                         .heightIn(min = 36.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val isRenamed = vm.renames.containsKey("0x%08X".format(f.addr))
@@ -1195,7 +1557,7 @@ private fun ProjectDrawer(
                     Modifier
                         .fillMaxWidth()
                         .heightIn(min = 30.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(Icons.Filled.ArrowDownward, ide.dim, 13.dp)
@@ -1229,7 +1591,7 @@ private fun ProjectDrawer(
                         .fillMaxWidth()
                         .clickable(role = Role.Button) { vm.navigateTo(Tab.MAP); onClose() }
                         .heightIn(min = 30.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RowIcon(
@@ -1254,11 +1616,11 @@ private fun ProjectDrawer(
             item { SectionTitle("Sections (0)") }
         }
         item {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(Space.l))
             Text(
                 "Ctrl+K — command palette · Ctrl+F — search · Ctrl+B — annotations",
                 color = ide.dim, fontSize = Type.caption, fontFamily = Mono,
-                modifier = Modifier.padding(12.dp)
+                modifier = Modifier.padding(Space.l)
             )
         }
     }
@@ -1276,7 +1638,7 @@ private fun DrawerAction(icon: ImageVector, label: String, hint: String, onClick
             .fillMaxWidth()
             .clickable(role = Role.Button, onClick = onClick)
             .heightIn(min = 44.dp)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = Space.l),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(icon, ide.dim, 16.dp)
@@ -1299,7 +1661,7 @@ private fun MoreRow(text: String, onClick: (() -> Unit)? = null) {
                 else Modifier
             )
             .heightIn(min = 34.dp)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = Space.l),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(Icons.Filled.MoreHoriz, ide.dim2, 13.dp)
@@ -1314,11 +1676,26 @@ private fun MoreRow(text: String, onClick: (() -> Unit)? = null) {
 /**
  * Jump to a "0x…" address string: select the function that contains it and ask
  * whichever panel lands next to reveal the exact line.
+ *
+ * Resolve BEFORE asking. A bookmark a plugin dropped on a data address has no
+ * containing function, and the old order — request, then navigate to a null
+ * function — switched the tab, left the previous function on screen and parked
+ * the goto request in the ViewModel. Nothing consumed it there; the next panel
+ * to compose did, so the Hex view scrolled somewhere nobody asked for, or the
+ * Graph tab raised "no block contains …" minutes later, about an address the
+ * user had long since forgotten typing.
  */
 private fun jumpToAddress(vm: StudioViewModel, addr: String) {
-    val a = addr.removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: return
+    val a = parseAddr(addr) ?: return
+    val owner = vm.functionContaining(a)
+    if (owner == null) {
+        // log(), not notify(): this earns a console line as well, and log()
+        // already raises the toast for WARN and ERROR by itself.
+        vm.log("WARN", "$addr is not inside any analysed function — data, or outside the code sections")
+        return
+    }
     vm.requestGoto(a)
-    vm.navigateTo(Tab.ASSEMBLY, vm.functionContaining(a)?.addr)
+    vm.navigateTo(Tab.ASSEMBLY, owner.addr)
 }
 
 // --------------------------------------------------- bookmarks / notes sheet --
@@ -1338,7 +1715,9 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
     var section by rememberSaveable { mutableStateOf(0) }
     var draft by rememberSaveable { mutableStateOf("") }
     val comments = vm.comments.entries.sortedBy { it.key }
-    val notes = vm.notes(ctx)
+    // notes() is a pure state read now — the SQLite open moved into
+    // syncProjectAnnotations(), off the composition thread.
+    val notes = vm.notes()
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1355,7 +1734,7 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                         .fillMaxWidth()
                         .background(ide.panel2)
                         .heightIn(min = 48.dp)
-                        .padding(start = 14.dp, end = 4.dp),
+                        .padding(start = Space.l, end = Space.s),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -1372,8 +1751,8 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                         .fillMaxWidth()
                         .background(ide.panel2)
                         .selectableGroup()
-                        .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(start = Space.m, end = Space.m, bottom = Space.m),
+                    horizontalArrangement = Arrangement.spacedBy(Space.m)
                 ) {
                     val tabs = listOf(
                         "BOOKMARKS" to vm.bookmarks.size,
@@ -1413,9 +1792,15 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                             )
                         } else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset()) {
-                                items(vm.bookmarks.size) { i ->
+                                // Keyed, because this is the one screen in the
+                                // app where rows are deleted while you watch:
+                                // without a key the list re-uses slots and the
+                                // row below simply takes over the one you
+                                // removed, with no sign that anything left.
+                                items(vm.bookmarks.size, key = { vm.bookmarks[it].id }) { i ->
                                     val b = vm.bookmarks[i]
                                     AnnotationRow(
+                                        modifier = itemMotion(),
                                         icon = Icons.Filled.Star,
                                         tint = ide.amber,
                                         title = b.label,
@@ -1434,11 +1819,12 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                             )
                         } else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset()) {
-                                items(comments.size) { i ->
+                                items(comments.size, key = { comments[it].key }) { i ->
                                     val e = comments[i]
-                                    val a = e.key.removePrefix("0x").removePrefix("0X").toLongOrNull(16)
+                                    val a = parseAddr(e.key)
                                     val owner = a?.let { vm.functionContaining(it) }
                                     AnnotationRow(
+                                        modifier = itemMotion(),
                                         icon = Icons.Filled.Comment,
                                         tint = ide.cyan,
                                         title = e.value,
@@ -1458,9 +1844,10 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                             )
                         } else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset()) {
-                                items(notes.size) { i ->
+                                items(notes.size, key = { notes[it].id }) { i ->
                                     val n = notes[i]
                                     AnnotationRow(
+                                        modifier = itemMotion(),
                                         icon = Icons.Filled.Notes,
                                         tint = ide.violet,
                                         title = n.title,
@@ -1475,34 +1862,39 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                     }
                 }
 
-                if (section == 2) {
-                    HorizontalDivider(color = ide.border)
-                    Row(
-                        Modifier.fillMaxWidth().background(ide.panel2).padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = draft,
-                            onValueChange = { draft = it },
-                            placeholder = {
-                                Text(
-                                    "New note — first line is the title",
-                                    color = ide.dim2, fontSize = Type.label
-                                )
-                            },
-                            modifier = Modifier.weight(1f),
-                            textStyle = TextStyle(fontSize = Type.label, color = ide.text),
-                            maxLines = 3
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(
-                            onClick = { vm.addNote(ctx, draft); draft = "" },
-                            enabled = draft.isNotBlank()
+                // The composer belongs to the notes section only, so it arrives
+                // and leaves as you move between the three: animateContentSize
+                // so the list above it is not shoved by 72dp in one frame.
+                Column(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+                    if (section == 2) {
+                        HorizontalDivider(color = ide.border)
+                        Row(
+                            Modifier.fillMaxWidth().background(ide.panel2).padding(Space.m),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                Icons.Filled.Add, contentDescription = "Add note",
-                                tint = if (draft.isNotBlank()) ide.accent else ide.dim2
+                            OutlinedTextField(
+                                value = draft,
+                                onValueChange = { draft = it },
+                                placeholder = {
+                                    Text(
+                                        "New note — first line is the title",
+                                        color = ide.dim2, fontSize = Type.label
+                                    )
+                                },
+                                modifier = Modifier.weight(1f),
+                                textStyle = TextStyle(fontSize = Type.label, color = ide.text),
+                                maxLines = 3
                             )
+                            Spacer(Modifier.width(Space.m))
+                            IconButton(
+                                onClick = { vm.addNote(ctx, draft); draft = "" },
+                                enabled = draft.isNotBlank()
+                            ) {
+                                Icon(
+                                    Icons.Filled.Add, contentDescription = "Add note",
+                                    tint = if (draft.isNotBlank()) ide.accent else ide.dim2
+                                )
+                            }
                         }
                     }
                 }
@@ -1511,8 +1903,18 @@ private fun AnnotationsSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
     }
 }
 
+/**
+ * `Modifier.animateItem()`, or nothing at all when the user has turned animation
+ * off in system settings — `animateItem` takes specs, not a duration, so this is
+ * the one place that branches on [motionMs] instead of feeding it a spec.
+ */
+@Composable
+private fun LazyItemScope.itemMotion(): Modifier =
+    if (motionMs() == 0) Modifier else Modifier.animateItem()
+
 @Composable
 private fun AnnotationRow(
+    modifier: Modifier = Modifier,
     icon: ImageVector,
     tint: Color,
     title: String,
@@ -1522,30 +1924,34 @@ private fun AnnotationRow(
     deleteLabel: String
 ) {
     val ide = LocalIde.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .then(
-                if (onOpen != null) Modifier.clickable(role = Role.Button, onClick = onOpen)
-                else Modifier
-            )
-            .heightIn(min = 48.dp)
-            .padding(start = 12.dp, end = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RowIcon(icon, tint, 15.dp)
-        Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
-            Text(title, color = ide.text, fontSize = Type.label, maxLines = 2)
-            Text(sub, color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
+    // The row and its rule are one item, so the animation has to wrap both:
+    // animating the row alone would slide it out from under its own divider.
+    Column(modifier) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .then(
+                    if (onOpen != null) Modifier.clickable(role = Role.Button, onClick = onOpen)
+                    else Modifier
+                )
+                .heightIn(min = 48.dp)
+                .padding(start = Space.l, end = Space.xs),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RowIcon(icon, tint, 15.dp)
+            Column(Modifier.weight(1f).padding(vertical = Space.s)) {
+                Text(title, color = ide.text, fontSize = Type.label, maxLines = 2)
+                Text(sub, color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Filled.Delete, contentDescription = deleteLabel,
+                    tint = ide.dim, modifier = Modifier.size(18.dp)
+                )
+            }
         }
-        IconButton(onClick = onDelete) {
-            Icon(
-                Icons.Filled.Delete, contentDescription = deleteLabel,
-                tint = ide.dim, modifier = Modifier.size(18.dp)
-            )
-        }
+        HorizontalDivider(color = ide.border)
     }
-    HorizontalDivider(color = ide.border)
 }
 
 private fun tabIcon(t: Tab): ImageVector = when (t) {
@@ -1583,7 +1989,7 @@ fun SectionTitle(text: String) {
         letterSpacing = 1.sp,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 18.dp, bottom = 6.dp)
+            .padding(start = Space.l, end = Space.l, top = Space.xl, bottom = Space.s)
     )
 }
 
@@ -1598,7 +2004,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("Reverse-engineering studio for ELF, PE, DEX and APK binaries.", color = ide.text, fontSize = Type.label)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Space.m))
                 KeyValue("Engine", "C++17 NDK · Capstone 4.0.2 + built-in fallback")
                 KeyValue(
                     "Architectures",
@@ -1609,7 +2015,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                 KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
                 KeyValue("Debugger", "ptrace session: spawn/attach, breakpoints, regs, memory, stack, threads")
                 KeyValue("Plugins", "NocturneScript interpreter + bundled sample plugins")
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Space.m))
                 Text(
                     "The debugger needs a rooted or debuggable device; SELinux may still deny ptrace. " +
                         "Pseudo-C is a real IR pipeline, not a full decompiler — no vtable or exception recovery.",

@@ -1,9 +1,15 @@
 package com.trickhook.ui
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,14 +21,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -55,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.semantics.Role
@@ -64,8 +69,6 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.trickhook.model.FunctionDetail
 import com.trickhook.vm.StudioViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -79,6 +82,9 @@ private val Touch = 48.dp
 
 /** Side by side stops helping once a column is narrower than a line of C. */
 private val SplitAt = 700.dp
+
+/** The one control radius in this panel; surfaces bring their own from Common. */
+private val Control = RoundedCornerShape(8.dp)
 
 private fun highlightPseudo(src: String, ide: IdeColors): AnnotatedString = buildAnnotatedString {
     src.lines().forEachIndexed { idx, line ->
@@ -133,74 +139,11 @@ private fun highlightPseudo(src: String, ide: IdeColors): AnnotatedString = buil
 }
 
 /**
- * One row of the cross-reference sheet. `target` null means the row cannot
- * navigate: an import stub, or an address outside every known function.
- * Deliberately the same shape as the Assembly panel's rows, so the two sheets
- * read as one feature rather than two.
+ * Why a backend comparison has nothing to show, or null when it has. Computed
+ * once, beside the rule that decides whether to fetch at all, so the pane can
+ * never name a different reason from the one that stopped the fetch.
  */
-private class PseudoXref(
-    val site: Long,
-    val target: Long?,
-    val label: String,
-    val type: String,
-    val note: String
-)
-
-/**
- * Who references this function, or what it references. The engine's
- * per-function xrefs come first and the whole-binary call-edge index is the
- * fallback when it found none — the same rule the Assembly panel's strip
- * applies, so the two counts agree for the same function.
- */
-private fun pseudoXrefRows(
-    vm: StudioViewModel,
-    d: FunctionDetail,
-    incoming: Boolean
-): List<PseudoXref> = if (incoming) {
-    val xs = d.xrefsIn
-    if (xs.isNotEmpty()) xs.map { x ->
-        val owner = vm.functionContaining(x.from)
-        PseudoXref(
-            site = x.from,
-            target = owner?.takeIf { it.from != "import" }?.addr,
-            label = owner?.let { vm.effectiveFuncName(it.addr) } ?: "unmapped",
-            type = x.type.ifEmpty { "ref" },
-            note = if (owner == null) "outside any known function" else ""
-        )
-    } else vm.callersOf(d.addr).map { e ->
-        val owner = vm.functionAt(e.from) ?: vm.functionContaining(e.from)
-        PseudoXref(
-            site = e.from,
-            target = owner?.takeIf { it.from != "import" }?.addr,
-            label = owner?.let { vm.effectiveFuncName(it.addr) } ?: e.fromName.ifEmpty { "unmapped" },
-            type = e.kind.ifEmpty { "call" },
-            note = if (owner == null) "outside any known function" else ""
-        )
-    }
-} else {
-    val xs = d.xrefsOut
-    if (xs.isNotEmpty()) xs.map { x ->
-        val callee = vm.functionAt(x.to) ?: vm.functionContaining(x.to)
-        val isImport = callee?.from == "import"
-        PseudoXref(
-            site = x.from,
-            target = if (callee != null && !isImport) callee.addr else null,
-            label = callee?.let { vm.effectiveFuncName(it.addr) } ?: hexFmt(x.to),
-            type = x.type.ifEmpty { "call" },
-            note = if (isImport) "import" else if (callee == null) "unresolved target" else ""
-        )
-    } else vm.calleesOf(d.addr).map { e ->
-        val callee = vm.functionAt(e.to) ?: vm.functionContaining(e.to)
-        val isImport = callee?.from == "import"
-        PseudoXref(
-            site = e.from,
-            target = if (callee != null && !isImport) callee.addr else null,
-            label = callee?.let { vm.effectiveFuncName(it.addr) } ?: e.toName.ifEmpty { hexFmt(e.to) },
-            type = e.kind.ifEmpty { "call" },
-            note = if (isImport) "import" else if (callee == null) "unresolved target" else ""
-        )
-    }
-}
+private data class AltBlocked(val title: String, val sub: String)
 
 @Composable
 fun DecompilePanel(vm: StudioViewModel) {
@@ -209,6 +152,10 @@ fun DecompilePanel(vm: StudioViewModel) {
     // Nullable rather than a separate `hasPseudo` flag, so every use below is
     // guarded by a plain null check the compiler can smart-cast through.
     val pseudo = d?.pseudo?.takeIf { it.isNotEmpty() }
+    // The primary decompile is in flight. `detail` still holds the PREVIOUS
+    // function until the native call lands, so this is the only way to tell
+    // "here is your code" from "here is the code of the function you left".
+    val busy = vm.detailBusy
 
     // Which backend produced the open text, and which one a comparison would
     // run. `pseudoMode` is what actually ran; `decompiler` is only what was
@@ -216,9 +163,14 @@ fun DecompilePanel(vm: StudioViewModel) {
     // start.
     val mode = d?.pseudoMode ?: ""
     val ghidra = mode == "Ghidra"
+    // A DEX method reaches neither decompiler: Engine::functionDetail answers
+    // the whole DEX branch with a fixed method stub and never looks at the
+    // backend selection, so there is exactly one possible output for it.
+    val dalvik = mode == "dex"
     val primaryLabel = when {
         ghidra -> "Ghidra p-code"
         mode == "IR" -> "ASM→IR→C"
+        dalvik -> "Dalvik stub"
         else -> "ASM→C fallback"
     }
     val primaryTint = when {
@@ -227,24 +179,70 @@ fun DecompilePanel(vm: StudioViewModel) {
         else -> ide.dim
     }
     val altIsGhidra = vm.decompiler != "ghidra"
-    // A comparison needs two DIFFERENT backends, and the pair collapses in two
-    // ways. Without SLEIGH, Ghidra cannot run at all — loadAlternatePseudo()
-    // clears pseudoAlt and logs a WARN for that direction, and in the other
-    // direction the left pane has ALREADY silently fallen back to the IR
-    // lifter, so the "other" backend would repeat it. The same happens when
-    // Ghidra is installed but could not handle this one function. In every
-    // collapsed case the side you cannot have is Ghidra, so name it Ghidra and
-    // never fire a decompile that would return a second copy of the left pane.
-    val altUsable = vm.sleighReady && (altIsGhidra || ghidra)
+    // A comparison needs two DIFFERENT backends. Now that SLEIGH actually
+    // installs, two real backends is the ordinary case, so the ways the pair
+    // collapses are named one at a time instead of being lumped under "Ghidra
+    // is not here":
+    //
+    //  - DEX: one backend exists at all, whichever one is selected.
+    //  - no SLEIGH: whichever direction you face, the side you cannot have is
+    //    Ghidra — either it would be the comparison, or it was asked for, fell
+    //    back, and the left pane is already the IR lifter.
+    //  - Ghidra selected but fell back on THIS function: the other backend is
+    //    the IR lifter, which is exactly what the left pane is showing.
+    //
+    // A collapsed pair must never fire a decompile, because the answer would be
+    // a second copy of the left pane with the other backend's name over it.
+    //
+    // Only the last of those turns on what happened to THIS function, and what
+    // happened is `pseudoMode`, which belongs to the function still on screen —
+    // so it is held back while a decompile is in flight. Switching the backend
+    // from the palette re-decompiles the open function, and during those
+    // seconds the outgoing mode would otherwise have the pane state,
+    // confidently, that the pair collapsed for a result that has not landed.
+    // (The DEX branch turns on the FORMAT, which cannot go stale: `detail` is
+    // cleared when a different binary is opened.)
+    val blocked: AltBlocked? = when {
+        d == null -> null
+        dalvik -> AltBlocked(
+            "DEX methods have only one backend",
+            "Dalvik bytecode never reaches the native decompilers — the engine answers with the same method stub whichever backend is selected, so both sides would be identical."
+        )
+        !vm.sleighReady -> AltBlocked(
+            "Ghidra p-code cannot run on this device",
+            "The SLEIGH specifications are not installed, so the built-in IR lifter is the only backend available and both sides would show the same text."
+        )
+        !altIsGhidra && !ghidra && !busy -> AltBlocked(
+            "Only $primaryLabel ran for this function",
+            if (vm.decompilerNote.isNotEmpty())
+                "${vm.decompilerNote}. The other backend is the one already on the left."
+            else "Ghidra was selected and fell back here, so the other backend is the one already on the left."
+        )
+        else -> null
+    }
+    val altUsable = d != null && blocked == null
     val altIsIr = altUsable && !altIsGhidra
-    val altLabel = if (altIsIr) "ASM→IR→C" else "Ghidra p-code"
-    val altTint = if (altIsIr) ide.violet else ide.accent
+    val altLabel = when {
+        altIsIr -> "ASM→IR→C"
+        dalvik -> "No second backend"
+        else -> "Ghidra p-code"
+    }
+    val altTint = when {
+        altIsIr -> ide.violet
+        dalvik -> ide.dim
+        else -> ide.accent
+    }
 
     // Which side the segmented control is showing at phone widths.
     var showAlt by remember { mutableStateOf(false) }
     // null when the cross-reference sheet is closed; otherwise which direction
     // it is showing. Same state shape as the Assembly panel's strip.
     var xrefIncoming by remember { mutableStateOf<Boolean?>(null) }
+    // Whether the comparison has already been attempted for this function with
+    // this selection. `pseudoAlt` is null both before a fetch and after a failed
+    // one, and now that Ghidra can really start, "it ran and returned nothing"
+    // is a state a user reaches rather than a theoretical branch.
+    var altTried by remember(d?.addr, vm.decompiler) { mutableStateOf(false) }
 
     // Each pane keeps its own scroll, except in the segmented layout where only
     // one is composed at a time: sharing the state there is the whole point,
@@ -254,35 +252,50 @@ fun DecompilePanel(vm: StudioViewModel) {
     val vScrollAlt = rememberScrollState()
     val hScrollAlt = rememberScrollState()
 
+    val runAlt = {
+        altTried = true
+        vm.loadAlternatePseudo()
+    }
+
     // pseudoAlt belongs to whichever function was open when it was fetched and
     // the ViewModel clears it on every selectFunction, so the comparison is
     // recomputed on demand. `pseudoAlt == null` is a key so a new function
     // refetches, while a FAILED fetch — which also leaves it null — does not
-    // spin: nothing changed, so the effect does not restart. Nothing is fired
-    // at all when the other backend cannot run.
-    LaunchedEffect(vm.compareBackends, d?.addr, vm.decompiler, vm.sleighReady, vm.pseudoAlt == null) {
-        if (vm.compareBackends && d != null && altUsable &&
+    // spin: nothing changed, so the effect does not restart.
+    //
+    // `detailBusy` is both a key and a guard because selectFunction clears
+    // pseudoAlt BEFORE it replaces `detail`: without it this fires a comparison
+    // for the function you just left, and loadAlternatePseudo flips the engine's
+    // single global backend for the duration of its call — underneath the
+    // primary decompile that is running at that moment. That was harmless while
+    // Ghidra could never start and the fetch was always refused; it is a
+    // seconds-long native pass on the wrong backend now that it can.
+    LaunchedEffect(
+        vm.compareBackends, d?.addr, vm.decompiler, vm.sleighReady,
+        altUsable, busy, vm.pseudoAlt == null
+    ) {
+        if (vm.compareBackends && altUsable && !busy &&
             vm.pseudoAlt == null && !vm.pseudoAltBusy
-        ) vm.loadAlternatePseudo()
+        ) runAlt()
     }
 
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                .padding(start = Space.l, end = Space.xs, top = Space.xs, bottom = Space.xs),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
                     d?.let { it.displayName.ifEmpty { it.name } } ?: "—",
-                    color = ide.text, fontSize = Type.body,
+                    color = ide.text, fontSize = Type.body, lineHeight = Type.bodyLine,
                     fontWeight = FontWeight.Medium, fontFamily = Mono,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
                 if (d != null) Text(
                     "${hexFmt(d.addr)} · ${d.size} bytes · ${d.from}",
-                    color = ide.dim2, fontSize = Type.caption,
+                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine,
                     fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
@@ -292,11 +305,18 @@ fun DecompilePanel(vm: StudioViewModel) {
             if (d != null) PseudoCompareToggle(vm)
             if (pseudo != null) {
                 val clip = LocalClipboardManager.current
+                val press = remember { MutableInteractionSource() }
+                val pressed by press.collectIsPressedAsState()
                 Box(
                     Modifier
                         .size(Touch)
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(role = Role.Button) {
+                        .pressScale(pressed)
+                        .clip(Control)
+                        .clickable(
+                            interactionSource = press,
+                            indication = LocalIndication.current,
+                            role = Role.Button
+                        ) {
                             clip.setText(AnnotatedString(pseudo))
                             vm.log("OK", "Pseudo-C copied to the clipboard")
                         },
@@ -309,26 +329,30 @@ fun DecompilePanel(vm: StudioViewModel) {
                 }
             }
         }
-        DecompileProgress(vm)
+        // The indeterminate bar is the status strip's own progress affordance
+        // and the skeleton is the body's; both at once is two answers to one
+        // question, so the bar stands down whenever the body below is a
+        // skeleton for the same work. The phase and the clock never go away —
+        // they are what prove the engine is alive.
+        DecompileProgress(vm, bar = !busy)
         // Where this text came from, and where the code around it goes. The
         // xref chips lead because navigation beats provenance; the row scrolls
         // sideways because six chips do not fit across 360dp.
         if (d != null) {
-            // Counted the same way the Assembly panel counts them: the engine's
-            // own xrefs when it returned any, the whole-binary call table when
-            // it did not. The two strips must never disagree about one function.
-            val nIn = if (d.xrefsIn.isNotEmpty()) d.xrefsIn.size else vm.callersOf(d.addr).size
-            val nOut = if (d.xrefsOut.isNotEmpty()) d.xrefsOut.size else vm.calleesOf(d.addr).size
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .animateContentSize(tween(motionMs()))
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .padding(horizontal = Space.l, vertical = Space.xs),
+                horizontalArrangement = Arrangement.spacedBy(Space.m),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                PseudoXrefChip("refs in", nIn, ide.cyan) { xrefIncoming = true }
-                PseudoXrefChip("calls out", nOut, ide.accent) { xrefIncoming = false }
+                // One counting rule for the whole app, and it lives in the
+                // ViewModel. This strip and the Assembly strip each used to
+                // carry their own and read different numbers for one function.
+                PseudoXrefChip("refs in", vm.xrefInCount(d), ide.cyan) { xrefIncoming = true }
+                PseudoXrefChip("calls out", vm.xrefOutCount(d), ide.accent) { xrefIncoming = false }
                 StatChip(primaryLabel, primaryTint)
                 val stats = d.irStats
                 if (stats != null && mode == "IR") {
@@ -345,7 +369,10 @@ fun DecompilePanel(vm: StudioViewModel) {
                     StatChip(vm.decompilerNote, ide.amber)
             }
             val sheetFor = xrefIncoming
-            if (sheetFor != null) PseudoXrefSheet(
+            // Row builder, row and sheet all live in Common.kt now: this was a
+            // verbatim copy of the Assembly panel's, and the two had already
+            // drifted in touch target, row width and sheet inset.
+            if (sheetFor != null) XrefSheet(
                 vm, d, incoming = sheetFor, onDismiss = { xrefIncoming = null }
             )
         }
@@ -358,7 +385,10 @@ fun DecompilePanel(vm: StudioViewModel) {
                     "Open a file and pick a function; the decompiler runs on one function at a time."
                 )
             }
-            d == null -> Box(
+            // Not while a decompile is in flight: opening a binary selects its
+            // first function for you, and telling you to select one while one is
+            // being decompiled is the panel contradicting its own status line.
+            d == null && !busy -> Box(
                 Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center
             ) {
                 EmptyPanel(
@@ -366,39 +396,59 @@ fun DecompilePanel(vm: StudioViewModel) {
                     "Pipeline: assembly lifted to an expression IR, propagated, then structured — while/if/calls with args."
                 )
             }
-            !vm.compareBackends ->
-                PseudoBody(pseudo, primaryLabel, Modifier.weight(1f).fillMaxWidth(), vScroll, hScroll)
             else -> BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val compare = vm.compareBackends && d != null
                 // 360dp of monospace at 12sp is about fifty columns. Halved, a
                 // pane holds twenty-five — less than one line of reconstructed
                 // C — so on a phone the two backends share the full width and
                 // take turns, and only a tablet or landscape gets real columns.
                 if (maxWidth >= SplitAt) {
+                    // The split grows in from zero width instead of the body
+                    // snapping in two. animateContentSize animates a size
+                    // CHANGE, so the column that carries the comparison is
+                    // always composed and simply holds nothing while the
+                    // comparison is off — same trick for the label that appears
+                    // over the left pane.
+                    val altWidth = (maxWidth - 1.dp) / 2
                     Row(Modifier.fillMaxSize()) {
                         Column(Modifier.weight(1f).fillMaxHeight()) {
-                            PseudoPaneLabel(primaryLabel, primaryTint)
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .animateContentSize(tween(motionMs()))
+                            ) {
+                                if (compare) PseudoPaneLabel(primaryLabel, primaryTint)
+                            }
                             PseudoBody(
-                                pseudo, primaryLabel,
+                                pseudo, primaryLabel, busy,
                                 Modifier.weight(1f).fillMaxWidth(), vScroll, hScroll
                             )
                         }
-                        Box(Modifier.width(1.dp).fillMaxHeight().background(ide.border))
-                        Column(Modifier.weight(1f).fillMaxHeight()) {
-                            PseudoPaneLabel(altLabel, altTint)
-                            PseudoAltPane(
-                                vm, altLabel, altUsable, primaryLabel,
-                                Modifier.weight(1f).fillMaxWidth(), vScrollAlt, hScrollAlt
-                            )
+                        Row(
+                            Modifier
+                                .fillMaxHeight()
+                                .animateContentSize(tween(motionMs()))
+                        ) {
+                            if (compare) {
+                                Box(Modifier.width(1.dp).fillMaxHeight().background(ide.border))
+                                Column(Modifier.width(altWidth).fillMaxHeight()) {
+                                    PseudoPaneLabel(altLabel, altTint)
+                                    PseudoAltPane(
+                                        vm, altLabel, primaryLabel, pseudo, blocked, altTried,
+                                        runAlt, Modifier.weight(1f).fillMaxWidth(),
+                                        vScrollAlt, hScrollAlt
+                                    )
+                                }
+                            }
                         }
                     }
-                } else {
+                } else if (compare) {
                     Column(Modifier.fillMaxSize()) {
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 4.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(ide.panel2)
+                                .padding(horizontal = Space.l, vertical = Space.s)
+                                .surface2(Control)
                                 .selectableGroup()
                         ) {
                             PseudoSegment(primaryLabel, primaryTint, !showAlt, Modifier.weight(1f)) {
@@ -408,16 +458,29 @@ fun DecompilePanel(vm: StudioViewModel) {
                                 showAlt = true
                             }
                         }
-                        if (showAlt) PseudoAltPane(
-                            vm, altLabel, altUsable, primaryLabel,
-                            Modifier.weight(1f).fillMaxWidth(), vScroll, hScroll
-                        )
-                        else PseudoBody(
-                            pseudo, primaryLabel,
-                            Modifier.weight(1f).fillMaxWidth(), vScroll, hScroll
-                        )
+                        // One pane at a time in the same place, sharing one
+                        // scroll position: the two texts are meant to be read as
+                        // an A/B flip, and a hard cut makes you re-find the line
+                        // you were on. A fade this short is legible rather than
+                        // slow — and motionMs() turns it back into a cut for
+                        // anyone who has switched animation off system-wide.
+                        Crossfade(
+                            targetState = showAlt,
+                            animationSpec = tween(motionMs(Motion.fast)),
+                            label = "backend",
+                            modifier = Modifier.weight(1f).fillMaxWidth()
+                        ) { alt ->
+                            if (alt) PseudoAltPane(
+                                vm, altLabel, primaryLabel, pseudo, blocked, altTried,
+                                runAlt, Modifier.fillMaxSize(), vScroll, hScroll
+                            ) else PseudoBody(
+                                pseudo, primaryLabel, busy, Modifier.fillMaxSize(), vScroll, hScroll
+                            )
+                        }
                     }
-                }
+                } else PseudoBody(
+                    pseudo, primaryLabel, busy, Modifier.fillMaxSize(), vScroll, hScroll
+                )
             }
         }
         // Whole-binary export does not need a selected function, so the bar is
@@ -436,28 +499,33 @@ fun DecompilePanel(vm: StudioViewModel) {
 private fun PseudoCompareToggle(vm: StudioViewModel) {
     val ide = LocalIde.current
     val on = vm.compareBackends
+    val press = remember { MutableInteractionSource() }
+    val pressed by press.collectIsPressedAsState()
     Row(
         Modifier
-            .clip(RoundedCornerShape(8.dp))
+            .pressScale(pressed)
+            .clip(Control)
             .toggleable(
                 value = on,
+                interactionSource = press,
+                indication = LocalIndication.current,
                 role = Role.Switch,
                 onValueChange = { vm.compareBackends = it }
             )
             .sizeIn(minHeight = Touch)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = Space.m),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             Icons.Filled.CompareArrows, contentDescription = null,
             tint = if (on) ide.accent else ide.dim,
-            modifier = Modifier.size(17.dp)
+            modifier = Modifier.size(16.dp)
         )
-        Spacer(Modifier.width(5.dp))
+        Spacer(Modifier.width(Space.s))
         Text(
             "Compare",
             color = if (on) ide.accent else ide.dim,
-            fontSize = Type.label,
+            fontSize = Type.label, lineHeight = Type.labelLine,
             fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal
         )
     }
@@ -497,13 +565,13 @@ private fun PseudoSegment(
             .background(if (selected) tint.copy(alpha = 0.14f) else Color.Transparent)
             .selectable(selected = selected, role = Role.Tab, onClick = onClick)
             .sizeIn(minHeight = Touch)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = Space.m),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
             color = if (selected) tint else ide.dim2,
-            fontSize = Type.label, fontFamily = Mono,
+            fontSize = Type.label, lineHeight = Type.labelLine, fontFamily = Mono,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
             maxLines = 1, overflow = TextOverflow.Ellipsis
         )
@@ -513,16 +581,15 @@ private fun PseudoSegment(
 /** The column header in the side-by-side layout, where there is no switcher. */
 @Composable
 private fun PseudoPaneLabel(label: String, tint: Color) {
-    val ide = LocalIde.current
     Row(
         Modifier
             .fillMaxWidth()
-            .background(ide.panel2)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .surface2(RectangleShape)
+            .padding(horizontal = Space.l, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            label, color = tint, fontSize = Type.label,
+            label, color = tint, fontSize = Type.label, lineHeight = Type.labelLine,
             fontFamily = Mono, fontWeight = FontWeight.Bold,
             maxLines = 1, overflow = TextOverflow.Ellipsis
         )
@@ -532,12 +599,14 @@ private fun PseudoPaneLabel(label: String, tint: Color) {
 /**
  * One pane of pseudo-C. [src] is nullable because a backend returning nothing
  * is a normal outcome and the pane has to say so — that is precisely the case
- * you opened the comparison to investigate.
+ * you opened the comparison to investigate. [loading] outranks both: the text
+ * still on screen belongs to the function you just left.
  */
 @Composable
 private fun PseudoBody(
     src: String?,
     label: String,
+    loading: Boolean,
     modifier: Modifier,
     v: ScrollState,
     h: ScrollState
@@ -546,42 +615,52 @@ private fun PseudoBody(
     // A backend that answers with an empty string has produced nothing just as
     // surely as one that answers with null.
     val body = src?.takeIf { it.isNotEmpty() }
-    if (body == null) {
-        Box(modifier, contentAlignment = Alignment.Center) {
+    when {
+        // Shaped like the C that is coming — ragged line lengths, indented
+        // bodies, a short closing brace — so seconds of Ghidra read as "your
+        // code is on its way" instead of "something is happening somewhere".
+        loading -> Box(modifier, contentAlignment = Alignment.TopStart) {
+            SkeletonLines(lines = 14, indent = true)
+        }
+        body == null -> Box(modifier, contentAlignment = Alignment.Center) {
             EmptyPanel(
                 "$label produced no output for this function",
                 "Nothing came back from the backend. The Assembly tab still has the listing."
             )
         }
-    } else {
-        val annotated = remember(body, ide) { highlightPseudo(body, ide) }
-        // weight() is a ColumnScope modifier, so it belongs on the container
-        // here rather than on the Text inside SelectionContainer's lambda.
-        SelectionContainer(modifier) {
-            Text(
-                annotated,
-                fontFamily = Mono, fontSize = Type.mono, lineHeight = 17.sp,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(v)
-                    .horizontalScroll(h)
-                    .padding(12.dp)
-            )
+        else -> {
+            val annotated = remember(body, ide) { highlightPseudo(body, ide) }
+            // weight() is a ColumnScope modifier, so it belongs on the container
+            // here rather than on the Text inside SelectionContainer's lambda.
+            SelectionContainer(modifier) {
+                Text(
+                    annotated,
+                    fontFamily = Mono, fontSize = Type.mono, lineHeight = Type.monoLine,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(v)
+                        .horizontalScroll(h)
+                        .padding(Space.l)
+                )
+            }
         }
     }
 }
 
 /**
- * The comparison pane. Every state it can be in is named: cannot run, running,
- * came back with nothing, or here it is. An empty pane would be the one thing
- * that reads as a bug.
+ * The comparison pane. Every state it can be in is named: cannot run, queued,
+ * running, came back with nothing, came back with the SAME text, or here it is.
+ * An empty pane would be the one thing that reads as a bug.
  */
 @Composable
 private fun PseudoAltPane(
     vm: StudioViewModel,
     altLabel: String,
-    usable: Boolean,
     primaryLabel: String,
+    primary: String?,
+    blocked: AltBlocked?,
+    tried: Boolean,
+    onRun: () -> Unit,
     modifier: Modifier,
     v: ScrollState,
     h: ScrollState
@@ -590,146 +669,71 @@ private fun PseudoAltPane(
     val alt = vm.pseudoAlt
     Box(modifier, contentAlignment = Alignment.Center) {
         when {
-            !usable -> if (!vm.sleighReady) EmptyPanel(
-                "Ghidra p-code cannot run on this device",
-                "The SLEIGH specifications are not installed, so the built-in IR lifter is the only backend available and both sides would show the same text."
-            ) else EmptyPanel(
-                "Only $primaryLabel ran for this function",
-                if (vm.decompilerNote.isNotEmpty()) "${vm.decompilerNote}. The other backend is the one already on the left."
-                else "The other backend is the one already on the left, so there is nothing to compare against."
-            )
-            vm.pseudoAltBusy -> Column(
-                Modifier.fillMaxWidth().padding(horizontal = 32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+            blocked != null -> EmptyPanel(blocked.title, blocked.sub)
+            // Queued is a real state now: the comparison waits for the primary
+            // decompile rather than flipping the engine's backend underneath it.
+            vm.pseudoAltBusy || vm.detailBusy -> Column(Modifier.fillMaxWidth()) {
                 Text(
-                    "Decompiling with $altLabel…",
-                    color = ide.dim, fontSize = Type.body, fontFamily = Mono
+                    if (vm.pseudoAltBusy) "Decompiling with $altLabel…"
+                    else "Queued behind $primaryLabel…",
+                    color = ide.dim, fontSize = Type.body, lineHeight = Type.bodyLine,
+                    fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = Space.l, vertical = Space.m)
                 )
-                Spacer(Modifier.height(10.dp))
-                LinearProgressIndicator(
-                    color = ide.accent,
-                    trackColor = ide.borderStrong,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                )
+                SkeletonLines(lines = 10, indent = true)
             }
             alt == null -> Column(
                 Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                EmptyPanel(
+                // Two different facts, and with Ghidra able to start they are
+                // both reachable: it has not been asked yet, or it was asked and
+                // came back empty. The console line carries the reason.
+                if (tried) EmptyPanel(
+                    "$altLabel returned nothing for this function",
+                    "It ran and produced no text; the console says why. Running it again is safe."
+                ) else EmptyPanel(
                     "$altLabel has not run on this function",
                     "The comparison is fetched per function and dropped whenever you move to another one."
                 )
+                val press = remember { MutableInteractionSource() }
+                val pressed by press.collectIsPressedAsState()
                 Row(
                     Modifier
                         .sizeIn(minHeight = Touch)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(role = Role.Button) { vm.loadAlternatePseudo() }
-                        .padding(horizontal = 12.dp),
+                        .pressScale(pressed)
+                        .clip(Control)
+                        .clickable(
+                            interactionSource = press,
+                            indication = LocalIndication.current,
+                            role = Role.Button,
+                            onClick = onRun
+                        )
+                        .padding(horizontal = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         Icons.Filled.CompareArrows, contentDescription = null,
                         tint = ide.accent, modifier = Modifier.size(16.dp)
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Run $altLabel", color = ide.accent, fontSize = Type.label)
+                    Spacer(Modifier.width(Space.s))
+                    Text(
+                        "Run $altLabel", color = ide.accent,
+                        fontSize = Type.label, lineHeight = Type.labelLine
+                    )
                 }
             }
-            else -> PseudoBody(alt, altLabel, Modifier.fillMaxSize(), v, h)
-        }
-    }
-}
-
-/**
- * Who calls this function and what it calls. The engine has returned both on
- * every decompile since the beginning and nothing has ever drawn them; the only
- * way to ask was to leave for the call graph and pay for a second native pass
- * over the whole binary. Rows go through navigateTo, so Back comes home.
- *
- * Deliberately the same sheet as the Assembly panel's — same title, same row,
- * same rule about which rows can be tapped — because it answers the same
- * question about the same function.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun PseudoXrefSheet(
-    vm: StudioViewModel,
-    d: FunctionDetail,
-    incoming: Boolean,
-    onDismiss: () -> Unit
-) {
-    val ide = LocalIde.current
-    val rows = remember(d.addr, incoming, vm.renames.size) { pseudoXrefRows(vm, d, incoming) }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = ide.panel
-    ) {
-        Column(Modifier.padding(bottom = 16.dp)) {
-            Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
-                Text(
-                    if (incoming) "References to this function" else "Calls out of this function",
-                    color = ide.text, fontSize = Type.title, fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    "${rows.size} · ${vm.effectiveFuncName(d.addr)} @ ${hexFmt(d.addr)}",
-                    color = ide.dim2, fontSize = Type.label, fontFamily = Mono,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            if (rows.isEmpty()) {
-                EmptyPanel(
-                    if (incoming) "Nothing references this function" else "This function calls nothing",
-                    "The engine found no edges in either its own analysis or the whole-binary call table."
-                )
-            } else LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                items(rows.size) { i ->
-                    val r = rows[i]
-                    val target = r.target
-                    val base = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = Touch)
-                    Row(
-                        // A row with nothing to jump to — an import stub, an
-                        // address outside every known function — is drawn as a
-                        // leaf instead of rippling under your finger and then
-                        // doing nothing.
-                        (if (target != null) base.clickable(role = Role.Button) {
-                            onDismiss()
-                            vm.navigateTo(addr = target)
-                        } else base).padding(horizontal = 20.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            hexFmt(r.site), color = ide.dim2, fontSize = Type.monoSmall,
-                            fontFamily = Mono, maxLines = 1
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                r.label,
-                                color = if (target != null) ide.text else ide.dim,
-                                fontSize = Type.label, fontFamily = Mono,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                            if (r.note.isNotEmpty()) Text(
-                                r.note, color = ide.dim2, fontSize = Type.caption,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        StatChip(r.type, mnemonicColor(r.type, ide))
-                    }
-                    HorizontalDivider(color = ide.border)
-                }
-            }
+            // The degenerate pair the engine can produce all on its own: Ghidra
+            // falls back to the IR lifter INSIDE the same native call when no
+            // SLEIGH specification covers a function, so a comparison can come
+            // back ok and byte-identical to the pane beside it. Saying so beats
+            // two identical panes — on a phone they take turns in one place, so
+            // identical output reads as a switch that does nothing.
+            alt == primary -> EmptyPanel(
+                "Both backends returned the same text",
+                "$altLabel came back byte-for-byte identical to $primaryLabel. Ghidra falls back to the built-in IR lifter when no specification covers a function, which is the usual reason for this."
+            )
+            else -> PseudoBody(alt, altLabel, false, Modifier.fillMaxSize(), v, h)
         }
     }
 }
@@ -752,15 +756,16 @@ private fun ExportBar(vm: StudioViewModel) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(ide.panel)
+            .surface1(RectangleShape)
             // The bar is the last child of a fillMaxSize Column, so under the
             // forced edge-to-edge of targetSdk 35 it sat directly beneath the
             // gesture pill, which ate the taps. The panel fill still runs to
             // the bottom of the screen; only the touchable row is inset.
             .windowInsetsPadding(WindowInsets.navigationBars)
+            .animateContentSize(tween(motionMs()))
             .clickable(enabled = !vm.exportBusy, role = Role.Button) { showExportSheet = true }
             .sizeIn(minHeight = Touch)
-            .padding(horizontal = 12.dp, vertical = 13.dp),
+            .padding(horizontal = Space.l, vertical = Space.l),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -768,11 +773,11 @@ private fun ExportBar(vm: StudioViewModel) {
             tint = if (vm.exportBusy) ide.dim else ide.accent,
             modifier = Modifier.size(18.dp)
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             if (vm.exportBusy) "Exporting…" else "Export as source",
             color = if (vm.exportBusy) ide.dim else ide.text,
-            fontSize = Type.body, fontWeight = FontWeight.Medium
+            fontSize = Type.body, lineHeight = Type.bodyLine, fontWeight = FontWeight.Medium
         )
     }
 }
@@ -805,17 +810,25 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = ide.panel
     ) {
-        Column(Modifier.padding(bottom = 22.dp)) {
-            Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
-                Text("Export decompiled output", color = ide.text,
-                    fontSize = Type.title, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(3.dp))
+        // No NavBarSpacer in here: material3 1.3.1 gives ModalBottomSheet
+        // BottomSheetDefaults.windowInsets, which already carries the bottom
+        // system-bar inset, so a spacer inside the content pads it twice. The
+        // gap below is optical breathing room, not an inset — same decision as
+        // the shared XrefSheet in Common.kt.
+        Column(Modifier.padding(bottom = Space.xl)) {
+            Column(Modifier.padding(horizontal = Space.xl, vertical = Space.s)) {
+                Text(
+                    "Export decompiled output", color = ide.text,
+                    fontSize = Type.title, lineHeight = Type.titleLine,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(Space.xs))
                 Text(
                     "Reconstructed from machine code — it will not recompile as-is.",
-                    color = ide.dim2, fontSize = Type.label
+                    color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine
                 )
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(Space.m))
             kinds.forEach { k ->
                 val enabled = k.id != "c-one" || vm.detail != null
                 Row(
@@ -823,22 +836,26 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
                         .fillMaxWidth()
                         .clickable(enabled = enabled, role = Role.Button) { onPick(k.id) }
                         .sizeIn(minHeight = Touch)
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .padding(horizontal = Space.xl, vertical = Space.l),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         k.icon, contentDescription = null,
                         tint = if (enabled) ide.accent else ide.dim,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(18.dp)
                     )
-                    Spacer(Modifier.width(14.dp))
+                    Spacer(Modifier.width(Space.l))
                     Column(Modifier.weight(1f)) {
                         Text(
                             k.title,
                             color = if (enabled) ide.text else ide.dim,
-                            fontSize = Type.body, fontWeight = FontWeight.Medium
+                            fontSize = Type.body, lineHeight = Type.bodyLine,
+                            fontWeight = FontWeight.Medium
                         )
-                        Text(k.detail, color = ide.dim2, fontSize = Type.caption, fontFamily = Mono)
+                        Text(
+                            k.detail, color = ide.dim2, fontSize = Type.caption,
+                            lineHeight = Type.captionLine, fontFamily = Mono
+                        )
                     }
                 }
                 // border, not border at half alpha: the divider measured 1.12:1
@@ -850,22 +867,22 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
 }
 
 
-// A progress row shown while the engine is decompiling — IDA-style, so a
-// long Ghidra pass looks like work in flight rather than a hang. Only what we
-// actually know: the phase, the target and the elapsed time; a plain
-// indeterminate bar for the rest, because the native call is one atomic step
-// from Kotlin's side.
+// A progress row shown while the engine is decompiling — IDA-style, so a long
+// Ghidra pass looks like work in flight rather than a hang. Only what we
+// actually know: the phase, the target and the elapsed time. [bar] is the
+// indeterminate strip, which the caller turns off when the body below is
+// already carrying a skeleton for the same work.
 @Composable
-private fun DecompileProgress(vm: StudioViewModel) {
+private fun DecompileProgress(vm: StudioViewModel, bar: Boolean) {
     val ide = LocalIde.current
     val phase = vm.decompilePhase
     val target = vm.decompileTargetName
     val startMs = vm.decompileStartMs
     if (phase.isBlank() || startMs == 0L) return
 
-    // Repaint once a second so the elapsed number actually moves. Cancelled
-    // when the composable leaves, which is what makes it stop when the
-    // decompile lands.
+    // Repaint five times a second so the elapsed number actually moves.
+    // Cancelled when the composable leaves, which is what makes it stop when
+    // the decompile lands.
     var elapsed by remember(startMs) { mutableStateOf(0L) }
     LaunchedEffect(startMs) {
         while (isActive) {
@@ -877,12 +894,13 @@ private fun DecompileProgress(vm: StudioViewModel) {
     Column(
         Modifier
             .fillMaxWidth()
-            .background(ide.panel2)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .surface2(RectangleShape)
+            .animateContentSize(tween(motionMs()))
+            .padding(horizontal = Space.l, vertical = Space.m)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                phase, color = ide.text, fontSize = Type.mono,
+                phase, color = ide.text, fontSize = Type.mono, lineHeight = Type.monoLine,
                 fontFamily = Mono, fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f)
             )
@@ -890,25 +908,28 @@ private fun DecompileProgress(vm: StudioViewModel) {
             val ms = (elapsed % 1000) / 100
             Text(
                 "%d.%ds".format(secs, ms),
-                color = ide.amber, fontSize = Type.mono, fontFamily = Mono
+                color = ide.amber, fontSize = Type.mono, lineHeight = Type.monoLine,
+                fontFamily = Mono
             )
         }
         if (target.isNotEmpty())
             Text(
                 target, color = ide.dim2, fontSize = Type.caption,
-                fontFamily = Mono, maxLines = 1,
-                modifier = Modifier.padding(top = 2.dp)
+                lineHeight = Type.captionLine, fontFamily = Mono, maxLines = 1,
+                modifier = Modifier.padding(top = Space.xs)
             )
-        Spacer(Modifier.height(6.dp))
-        LinearProgressIndicator(
-            color = ide.accent,
-            // border is 1.29:1 on this surface, so the unfilled half of the bar
-            // was invisible and the bar read as a lone sliver on nothing.
-            trackColor = ide.borderStrong,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(RoundedCornerShape(2.dp))
-        )
+        if (bar) {
+            Spacer(Modifier.height(Space.s))
+            LinearProgressIndicator(
+                color = ide.accent,
+                // border is 1.29:1 on this surface, so the unfilled half of the
+                // bar was invisible and the bar read as a lone sliver on nothing.
+                trackColor = ide.borderStrong,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+            )
+        }
     }
 }

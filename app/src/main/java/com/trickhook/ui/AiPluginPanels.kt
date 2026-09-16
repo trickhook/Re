@@ -2,10 +2,15 @@ package com.trickhook.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,7 +48,6 @@ import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -93,8 +97,31 @@ private fun pluginWriteOps(script: String): List<String> {
         .map { it.second }
 }
 
-/** What a finished run actually wrote, read back out of its own log. */
-private data class RunChanges(val renames: Int, val comments: Int, val bookmarks: Int) {
+/**
+ * What a finished run actually changed — counted the way undo restores it.
+ *
+ * Three answers to "how much did this change?" used to be on screen at once:
+ * `vm.lastPluginEffects` (every effect the script emitted), this parser (one
+ * per effect line in the log) and `undoLastPlugin` (one per key it has to put
+ * back). They agree only while a run never touches the same address twice.
+ *
+ * The number a user can act on is the last one, because it is exactly what
+ * Undo will restore, so it is the only one this panel reports. The rule is
+ * `runPlugin`'s own: a rename and a comment are keyed by address and the last
+ * write wins, so writing the same address twice is one change; a bookmark is
+ * an unkeyed insert, so writing it twice is two rows and two changes.
+ *
+ * [repeats] is the difference — the writes the script made that the project
+ * did not keep — so the raw effect count is still accounted for instead of
+ * silently disagreeing from the other side of the screen.
+ */
+private data class RunChanges(
+    val renames: Int,
+    val comments: Int,
+    val bookmarks: Int,
+    val repeats: Int,
+    val logLines: Int
+) {
     val total: Int get() = renames + comments + bookmarks
 
     fun label(): String {
@@ -110,20 +137,27 @@ private data class RunChanges(val renames: Int, val comments: Int, val bookmarks
 
 /** The effect lines the run appends look like `  [rename] 0x0000A1B0 -> foo`. */
 private fun parseChanges(output: String): RunChanges {
-    var renames = 0
-    var comments = 0
+    val renamed = HashSet<String>()
+    val commented = HashSet<String>()
     var bookmarks = 0
+    var writes = 0
+    var lines = 0
     for (line in output.lineSequence()) {
+        lines++
         val t = line.trim()
         val close = t.indexOf(']')
         if (!t.startsWith("[") || close < 0) continue
+        // `  [op] 0x0000A1B0 -> value` — the address is the key runPlugin
+        // snapshots under, and the value may itself contain " ->".
+        val addr = t.substring(close + 1).substringBefore(" ->").trim()
         when (t.substring(1, close)) {
-            "rename" -> renames++
-            "comment" -> comments++
-            "bookmark" -> bookmarks++
+            "rename" -> { writes++; renamed.add(addr) }
+            "comment" -> { writes++; commented.add(addr) }
+            "bookmark" -> { writes++; bookmarks++ }
         }
     }
-    return RunChanges(renames, comments, bookmarks)
+    val kept = renamed.size + commented.size + bookmarks
+    return RunChanges(renamed.size, commented.size, bookmarks, writes - kept, lines)
 }
 
 @Composable
@@ -133,22 +167,26 @@ fun PluginsPanel(vm: StudioViewModel) {
     var showLog by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<PluginDef?>(null) }
 
-    val changes = remember(vm.pluginOutput) { parseChanges(vm.pluginOutput) }
+    // Keyed on identity: the log is one immutable String per run, and a value
+    // key re-compares every byte of it on every recomposition of the panel.
+    val changes = remember(System.identityHashCode(vm.pluginOutput)) { parseChanges(vm.pluginOutput) }
     val hasResult = vm.pluginOutput.isNotEmpty()
     // The result bar carries its own navigation-bar inset; when it is absent
     // the list has to carry it itself, or its last card hides behind the bar.
-    val listBottom = bottomInset(20.dp).calculateBottomPadding()
+    val listBottom = bottomInset(Space.xxl).calculateBottomPadding()
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+            Modifier.fillMaxWidth().padding(
+                start = Space.xl, end = Space.xl, top = Space.xl, bottom = Space.s
+            ),
             verticalAlignment = Alignment.Bottom
         ) {
             Text(
                 "NOCTURNESCRIPT", color = ide.dim, fontSize = Type.caption,
                 fontWeight = FontWeight.Medium, letterSpacing = 1.sp
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Space.m))
             Text(
                 "${vm.plugins.size} installed",
                 color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
@@ -168,22 +206,27 @@ fun PluginsPanel(vm: StudioViewModel) {
             LazyColumn(
                 Modifier.weight(1f).background(ide.bg),
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 8.dp,
-                    bottom = if (hasResult) 20.dp else listBottom
+                    start = Space.xl, end = Space.xl, top = Space.m,
+                    bottom = if (hasResult || vm.pluginRunning) Space.xxl else listBottom
                 ),
-                verticalArrangement = Arrangement.spacedBy(9.dp)
+                verticalArrangement = Arrangement.spacedBy(Space.m)
             ) {
                 items(vm.plugins.size) { i ->
                     val p = vm.plugins[i]
                     val (icon, tint) = pluginIcon(p.id, ide)
                     val writes = remember(p.script) { pluginWriteOps(p.script) }
                     val running = vm.pluginRunning && vm.lastPluginName == p.name
+                    val press = remember { MutableInteractionSource() }
+                    val pressed by press.collectIsPressedAsState()
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .border(1.dp, ide.borderStrong, RoundedCornerShape(13.dp))
-                            .background(ide.panel, RoundedCornerShape(13.dp))
-                            .padding(horizontal = 14.dp, vertical = 13.dp)
+                            // The card that is running is lifted one layer; the
+                            // others stay on the panel layer. Two existing
+                            // tokens, no new colour, and the card's edge stops
+                            // claiming to be interactive when only the pill is.
+                            .then(if (running) Modifier.surface2() else Modifier.surface1())
+                            .padding(horizontal = Space.l, vertical = Space.l)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
@@ -195,7 +238,7 @@ fun PluginsPanel(vm: StudioViewModel) {
                                 Icon(icon, contentDescription = null, tint = tint,
                                     modifier = Modifier.size(15.dp))
                             }
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(Space.m))
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     p.name, color = ide.text, fontSize = Type.body,
@@ -209,13 +252,15 @@ fun PluginsPanel(vm: StudioViewModel) {
                                     fontFamily = Mono
                                 )
                             }
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.width(Space.m))
                             // A 48dp target around a 32dp pill: the pill used
                             // to be the whole 30dp target.
                             Box(
                                 Modifier
                                     .heightIn(min = 48.dp)
                                     .clickable(
+                                        interactionSource = press,
+                                        indication = LocalIndication.current,
                                         enabled = !vm.pluginRunning,
                                         role = Role.Button,
                                         onClickLabel = "Run ${p.name}"
@@ -230,6 +275,7 @@ fun PluginsPanel(vm: StudioViewModel) {
                             ) {
                                 Row(
                                     Modifier
+                                        .pressScale(pressed)
                                         .then(
                                             if (vm.pluginRunning)
                                                 Modifier.border(1.dp, ide.borderStrong, RoundedCornerShape(9.dp))
@@ -240,17 +286,12 @@ fun PluginsPanel(vm: StudioViewModel) {
                                                 )
                                         )
                                         .heightIn(min = 32.dp)
-                                        .padding(horizontal = 15.dp),
+                                        .padding(horizontal = Space.xl),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    if (running) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(12.dp),
-                                            color = ide.dim,
-                                            strokeWidth = 1.5.dp
-                                        )
-                                        Spacer(Modifier.width(7.dp))
-                                    }
+                                    // The spinner said only that something was
+                                    // happening; the skeleton below the list
+                                    // says it in the shape of what is coming.
                                     Text(
                                         if (running) "Running" else "Run",
                                         color = if (vm.pluginRunning) ide.dim2 else ide.accent,
@@ -260,7 +301,7 @@ fun PluginsPanel(vm: StudioViewModel) {
                             }
                         }
                         if (p.description.isNotEmpty()) {
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(Space.m))
                             Text(
                                 p.description, color = ide.dim, fontSize = Type.label,
                                 lineHeight = 16.sp
@@ -272,59 +313,83 @@ fun PluginsPanel(vm: StudioViewModel) {
         }
         // A fixed 200dp slab used to eat the bottom of the list and clip the
         // log mid-line. The result is a one-line bar now; the whole log opens
-        // full-screen, where it can be read, copied or saved.
-        if (hasResult) {
-            Column(Modifier.fillMaxWidth().background(ide.panel)) {
-                HorizontalDivider(color = ide.borderStrong)
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .clickable(role = Role.Button, onClickLabel = "Open the full log") {
-                            showLog = true
-                        }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
+        // full-screen, where it can be read, copied or saved. It arrives by
+        // growing into place, so the list gives up exactly the height it takes.
+        Column(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+            if (vm.pluginRunning) {
+                // A skeleton the shape of the bar that is coming, in place of a
+                // spinner that could only say that something was happening.
+                Column(Modifier.fillMaxWidth().background(ide.panel)) {
+                    HorizontalDivider(color = ide.borderStrong)
+                    Column(
                         Modifier
-                            .size(7.dp)
-                            .background(
-                                when {
-                                    !vm.lastPluginOk -> ide.red
-                                    changes.total == 0 -> ide.dim
-                                    else -> ide.entry
-                                },
-                                CircleShape
-                            )
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .padding(horizontal = Space.xl, vertical = Space.m)
+                    ) {
                         Text(
-                            vm.lastPluginName.ifEmpty { "Plugin result" },
+                            vm.lastPluginName.ifEmpty { "Plugin" },
                             color = ide.text, fontSize = Type.label, fontWeight = FontWeight.Medium
                         )
-                        // An empty run and a failed run used to read the same.
-                        Text(
-                            when {
-                                !vm.lastPluginOk -> "failed — tap to read the error"
-                                changes.total == 0 ->
-                                    "ran clean · nothing changed · ${vm.pluginOutput.lineSequence().count()} lines"
-                                else -> "wrote ${changes.label()}"
-                            },
-                            color = if (vm.lastPluginOk) ide.dim2 else ide.red,
-                            fontSize = Type.caption, fontFamily = Mono
+                        // One ghost line under the name: the same two lines the
+                        // result bar will have, so nothing jumps when it lands.
+                        SkeletonLines(1)
+                    }
+                    NavBarSpacer()
+                }
+            } else if (hasResult) {
+                Column(Modifier.fillMaxWidth().background(ide.panel)) {
+                    HorizontalDivider(color = ide.borderStrong)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .clickable(role = Role.Button, onClickLabel = "Open the full log") {
+                                showLog = true
+                            }
+                            .padding(horizontal = Space.xl, vertical = Space.m),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .background(
+                                    when {
+                                        !vm.lastPluginOk -> ide.red
+                                        changes.total == 0 -> ide.dim
+                                        else -> ide.entry
+                                    },
+                                    CircleShape
+                                )
+                        )
+                        Spacer(Modifier.width(Space.m))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                vm.lastPluginName.ifEmpty { "Plugin result" },
+                                color = ide.text, fontSize = Type.label, fontWeight = FontWeight.Medium
+                            )
+                            // An empty run and a failed run used to read the same.
+                            Text(
+                                when {
+                                    !vm.lastPluginOk -> "failed — tap to read the error"
+                                    changes.total == 0 ->
+                                        "ran clean · nothing changed · ${changes.logLines} lines"
+                                    else -> "wrote ${changes.label()}"
+                                },
+                                color = if (vm.lastPluginOk) ide.dim2 else ide.red,
+                                fontSize = Type.caption, fontFamily = Mono
+                            )
+                        }
+                        Icon(
+                            Icons.Filled.OpenInFull, contentDescription = "Open full log",
+                            tint = ide.accent, modifier = Modifier.size(17.dp)
                         )
                     }
-                    Icon(
-                        Icons.Filled.OpenInFull, contentDescription = "Open full log",
-                        tint = ide.accent, modifier = Modifier.size(17.dp)
-                    )
+                    // A toast is gone in four seconds; the one destructive action
+                    // in the app keeps its way back for as long as it is undoable.
+                    if (vm.lastPluginUndoable) UndoRow(vm, changes)
+                    NavBarSpacer()
                 }
-                // A toast is gone in four seconds; the one destructive action
-                // in the app keeps its way back for as long as it is undoable.
-                if (vm.lastPluginUndoable) UndoRow(vm, changes)
-                NavBarSpacer()
             }
         }
     }
@@ -355,14 +420,14 @@ private fun UndoRow(vm: StudioViewModel, changes: RunChanges) {
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clickable(role = Role.Button) { vm.undoLastPlugin(ctx) }
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = Space.xl, vertical = Space.m),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             Icons.Filled.Undo, contentDescription = null, tint = ide.accent,
             modifier = Modifier.size(15.dp)
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Space.m))
         Text(
             "Undo these changes", color = ide.accent, fontSize = Type.label,
             fontWeight = FontWeight.SemiBold
@@ -410,7 +475,7 @@ private fun RunConfirmDialog(
                         "Anything it finds at the same address is replaced — including a name you typed yourself.",
                     color = ide.dim, fontSize = Type.label, lineHeight = 18.sp
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(Space.m))
                 Text(
                     "The whole run can be undone afterwards, from the result bar at the bottom of this panel.",
                     color = ide.dim2, fontSize = Type.label, lineHeight = 18.sp
@@ -437,7 +502,7 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
     val ide = LocalIde.current
     val ctx = LocalContext.current
     val clip = LocalClipboardManager.current
-    val changes = remember(vm.pluginOutput) { parseChanges(vm.pluginOutput) }
+    val changes = remember(System.identityHashCode(vm.pluginOutput)) { parseChanges(vm.pluginOutput) }
     val save = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain")
     ) { uri -> if (uri != null) vm.savePluginLog(ctx, uri) }
@@ -449,7 +514,7 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
     ) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 6.dp),
+                Modifier.fillMaxWidth().padding(start = Space.xl, end = Space.l, bottom = Space.s),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
@@ -458,7 +523,11 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                         color = ide.text, fontSize = Type.title, fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        if (vm.lastPluginOk) "finished · ${changes.label()}" else "failed",
+                        when {
+                            vm.pluginRunning -> "running"
+                            vm.lastPluginOk -> "finished · ${changes.label()}"
+                            else -> "failed"
+                        },
                         color = if (vm.lastPluginOk) ide.dim2 else ide.red,
                         fontSize = Type.label, fontFamily = Mono
                     )
@@ -475,22 +544,34 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                 Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(start = 20.dp, end = 12.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .padding(start = Space.xl, end = Space.l, bottom = Space.m),
+                horizontalArrangement = Arrangement.spacedBy(Space.s),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                StatChip("lines", "${vm.pluginOutput.lineSequence().count()}", ide.dim)
-                StatChip("effects", "${vm.lastPluginEffects}", ide.cyan)
+                // Every chip here is a count of what the project kept, which is
+                // what Undo restores. The raw effect count the run emitted is
+                // not one of them: where the two differ, the difference is the
+                // "repeat writes" chip, and nowhere is the same thing counted
+                // twice under two different rules.
+                StatChip("lines", "${changes.logLines}", ide.dim)
                 if (changes.renames > 0) StatChip("renames", "${changes.renames}", ide.amber)
                 if (changes.comments > 0) StatChip("comments", "${changes.comments}", ide.violet)
                 if (changes.bookmarks > 0) StatChip("bookmarks", "${changes.bookmarks}", ide.cyan)
+                if (changes.repeats > 0) StatChip("repeat writes", "${changes.repeats}", ide.dim2)
                 if (!vm.lastPluginOk) StatChip("failed", ide.red)
-                else if (changes.total == 0) StatChip("no changes", ide.dim2)
+                else if (changes.total == 0 && !vm.pluginRunning) StatChip("no changes", ide.dim2)
             }
             if (vm.lastPluginUndoable) UndoRow(vm, changes)
             HorizontalDivider(color = ide.border)
             val out = vm.pluginOutput
-            if (out.isBlank()) {
+            if (vm.pluginRunning) {
+                // The log is written in one go when the run ends, so a sheet
+                // opened during a run has nothing to show. It used to claim the
+                // run had printed nothing — a verdict on a run still going.
+                Column(Modifier.weight(1f).fillMaxWidth().padding(Space.xl)) {
+                    SkeletonLines(12, indent = true)
+                }
+            } else if (out.isBlank()) {
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     EmptyPanel(
                         "This run printed nothing",
@@ -506,7 +587,7 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
                             .horizontalScroll(rememberScrollState())
-                            .padding(16.dp)
+                            .padding(Space.xl)
                     )
                 }
             }

@@ -140,7 +140,14 @@ fun NocturneTheme(dark: Boolean, content: @Composable () -> Unit) {
             outline          = Color(0xFFBCAEBA)
         )
     }
-    CompositionLocalProvider(LocalIde provides (if (dark) darkIde() else lightIde())) {
+    // Motion is provided here, at the root of every tree the app ever composes,
+    // so no screen has to thread it through and nothing below can forget it.
+    // MainActivity already wraps StudioApp in this theme, so StudioApp itself
+    // needs no change: LocalMotion is simply in scope everywhere.
+    CompositionLocalProvider(
+        LocalIde provides (if (dark) darkIde() else lightIde()),
+        LocalMotion provides rememberMotionEnabled()
+    ) {
         MaterialTheme(colorScheme = scheme, content = content)
     }
 }

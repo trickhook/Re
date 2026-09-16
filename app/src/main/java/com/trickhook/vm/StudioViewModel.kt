@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -22,6 +23,7 @@ import com.trickhook.model.CallEdge
 import com.trickhook.model.CallGraphData
 import com.trickhook.model.ConsoleLine
 import com.trickhook.model.DbgState
+import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
@@ -36,7 +38,6 @@ import com.trickhook.model.parseDetail
 import com.trickhook.model.parseMeta
 import com.trickhook.model.parseScriptResult
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -132,6 +133,18 @@ class StudioViewModel : ViewModel() {
     // reset when you looked at something else and came back.
     var asmIndex by mutableStateOf(0)
     var asmOffset by mutableStateOf(0)
+    /**
+     * Which function [asmIndex]/[asmOffset] were measured in. The listing panel
+     * must not restore a scroll position taken from a 4,000-instruction function
+     * into a 20-instruction one; [selectFunction] keeps this in step.
+     */
+    var asmIndexFor by mutableStateOf<Long?>(null)
+    /**
+     * HexPanel's own save/restore slot: a ROW index, whose meaning depends on
+     * the bytes-per-row the panel picked for the current screen width. Nothing
+     * outside HexPanel may write it — to send the hex view somewhere, use
+     * [requestHexGoto], which speaks in file offsets.
+     */
     var hexIndex by mutableStateOf(0)
     var funcQuery by mutableStateOf("")
     var stringQuery by mutableStateOf("")
@@ -141,10 +154,11 @@ class StudioViewModel : ViewModel() {
     var mapMode by mutableStateOf(0)
     var apkMode by mutableStateOf(0)
     var traceStep by mutableStateOf(-1)
-    var pluginSelected by mutableStateOf("")
-    var graphScale by mutableStateOf(1f)
-    var graphPanX by mutableStateOf(0f)
-    var graphPanY by mutableStateOf(0f)
+    // Float-specialised: pan and zoom write these on every pointer frame, and
+    // a boxed Float per frame per axis is three allocations a frame.
+    var graphScale by mutableFloatStateOf(1f)
+    var graphPanX by mutableFloatStateOf(0f)
+    var graphPanY by mutableFloatStateOf(0f)
 
     // -------------------------------------------------------- backend compare --
     var compareBackends by mutableStateOf(false)
@@ -161,6 +175,13 @@ class StudioViewModel : ViewModel() {
     // ------------------------------------------------------------ cross-panel --
     /** An address another panel asked us to reveal; the panel consumes it. */
     var gotoAddr by mutableStateOf<Long?>(null); private set
+    /**
+     * A FILE OFFSET the hex view has been asked to reveal — not a row index.
+     * HexPanel measures its bytes-per-row (8, 16 or 32) from the screen width,
+     * so a row index computed by the caller means different bytes on different
+     * devices; only the panel can turn an offset into a row.
+     */
+    var hexGotoOffset by mutableStateOf<Long?>(null)
     var graphZoomReq by mutableStateOf(1f)
     var graphFitReq by mutableStateOf(false)
 
@@ -179,6 +200,15 @@ class StudioViewModel : ViewModel() {
     var dbgBusy by mutableStateOf(false); private set
     var dbgMem by mutableStateOf<Pair<Long, String>?>(null); private set
     var dbgStack by mutableStateOf<Pair<Long, String>?>(null); private set
+    /**
+     * The thread list from the last `threads` command, held apart from
+     * [dbgState] on purpose: the 400 ms session poll replaces dbgState
+     * wholesale, so an answer that only lived there was gone before it could be
+     * drawn — which is why the panel had to catch it in local state instead.
+     * Nothing on the poll path writes this. Settable so the panel can hide the
+     * list again.
+     */
+    var dbgThreads by mutableStateOf<List<DbgThread>>(emptyList())
 
     // v2: plugins
     var plugins by mutableStateOf<List<PluginDef>>(emptyList()); private set
@@ -278,7 +308,10 @@ class StudioViewModel : ViewModel() {
         try {
             withContext(Dispatchers.IO) {
                 val f = File(rp.path)
-                if (!f.exists()) { log("ERROR", "Cached binary missing — fur faylka markale"); return@withContext }
+                if (!f.exists()) {
+                    log("ERROR", "Cached binary missing — open the file again: ${rp.path}")
+                    return@withContext
+                }
                 if (rp.format == "APK") openApk(f, rp.name) else loadFile(f, rp.name)
             }
         } finally { busy = false; globalPhase = "" }
@@ -321,10 +354,8 @@ class StudioViewModel : ViewModel() {
         }
 
         // register project
-        db?.let { d ->
-            projectId = d.upsertProject(file.absolutePath, name, "APK", "")
-            syncProjectAnnotations()
-        }
+        projectId = db?.upsertProject(file.absolutePath, name, "APK", "") ?: -1L
+        syncProjectAnnotations()
 
         val dex = apkEntries.firstOrNull { it.name == "classes.dex" }
             ?: apkEntries.firstOrNull { it.name.endsWith(".dex") }
@@ -387,10 +418,8 @@ class StudioViewModel : ViewModel() {
                 detail = null
                 pseudoAlt = null
                 resetPanelState()
-                db?.let { d ->
-                    projectId = d.upsertProject(file.absolutePath, name, m.format, m.arch)
-                    syncProjectAnnotations()
-                }
+                projectId = db?.upsertProject(file.absolutePath, name, m.format, m.arch) ?: -1L
+                syncProjectAnnotations()
                 callGraph = null
                 if (m.functions.isNotEmpty()) selectFunction(m.functions[0].addr)
                 else if (m.format == "DEX") tab = Tab.STRINGS else tab = Tab.ASSEMBLY
@@ -407,21 +436,36 @@ class StudioViewModel : ViewModel() {
      * graph transform; the modes (which are preferences, not positions) stay.
      */
     private fun resetPanelState() {
-        asmIndex = 0; asmOffset = 0; hexIndex = 0
+        asmIndex = 0; asmOffset = 0; asmIndexFor = null; hexIndex = 0
         funcQuery = ""; stringQuery = ""
         traceStep = -1
         graphScale = 1f; graphPanX = 0f; graphPanY = 0f
         graphZoomReq = 1f; graphFitReq = false
-        gotoAddr = null
+        gotoAddr = null; hexGotoOffset = null
         clearHistory()
         lastPluginUndoable = false
         pluginUndo = null
     }
 
     // ------------------------------------------------- project annotations --
+    /**
+     * Load every annotation for the open project in one pass, including the
+     * notes — those used to be fetched lazily from inside composition, which
+     * put a SQLite open on the main thread.
+     *
+     * With no database or no project row the caches are emptied rather than
+     * left alone: keeping them would show the PREVIOUS binary's renames,
+     * comments and notes against the new one.
+     */
     private fun syncProjectAnnotations() {
-        val d = db ?: return
-        if (projectId < 0) return
+        val d = db
+        if (d == null || projectId < 0) {
+            renames.clear()
+            comments.clear()
+            bookmarks = emptyList()
+            notesCache = emptyList()
+            return
+        }
         renames.clear(); renames.putAll(d.renames(projectId))
         comments.clear(); comments.putAll(d.comments(projectId))
         bookmarks = d.bookmarks(projectId)
@@ -485,22 +529,20 @@ class StudioViewModel : ViewModel() {
     }
 
     // --------------------------------------------------------------- notes --
-    // Held in state rather than queried per call: a panel reads this during
-    // composition, so it has to be cheap AND it has to change when a note is
-    // added, or the list would sit there stale.
+    // Held in state and loaded off the main thread. The annotations sheet reads
+    // this list during composition, so reading it must never open SQLite; the
+    // load happens in syncProjectAnnotations(), which already runs on the IO
+    // dispatcher every time a project is opened.
     private var notesCache by mutableStateOf<List<Note>>(emptyList())
-    private var notesCacheFor = -2L
 
-    /** Free-form notes for the open project. Empty until a binary is opened. */
-    fun notes(context: Context): List<Note> {
-        if (projectId < 0) return emptyList()
-        if (notesCacheFor != projectId) refreshNotes(database(context))
-        return notesCache
-    }
+    /**
+     * Free-form notes for the open project. A pure state read — safe to call
+     * from composition — that recomposes when a note is added or deleted.
+     */
+    fun notes(): List<Note> = notesCache
 
     private fun refreshNotes(d: ProjectDb) {
         notesCache = if (projectId < 0) emptyList() else d.notes(projectId)
-        notesCacheFor = projectId
     }
 
     /**
@@ -510,24 +552,28 @@ class StudioViewModel : ViewModel() {
     fun addNote(context: Context, text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        val d = database(context)
-        ensureProject(d)
-        if (projectId < 0) {
-            log("WARN", "Open a binary before writing notes")
-            return
+        viewModelScope.launch(Dispatchers.IO) {
+            val d = database(context)
+            ensureProject(d)
+            if (projectId < 0) {
+                log("WARN", "Open a binary before writing notes")
+                return@launch
+            }
+            val title = trimmed.lineSequence().first().take(80)
+            val body = trimmed.removePrefix(title).trim()
+            d.note(projectId, title, body)
+            refreshNotes(d)
+            log("OK", "Note saved")
         }
-        val title = trimmed.lineSequence().first().take(80)
-        val body = trimmed.removePrefix(title).trim()
-        d.note(projectId, title, body)
-        refreshNotes(d)
-        log("OK", "Note saved")
     }
 
     fun deleteNote(context: Context, id: Long) {
-        val d = database(context)
-        d.deleteNote(id)
-        refreshNotes(d)
-        log("OK", "Note deleted")
+        viewModelScope.launch(Dispatchers.IO) {
+            val d = database(context)
+            d.deleteNote(id)
+            refreshNotes(d)
+            log("OK", "Note deleted")
+        }
     }
 
     // ------------------------------------------------------------ navigation --
@@ -578,6 +624,16 @@ class StudioViewModel : ViewModel() {
         return a
     }
 
+    /** Ask the hex view to reveal [offset], counted from the start of the file. */
+    fun requestHexGoto(offset: Long) { hexGotoOffset = offset.coerceAtLeast(0L) }
+
+    /** Returns the pending file offset and clears it, so one request fires once. */
+    fun consumeHexGoto(): Long? {
+        val o = hexGotoOffset
+        hexGotoOffset = null
+        return o
+    }
+
     // --------------------------------------------------------------- lookups --
     // Built once per analysis. A linear scan per composition over 1,300
     // functions and tens of thousands of call edges is what these replace.
@@ -608,7 +664,16 @@ class StudioViewModel : ViewModel() {
         callersIndex = m.callEdges.groupBy { it.to }
         // addr == 0 means the section is not mapped into the address space, so
         // it can never contain a virtual address.
-        mappedSections = m.sections.filter { it.addr != 0L && it.size > 0L }.sortedBy { it.addr }
+        //
+        // NOBITS (.bss, .tbss) passes both of those tests and still occupies
+        // ZERO bytes on disk: its sh_offset conventionally points at wherever
+        // the next section begins. Translating a .bss address through it hands
+        // back a confident file offset into unrelated data, which is worse than
+        // returning null. MapSectionRow already refuses to jump for the same
+        // reason; the guard had simply never reached this shared helper.
+        mappedSections = m.sections
+            .filter { it.addr != 0L && it.size > 0L && it.type != "NOBITS" }
+            .sortedBy { it.addr }
     }
 
     fun functionAt(addr: Long): FuncInfo? = funcByAddr[addr]
@@ -631,6 +696,24 @@ class StudioViewModel : ViewModel() {
     fun callersOf(addr: Long): List<CallEdge> = callersIndex[addr] ?: emptyList()
 
     fun calleesOf(addr: Long): List<CallEdge> = calleesIndex[addr] ?: emptyList()
+
+    /**
+     * How many references come IN to [d]. One definition, called from every
+     * panel: the same function used to read "refs in 0" on one tab and "3 in"
+     * on another because four call sites each had their own rule.
+     *
+     * The engine fills xrefsIn only for functions it disassembled, so an empty
+     * list means "not analysed", not "nobody calls this" — the call-graph index
+     * answers that case. Both arrays are truncated by the engine, so this is a
+     * count of what is *shown*; swap in a true total the moment Models.kt
+     * carries one.
+     */
+    fun xrefInCount(d: FunctionDetail): Int =
+        if (d.xrefsIn.isNotEmpty()) d.xrefsIn.size else callersOf(d.addr).size
+
+    /** How many references go OUT of [d]. Counterpart to [xrefInCount]. */
+    fun xrefOutCount(d: FunctionDetail): Int =
+        if (d.xrefsOut.isNotEmpty()) d.xrefsOut.size else calleesOf(d.addr).size
 
     /**
      * Virtual address to offset in the file on disk. The hex view highlighted
@@ -659,6 +742,15 @@ class StudioViewModel : ViewModel() {
      */
     fun selectFunction(addr: Long) {
         val path = currentPath ?: return
+        // A scroll position measured in one function means nothing in another:
+        // restoring row 3,800 of a 4,000-instruction body into a 20-instruction
+        // one opened the listing at its end. Only a real move resets it, so the
+        // rename self-refresh (same address) still keeps your place.
+        if (selectedFunc != addr) {
+            asmIndex = 0
+            asmOffset = 0
+        }
+        asmIndexFor = addr
         selectedFunc = addr
         // The comparison column belongs to the previous function.
         pseudoAlt = null
@@ -726,8 +818,6 @@ class StudioViewModel : ViewModel() {
             log("ERROR", "save failed: ${e.message}")
         }
     }
-
-    fun listProjects(context: Context): List<RecentProject> = database(context).recentProjects(24)
 
     // ---------------------------------------------------------------- export --
     // IDA's "produce file": turn the analysis into a source listing on disk.
@@ -910,6 +1000,7 @@ class StudioViewModel : ViewModel() {
     fun dbgSpawn(prog: String, args: String) {
         dbgMode = DbgMode.SESSION
         dbgEvents = emptyList()
+        clearDbgSessionViews()
         log("INFO", "Spawning $prog")
         dbgCmd("""{"op":"spawn","prog":"$prog","args":"${args.replace("\"", "\\\"").replace("\n", "\\n")}"}""")
     }
@@ -917,13 +1008,28 @@ class StudioViewModel : ViewModel() {
     fun dbgAttach(pid: Long) {
         dbgMode = DbgMode.SESSION
         dbgEvents = emptyList()
+        clearDbgSessionViews()
         log("INFO", "Attaching to pid $pid")
         dbgCmd("""{"op":"attach","pid":$pid}""")
     }
 
+    /** Bytes, stack and threads all belong to one process; none survive it. */
+    private fun clearDbgSessionViews() {
+        dbgMem = null
+        dbgStack = null
+        dbgThreads = emptyList()
+    }
+
+    /**
+     * Read [len] bytes at [addr] into [dbgMem], which is what the MEMORY
+     * hexdump draws. An empty answer is reported rather than ignored: leaving
+     * the previous dump on screen made a failed read look like a successful one
+     * at the new address.
+     */
     fun dbgReadMem(addr: Long, len: Long = 256) {
         dbgCmd("""{"op":"read","addr":"0x${addr.toString(16)}","len":$len}""") { s ->
-            if (s.ok && s.memData.isNotEmpty()) dbgMem = Pair(s.memAddr, s.memData)
+            if (s.memData.isNotEmpty()) dbgMem = Pair(s.memAddr, s.memData)
+            else log("WARN", "No memory readable at ${"0x%X".format(addr)}")
         }
     }
 
@@ -938,11 +1044,19 @@ class StudioViewModel : ViewModel() {
     fun dbgCont() = dbgCmd("""{"op":"cont"}""")
     fun dbgStep() = dbgCmd("""{"op":"step"}""")
     fun dbgRegs() = dbgCmd("""{"op":"regs"}""")
-    fun dbgThreads() = dbgCmd("""{"op":"threads"}""")
+
+    /**
+     * Ask for the live thread list and keep the answer in [dbgThreads], where
+     * the poll cannot overwrite it. Renamed from `dbgThreads()`, which had no
+     * callers because its answer was unreachable.
+     */
+    fun dbgRefreshThreads() = dbgCmd("""{"op":"threads"}""") { s -> dbgThreads = s.threads }
+
     fun dbgKill() {
         dbgCmd("""{"op":"kill"}""")
         dbgMode = DbgMode.NONE
         dbgState = null
+        clearDbgSessionViews()
     }
 
     fun dbgBpAtSelectedFunction() {
@@ -956,7 +1070,6 @@ class StudioViewModel : ViewModel() {
 
     // ----------------------------------------------------------- decompiler --
     var decompiler by mutableStateOf("ghidra"); private set
-    var decompilerBackend by mutableStateOf(""); private set
     var decompilerNote by mutableStateOf(""); private set
     var sleighReady by mutableStateOf(false); private set
 
@@ -1015,13 +1128,11 @@ class StudioViewModel : ViewModel() {
                 NativeBridge.nativeDecompilerStatus(currentPath.orEmpty())
             } catch (e: Exception) { return@launch }
             try {
-                val o = JSONObject(json)
-                val backend = o.optString("backend")
-                val note = o.optString("note")
-                withContext(Dispatchers.Main) {
-                    decompilerBackend = backend
-                    decompilerNote = note
-                }
+                // Only the note is kept: the backend name was written here and
+                // read nowhere, while every screen that shows a backend takes
+                // it from `decompiler`/`detail.backend`.
+                val note = JSONObject(json).optString("note")
+                withContext(Dispatchers.Main) { decompilerNote = note }
             } catch (e: Exception) { /* status is advisory */ }
         }
     }
@@ -1246,69 +1357,6 @@ class StudioViewModel : ViewModel() {
                 pseudoAltBusy = false
             }
         }
-    }
-
-    private fun localExplanation(d: FunctionDetail): String {
-        val sb = StringBuilder()
-        val calls = d.asm.mapNotNull { l ->
-            val c = l.comment
-            if ((l.mnem == "bl" || l.mnem == "call") && c.isNotEmpty()) c.substringBefore("  //") else null
-        }.distinct()
-        val loops = d.blocks.size
-        val strings = d.asm.map { it.comment }.filter { it.startsWith("\"") }.distinct().take(5)
-        val danger = calls.mapNotNull { n ->
-            when {
-                n.substringAfterLast('!').lowercase() in setOf("strcpy", "strcat", "sprintf", "gets") ->
-                    "buffer overflow risk: $n (no bounds checking)"
-                n.lowercase().contains("system") || n.lowercase().contains("exec") ->
-                    "process execution: $n"
-                n.lowercase().contains("dlopen") || n.lowercase().contains("dlsym") ->
-                    "dynamic code loading: $n"
-                n.lowercase() in setOf("mmap", "mprotect") -> "memory protection change: $n"
-                else -> null
-            }
-        }
-        val crypto = d.asm.any { l ->
-            l.ops.contains("0x67452301") || l.ops.contains("0x9E3779B9") ||
-                l.ops.contains("0x637C777F") || l.ops.contains("0x63") && l.mnem.startsWith("ldr")
-        }
-
-        sb.appendLine("## ${d.displayName.ifEmpty { d.name }} @ ${"0x%X".format(d.addr)}")
-        sb.appendLine()
-        sb.appendLine("Size ${d.size} bytes, ${d.asm.size} instructions, ${d.blocks.size} CFG blocks, ${d.irStats?.calls ?: 0} calls.")
-        sb.appendLine()
-        if (calls.isNotEmpty()) {
-            sb.appendLine("### Calls (${calls.size})")
-            calls.take(12).forEach { sb.appendLine(" • ${it.substringBefore('@')}") }
-            sb.appendLine()
-        }
-        if (strings.isNotEmpty()) {
-            sb.appendLine("### String references")
-            strings.forEach { sb.appendLine(" • $it") }
-            sb.appendLine()
-        }
-        if (danger.isNotEmpty()) {
-            sb.appendLine("### Security notes")
-            danger.forEach { sb.appendLine("  [!] $it") }
-            sb.appendLine()
-        }
-        if (crypto) sb.appendLine("### Crypto hint: looks like hashing/crypto constants present.")
-        if (loops > 3) sb.appendLine("### Control flow: ${d.irStats?.whiles ?: 0} loop(s), ${d.irStats?.ifs ?: 0} branch(es) — moderately complex logic.")
-        sb.appendLine()
-        sb.appendLine("### Summary (auto-generated, offline heuristics)")
-        when {
-            danger.isNotEmpty() && calls.size > 3 ->
-                sb.appendLine("This function performs several operations including potentially sensitive calls (exec/dynamic loading/copying without bounds). Worth manual review of argument setup before each call.")
-            calls.isEmpty() ->
-                sb.appendLine("Leaf function: pure computation on registers/stack, no external calls. Return value comes from arithmetic on a0 (first argument).")
-            calls.size <= 3 ->
-                sb.appendLine("Small orchestration function: sets up arguments and calls ${calls.size} helper(s), then returns.")
-            else ->
-                sb.appendLine("Mid-level worker: loops over data and calls multiple helpers; likely parsing/processing routine.")
-        }
-        sb.appendLine()
-        sb.appendLine("(Offline heuristic analysis — connect an LLM endpoint in AI settings for deeper explanation.)")
-        return sb.toString()
     }
 
     // -------------------------------------------------------------- helpers --

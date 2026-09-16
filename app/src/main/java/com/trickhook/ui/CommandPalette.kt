@@ -296,13 +296,6 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
 
 // ============================================================ Go to address ==
 
-/** Hex, with or without an 0x prefix. Returns null for anything else. */
-private fun parseAddr(raw: String): Long? {
-    val s = raw.trim().removePrefix("0x").removePrefix("0X").replace("_", "")
-    if (s.isEmpty()) return null
-    return s.toLongOrNull(16)
-}
-
 /**
  * Go-to-address used to write a file-scope global in GraphPanel that only the
  * Graph tab read, then call `selectFunction` on whatever raw address was typed

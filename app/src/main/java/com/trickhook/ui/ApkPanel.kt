@@ -1,6 +1,9 @@
 package com.trickhook.ui
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -40,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -131,6 +135,30 @@ private fun dangerousGroup(permission: String): String? {
     return DANGEROUS_PERMISSIONS[p.removePrefix(prefix)]
 }
 
+/**
+ * The archive the resource list was read out of, or null when the file the
+ * app has open is not that archive.
+ *
+ * `vm.currentPath` is not it. Opening an APK extracts classes.dex and then
+ * repoints currentPath at the extracted file, so the `ZipFile(currentPath)`
+ * the preview used to do could never open — and it blamed the entry the user
+ * had just tapped for the failure. The handle to the real package is
+ * `StudioViewModel.apkFile`, which is `private`, so this panel cannot ask for
+ * it; and guessing at one out of the cache directory would risk previewing a
+ * different APK's resources, which is worse than previewing none.
+ *
+ * So the panel asks the one question it can answer truthfully: is the open
+ * file itself a ZIP? That is the same two-byte test `openUri` uses to tell an
+ * APK from a raw binary, answered off `hexData`, which is already in memory.
+ * The day `apkFile` is exposed, this body becomes `vm.apkFile?.absolutePath`
+ * and the preview below starts working with no other change.
+ */
+private fun apkArchivePath(vm: StudioViewModel): String? {
+    val head = vm.hexData ?: return null
+    if (head.size < 2 || head[0] != 'P'.code.toByte() || head[1] != 'K'.code.toByte()) return null
+    return vm.currentPath
+}
+
 // ============================================================== APK panel ==
 /**
  * The six APK views. Which one is open lives in the ViewModel, so it survives
@@ -142,10 +170,19 @@ fun ApkPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
 
     if (vm.manifest == null && vm.apkEntries.isEmpty()) {
-        Hint(
-            "Open an APK to see the manifest, permissions, components, DEX classes, native libs and resources.",
-            "APK fur — manifest, permissions, activities/services, DEX, lib .so, resources."
-        )
+        // An open fills apkEntries before the manifest is decoded, so "no APK
+        // here" and "still reading the APK" used to be the same screen. A
+        // skeleton the shape of the summary says which of the two this is.
+        if (vm.busy) {
+            Column(Modifier.fillMaxSize().background(ide.bg).padding(Space.xl)) {
+                SkeletonLines(6)
+            }
+        } else {
+            Hint(
+                "Open an APK to see the manifest, permissions, components, DEX classes, native libs and resources.",
+                "APK fur — manifest, permissions, activities/services, DEX, lib .so, resources."
+            )
+        }
         return
     }
 
@@ -161,7 +198,7 @@ fun ApkPanel(vm: StudioViewModel) {
                 .background(ide.panel2)
                 .horizontalScroll(rememberScrollState())
                 .selectableGroup()
-                .padding(horizontal = 4.dp),
+                .padding(horizontal = Space.s),
             verticalAlignment = Alignment.CenterVertically
         ) {
             APK_SECTIONS.forEachIndexed { i, label ->
@@ -170,7 +207,7 @@ fun ApkPanel(vm: StudioViewModel) {
                     Modifier
                         .heightIn(min = 48.dp)
                         .selectable(selected = selected, role = Role.Tab) { vm.apkMode = i }
-                        .padding(vertical = 8.dp, horizontal = 2.dp),
+                        .padding(vertical = Space.m, horizontal = Space.xs),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -184,19 +221,26 @@ fun ApkPanel(vm: StudioViewModel) {
                                 if (selected) ide.accent.copy(alpha = 0.14f) else Color.Transparent,
                                 RoundedCornerShape(8.dp)
                             )
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .padding(horizontal = Space.m, vertical = Space.s)
                     )
                 }
             }
         }
 
-        when (mode) {
-            0 -> ManifestSection(vm)
-            1 -> ComponentsSection(vm)
-            2 -> PermissionsSection(vm)
-            3 -> DexSection(vm)
-            4 -> LibsSection(vm)
-            else -> ResourcesSection(vm)
+        // The six sections are not the same height: four of them fall back to
+        // a wrap-height empty state, the rest fill the panel. Switching used to
+        // snap the content area between those two sizes under a strip that had
+        // not moved. It grows and shrinks now — and snaps again, correctly, at
+        // the zero duration reduce-motion asks for.
+        Box(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+            when (mode) {
+                0 -> ManifestSection(vm)
+                1 -> ComponentsSection(vm)
+                2 -> PermissionsSection(vm)
+                3 -> DexSection(vm)
+                4 -> LibsSection(vm)
+                else -> ResourcesSection(vm)
+            }
         }
     }
 }
@@ -206,10 +250,22 @@ private fun ManifestSection(vm: StudioViewModel) {
     val ide = LocalIde.current
     val mi = vm.manifest
     if (mi == null) {
-        EmptyPanel(
-            "This APK has no AndroidManifest.xml",
-            "Without a manifest there is no package name, no SDK levels and no component list to show."
-        )
+        // Binary XML is decoded inside the open, after the entry list is
+        // already on screen. Announcing that the APK has no manifest while it
+        // is still being parsed is the panel answering a question it has not
+        // been told the answer to yet.
+        if (vm.busy) {
+            Column(Modifier.fillMaxWidth().background(ide.bg).padding(Space.l)) {
+                SkeletonLines(3)
+                Spacer(Modifier.height(Space.l))
+                SkeletonLines(10, indent = true)
+            }
+        } else {
+            EmptyPanel(
+                "This APK has no AndroidManifest.xml",
+                "Without a manifest there is no package name, no SDK levels and no component list to show."
+            )
+        }
         return
     }
     if (!mi.ok) {
@@ -224,7 +280,7 @@ private fun ManifestSection(vm: StudioViewModel) {
                 Text(
                     mi.rawXml.ifEmpty { "No further detail was reported." },
                     color = ide.red, fontSize = Type.mono, fontFamily = Mono, lineHeight = 17.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = Space.l, vertical = Space.m)
                 )
             }
         }
@@ -232,12 +288,12 @@ private fun ManifestSection(vm: StudioViewModel) {
     }
     LazyColumn(Modifier.fillMaxSize().background(ide.bg), contentPadding = bottomInset()) {
         item {
-            Column(Modifier.padding(12.dp)) {
+            Column(Modifier.padding(Space.l)) {
                 Text(
                     mi.packageName, color = ide.accent, fontSize = Type.section, fontFamily = Mono,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(Space.s))
                 KeyValue("version", "${mi.versionName} (${mi.versionCode})")
                 KeyValue("minSdk / targetSdk", "${mi.minSdk.ifEmpty { "?" }} / ${mi.targetSdk.ifEmpty { "?" }}")
                 KeyValue("app label", mi.appLabel.ifEmpty { "-" })
@@ -254,10 +310,10 @@ private fun ManifestSection(vm: StudioViewModel) {
                 KeyValue("providers", "${mi.providers.size}")
                 if (mi.usesLibraries.isNotEmpty()) KeyValue("native libs", mi.usesLibraries.joinToString())
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(Space.m))
             Text(
                 "AndroidManifest.xml (decoded)", color = ide.dim2, fontSize = Type.caption,
-                modifier = Modifier.padding(horizontal = 12.dp)
+                modifier = Modifier.padding(horizontal = Space.l)
             )
         }
         item {
@@ -266,7 +322,7 @@ private fun ManifestSection(vm: StudioViewModel) {
                 color = ide.text, fontSize = Type.monoSmall, fontFamily = Mono, lineHeight = 15.sp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(12.dp)
+                    .padding(Space.l)
             )
         }
     }
@@ -283,7 +339,13 @@ private fun ComponentsSection(vm: StudioViewModel) {
         )
         return
     }
-    val rows = remember(mi) {
+    // Identity and a count, never the model itself: ManifestInfo is a data
+    // class, so `remember(mi)` compared five component lists, the permission
+    // list and the whole decoded XML on every single recomposition.
+    val rows = remember(
+        System.identityHashCode(mi),
+        mi.activities.size + mi.services.size + mi.receivers.size + mi.providers.size
+    ) {
         buildList {
             mi.activities.forEach { add(ApkComponentRow("ACTIVITY", it.name, it.exported?.toString() ?: "-", it.actions)) }
             mi.services.forEach { add(ApkComponentRow("SERVICE", it.name, it.exported?.toString() ?: "-", it.actions)) }
@@ -304,8 +366,13 @@ private fun ComponentsSection(vm: StudioViewModel) {
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .animateItem(
+                        fadeInSpec = tween(motionMs()),
+                        placementSpec = tween(motionMs()),
+                        fadeOutSpec = tween(motionMs())
+                    )
                     .semantics(mergeDescendants = true) { }
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .padding(horizontal = Space.m, vertical = Space.s)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -326,7 +393,7 @@ private fun ComponentsSection(vm: StudioViewModel) {
                         modifier = Modifier.weight(1f)
                     )
                     if (r.exported == "true") {
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(Space.s))
                         StatChip("exported", ide.red)
                     }
                 }
@@ -360,7 +427,11 @@ private fun PermissionsSection(vm: StudioViewModel) {
         )
         return
     }
-    val flagged = remember(mi.permissions) { mi.permissions.count { dangerousGroup(it) != null } }
+    // Identity and size: the list is a plain List<String>, so a value key
+    // walked and compared every permission on every recomposition.
+    val flagged = remember(System.identityHashCode(mi.permissions), mi.permissions.size) {
+        mi.permissions.count { dangerousGroup(it) != null }
+    }
     LazyColumn(Modifier.fillMaxSize().background(ide.bg), contentPadding = bottomInset()) {
         item {
             Text(
@@ -368,7 +439,7 @@ private fun PermissionsSection(vm: StudioViewModel) {
                 else "${mi.permissions.size} permissions · $flagged dangerous",
                 color = if (flagged == 0) ide.dim2 else ide.red,
                 fontSize = Type.caption, fontFamily = Mono,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                modifier = Modifier.padding(horizontal = Space.m, vertical = Space.m)
             )
         }
         items(mi.permissions.size) { i ->
@@ -381,8 +452,13 @@ private fun PermissionsSection(vm: StudioViewModel) {
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .animateItem(
+                        fadeInSpec = tween(motionMs()),
+                        placementSpec = tween(motionMs()),
+                        fadeOutSpec = tween(motionMs())
+                    )
                     .semantics(mergeDescendants = true) { }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .padding(horizontal = Space.m, vertical = Space.s),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (group != null) {
@@ -398,7 +474,7 @@ private fun PermissionsSection(vm: StudioViewModel) {
                     modifier = Modifier.weight(1f)
                 )
                 if (group != null) {
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Space.m))
                     StatChip("dangerous · $group", ide.red)
                 }
             }
@@ -418,8 +494,13 @@ private fun DexSection(vm: StudioViewModel) {
         return
     }
     var query by remember { mutableStateOf("") }
-    val classes = remember(query, meta.dexClasses) {
-        meta.dexClasses.filter { it.name.contains(query, ignoreCase = true) }
+    // Identity and size, never the list: AnalysisMeta and its lists are data
+    // classes, so `remember(query, meta.dexClasses)` deep-compared every one of
+    // tens of thousands of DexClassInfo on every keystroke, before the filter
+    // it guards had even run. The original index rides along as the row key, so
+    // a class that survives a keystroke moves instead of being replaced.
+    val classes = remember(query, System.identityHashCode(meta.dexClasses), meta.dexClasses.size) {
+        meta.dexClasses.withIndex().filter { (_, c) -> c.name.contains(query, ignoreCase = true) }
     }
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -427,7 +508,7 @@ private fun DexSection(vm: StudioViewModel) {
             label = { Text("Search classes…") }, singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .padding(horizontal = Space.m, vertical = Space.s),
             textStyle = TextStyle(fontSize = Type.label, fontFamily = Mono, color = ide.text)
         )
         LazyColumn(Modifier.fillMaxSize().background(ide.bg), contentPadding = bottomInset()) {
@@ -448,13 +529,18 @@ private fun DexSection(vm: StudioViewModel) {
                     }
                 }
             } else {
-                items(classes.size) { i ->
-                    val c = classes[i]
+                items(classes.size, key = { classes[it].index }) { i ->
+                    val c = classes[i].value
                     Column(
                         Modifier
                             .fillMaxWidth()
+                            .animateItem(
+                                fadeInSpec = tween(motionMs()),
+                                placementSpec = tween(motionMs()),
+                                fadeOutSpec = tween(motionMs())
+                            )
                             .semantics(mergeDescendants = true) { }
-                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                            .padding(horizontal = Space.m, vertical = Space.xs)
                     ) {
                         Text(c.name, color = ide.cyan, fontSize = Type.label, fontFamily = Mono, maxLines = 1)
                         if (c.superName.isNotEmpty()) {
@@ -473,7 +559,7 @@ private fun DexSection(vm: StudioViewModel) {
                         else
                             "${classes.size} of ${meta.dexClasses.size} classes match \"$query\"",
                         color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
-                        modifier = Modifier.padding(10.dp)
+                        modifier = Modifier.padding(Space.m)
                     )
                 }
             }
@@ -504,7 +590,7 @@ private fun LibsSection(vm: StudioViewModel) {
                         onClickLabel = "Extract and analyse"
                     ) { vm.openApkEntry(e) }
                     .heightIn(min = 44.dp)
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .padding(horizontal = Space.m, vertical = Space.s),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 RowIcon(
@@ -522,7 +608,7 @@ private fun LibsSection(vm: StudioViewModel) {
         item {
             Text(
                 "Tap to extract & analyze (ELF) — si aad u falanqayso", color = ide.dim2,
-                fontSize = Type.caption, modifier = Modifier.padding(10.dp)
+                fontSize = Type.caption, modifier = Modifier.padding(Space.m)
             )
         }
     }
@@ -531,76 +617,103 @@ private fun LibsSection(vm: StudioViewModel) {
 @Composable
 private fun ResourcesSection(vm: StudioViewModel) {
     val ide = LocalIde.current
+    val archive = apkArchivePath(vm)
     var previewPath by remember { mutableStateOf<String?>(null) }
     var previewBmp by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var previewErr by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(previewPath) {
+    LaunchedEffect(previewPath, archive) {
         previewBmp = null
         previewErr = null
         val path = previewPath ?: return@LaunchedEffect
-        val apkPath = vm.currentPath
+        // Never `vm.currentPath`: see apkArchivePath. Opening the extracted
+        // classes.dex as a ZIP failed on every single entry, and the message
+        // pinned the blame on the entry rather than on the wrong file.
+        val apkPath = archive
         if (apkPath == null) {
-            previewErr = "The APK is no longer open."
+            previewErr = "The APK itself is not the open file, so its entries cannot be read back."
             return@LaunchedEffect
         }
         try {
+            var notInArchive = false
             // Decoding a few megabytes of PNG on the main thread froze the
             // list mid-scroll; it runs off it now.
             val bmp = withContext(Dispatchers.IO) {
                 ZipFile(java.io.File(apkPath)).use { zf ->
-                    val en = zf.getEntry(path) ?: return@use null
-                    BitmapFactory.decodeStream(zf.getInputStream(en))
+                    val en = zf.getEntry(path)
+                    if (en == null) {
+                        notInArchive = true
+                        null
+                    } else {
+                        BitmapFactory.decodeStream(zf.getInputStream(en))
+                    }
                 }
             }
             // A failed decode used to be swallowed by an empty catch, so a
-            // corrupt PNG looked exactly like a file that is not an image.
-            if (bmp == null) {
-                previewErr = "Could not decode this entry as an image."
-            } else {
-                previewBmp = bmp
+            // corrupt PNG looked exactly like a file that is not an image —
+            // and a missing entry looked like both.
+            previewErr = when {
+                notInArchive -> "That entry is no longer in the archive."
+                bmp == null -> "Could not decode this entry as an image."
+                else -> null
             }
+            previewBmp = bmp
         } catch (e: Exception) {
             previewErr = "Could not read this entry: ${e.message ?: "unknown error"}"
         }
     }
 
     Column(Modifier.fillMaxSize()) {
-        val path = previewPath
-        if (path != null) {
-            Box(
-                Modifier.fillMaxWidth().height(180.dp).background(ide.panel),
-                contentAlignment = Alignment.Center
-            ) {
+        // Zero-height with nothing to preview, so opening and closing one grows
+        // and shrinks the list rather than shoving it down in a single frame.
+        Box(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
+            val path = previewPath
+            if (path != null) {
                 val bmp = previewBmp
                 val err = previewErr
-                when {
-                    bmp != null -> Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = "Preview of $path",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize().padding(8.dp)
-                    )
-                    err != null -> Text(
-                        err, color = ide.red, fontSize = Type.caption, fontFamily = Mono,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 24.dp)
-                    )
-                    else -> Text(
-                        "Decoding…", color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
-                    )
-                }
+                // The decode is off the main thread now, so there is a real gap
+                // between the pane appearing and the image existing. The image
+                // fades across that gap instead of popping in at full size.
+                val imageAlpha by animateFloatAsState(
+                    targetValue = if (bmp != null) 1f else 0f,
+                    animationSpec = tween(motionMs()),
+                    label = "resourcePreviewFade"
+                )
                 Box(
-                    Modifier
-                        .align(Alignment.TopEnd)
-                        .size(48.dp)
-                        .clickable(role = Role.Button) { previewPath = null },
+                    Modifier.fillMaxWidth().height(180.dp).background(ide.panel),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        Icons.Filled.Close, contentDescription = "Close preview",
-                        tint = ide.dim, modifier = Modifier.size(17.dp)
-                    )
+                    when {
+                        bmp != null -> Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "Preview of $path",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(Space.m)
+                                .alpha(imageAlpha)
+                        )
+                        err != null -> Text(
+                            err, color = ide.red, fontSize = Type.caption, fontFamily = Mono,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = Space.xxl)
+                        )
+                        else -> Text(
+                            "Decoding…", color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
+                        )
+                    }
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .size(48.dp)
+                            .clickable(role = Role.Button) { previewPath = null },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.Close, contentDescription = "Close preview",
+                            tint = ide.dim, modifier = Modifier.size(17.dp)
+                        )
+                    }
                 }
             }
         }
@@ -611,21 +724,41 @@ private fun ResourcesSection(vm: StudioViewModel) {
             )
         } else {
             LazyColumn(Modifier.fillMaxSize().background(ide.bg), contentPadding = bottomInset()) {
+                if (archive == null) {
+                    // Said once, at the top, instead of once per tap: a row
+                    // that cannot open is inert below, not a trap that answers
+                    // with the same error every time.
+                    item {
+                        Text(
+                            "Listed from the package, but not readable from here: analysing an APK " +
+                                "extracts its DEX and follows that file, so the package is no longer " +
+                                "the one Nocturne has open.",
+                            color = ide.dim2, fontSize = Type.caption, lineHeight = 14.sp,
+                            modifier = Modifier.padding(horizontal = Space.m, vertical = Space.m)
+                        )
+                    }
+                }
                 items(vm.apkResources.size) { i ->
                     val r = vm.apkResources[i]
-                    // Only an image can be previewed, so only an image ripples.
+                    // Only an image that can actually be opened ripples.
+                    val canPreview = r.isImage && archive != null
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            .animateItem(
+                                fadeInSpec = tween(motionMs()),
+                                placementSpec = tween(motionMs()),
+                                fadeOutSpec = tween(motionMs())
+                            )
                             .then(
-                                if (r.isImage) Modifier.clickable(
+                                if (canPreview) Modifier.clickable(
                                     role = Role.Button,
                                     onClickLabel = "Preview"
                                 ) { previewPath = r.path }
                                 else Modifier
                             )
                             .heightIn(min = 44.dp)
-                            .padding(horizontal = 10.dp, vertical = 2.dp),
+                            .padding(horizontal = Space.m, vertical = Space.xs),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RowIcon(
@@ -650,8 +783,10 @@ private fun ResourcesSection(vm: StudioViewModel) {
                 }
                 item {
                     Text(
-                        "Tap an image to preview — sawir si aad u aragto", color = ide.dim2,
-                        fontSize = Type.caption, modifier = Modifier.padding(10.dp)
+                        if (archive != null) "Tap an image to preview — sawir si aad u aragto"
+                        else "${vm.apkResources.size} entries listed from the package",
+                        color = ide.dim2,
+                        fontSize = Type.caption, modifier = Modifier.padding(Space.m)
                     )
                 }
             }
