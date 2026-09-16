@@ -3,7 +3,13 @@ name: Build APK
 on:
   push:
     branches: [main, 'claude/**']
-    tags: ['v*']
+    # A release is one deliberate act: pushing a version tag. Nothing else
+    # publishes, because a published release installs itself onto every device
+    # running the app. The patterns are anchored, so v2.1.0 and v2.1.0-rc1
+    # release, while v2.1 or v2.1.0-hotfix do not trigger anything at all.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc[0-9]'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -13,7 +19,9 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # Branch CI is disposable. A release build is not: never cancel one half way
+  # through and leave a tag with no APK behind it.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 env:
   # The project pins these in app/build.gradle.kts — keep them in sync.
@@ -21,14 +29,22 @@ env:
   CMAKE_VERSION: '3.22.1'
   COMPILE_SDK: '35'
   BUILD_TOOLS: '35.0.0'
+  # The release-side half of the updater contract. app/build.gradle.kts exposes
+  # the manifest name to the app as BuildConfig.UPDATE_MANIFEST_ASSET.
+  UPDATE_MANIFEST: nocturne-update.json
+  NOTES_FILE: dist/RELEASE-NOTES.md
 
 jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     outputs:
-      version: ${{ steps.meta.outputs.version }}
+      release: ${{ steps.mode.outputs.release }}
+      prerelease: ${{ steps.mode.outputs.prerelease }}
+      version: ${{ steps.stage.outputs.version }}
+      version_code: ${{ steps.stage.outputs.version_code }}
+      apk: ${{ steps.stage.outputs.apk }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,62 +71,183 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Read app version
-        id: meta
-        run: |
-          version=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "App version: $version"
-
-      # Release signing is optional. Without these secrets the release APK is
-      # unsigned and cannot be installed — use the debug APK instead.
-      - name: Check for release signing secrets
-        id: signing
-        env:
-          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No RELEASE_KEYSTORE_BASE64 secret — building the debug APK only."
-          fi
-
-      - name: Materialise release keystore
-        if: steps.signing.outputs.available == 'true'
+      # Decides, once, what this run is: a release (a version tag, with every
+      # signing secret present) or ordinary CI. Every later condition reads this
+      # one output instead of re-deriving the answer and drifting from it.
+      #
+      # Tagging without the secrets fails the run here rather than going green
+      # and publishing nothing — a silent non-release is the failure the person
+      # cutting it would notice last.
+      - name: Decide whether this run publishes a release
+        id: mode
         env:
           KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          printf '%s' "$KEYSTORE" | base64 -d > app/nocturne-release.jks
-          {
-            echo "storeFile=nocturne-release.jks"
-            echo "storePassword=${STORE_PASSWORD}"
-            echo "keyAlias=${KEY_ALIAS}"
-            echo "keyPassword=${KEY_PASSWORD}"
-          } > app/keystore.properties
+          set -euo pipefail
 
+          is_tag=false
+          case "$GITHUB_REF" in
+            refs/tags/v*) is_tag=true ;;
+          esac
+
+          # All four, not just the keystore: half a configuration fails deep
+          # inside Gradle with an error that names nothing useful.
+          missing=''
+          [ -n "$KEYSTORE" ]       || missing="$missing RELEASE_KEYSTORE_BASE64"
+          [ -n "$STORE_PASSWORD" ] || missing="$missing RELEASE_KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ]      || missing="$missing RELEASE_KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ]   || missing="$missing RELEASE_KEY_PASSWORD"
+
+          if [ "$is_tag" = true ] && [ -n "$missing" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME was pushed, but these repository secrets are unset:$missing. See docs/RELEASE-SIGNING.md. Refusing to cut a release that nobody could install."
+            exit 1
+          fi
+
+          if [ "$is_tag" = true ]; then
+            version="${GITHUB_REF_NAME#v}"
+
+            # Mirrors the rule in app/build.gradle.kts, checked here so a
+            # mistyped tag fails in seconds rather than after an hour of NDK
+            # build time. rc0 and rc9+ have no room in the versionCode.
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[1-8])?$ ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rcN with N in 1..8."
+              exit 1
+            fi
+
+            prerelease=false
+            case "$GITHUB_REF_NAME" in *-rc*) prerelease=true ;; esac
+            {
+              echo "release=true"
+              echo "prerelease=$prerelease"
+              echo "version_name=$version"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice::Release run for $GITHUB_REF_NAME."
+          else
+            {
+              echo "release=false"
+              echo "prerelease=false"
+              # Empty: app/build.gradle.kts then falls back to baseVersionName.
+              echo "version_name="
+            } >> "$GITHUB_OUTPUT"
+            if [ -n "$missing" ]; then
+              echo "::notice::Release signing secrets are not all set — building the debug APK only."
+            fi
+          fi
+
+      # Only the binary keystore reaches the disk. The passwords stay in the
+      # environment of the Gradle step, so there is no file that could be read,
+      # cached or committed, and no .properties escaping to mangle them.
+      - name: Materialise release keystore
+        if: steps.mode.outputs.release == 'true'
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$KEYSTORE" | tr -d '[:space:]' | base64 -d > app/nocturne-release.jks
+
+          # Confirm the secret decoded to a keystore before spending an hour of
+          # NDK build time on it. PKCS#12 starts 30 82 (DER SEQUENCE), the older
+          # JKS format starts FE ED FE ED. Four header bytes are not a secret.
+          magic=$(head -c 4 app/nocturne-release.jks | od -An -tx1 | tr -d ' \n')
+          case "$magic" in
+            3082*|feedfeed) ;;
+            *)
+              echo "::error::RELEASE_KEYSTORE_BASE64 did not decode to a keystore. Re-encode it with: base64 -w0 nocturne-release.jks"
+              exit 1
+              ;;
+          esac
+
+          # Prove, on every release, that git would refuse to track it.
+          if ! git check-ignore -q app/nocturne-release.jks; then
+            echo "::error::app/nocturne-release.jks is not covered by .gitignore."
+            exit 1
+          fi
+          echo "Keystore decoded ($(stat -c%s app/nocturne-release.jks) bytes)."
+
+      # Skipped on a release run: the release APK is the only artifact a tag
+      # produces, and building both doubles an already long NDK build for an APK
+      # that must never be published anyway.
       - name: Build debug APK
+        if: steps.mode.outputs.release != 'true'
         run: ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" assembleDebug
 
       - name: Build release APK
-        if: steps.signing.outputs.available == 'true'
+        if: steps.mode.outputs.release == 'true'
+        env:
+          NOCTURNE_VERSION_NAME: ${{ steps.mode.outputs.version_name }}
+          NOCTURNE_REQUIRE_SIGNING: 'true'
+          NOCTURNE_KEYSTORE_FILE: nocturne-release.jks
+          NOCTURNE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          NOCTURNE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          NOCTURNE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" assembleRelease
 
       - name: Stage APKs
         id: stage
+        env:
+          IS_RELEASE: ${{ steps.mode.outputs.release }}
         run: |
+          set -euo pipefail
           mkdir -p dist
-          v='${{ steps.meta.outputs.version }}'
-          sha=$(git rev-parse --short HEAD)
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Nocturne-v${v}-${sha}-debug.apk"
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "dist/Nocturne-v${v}-release.apk"
+          aapt2="$ANDROID_HOME/build-tools/${BUILD_TOOLS}/aapt2"
+
+          # The version is read back out of the APK that was actually built, not
+          # recomputed from the tag. Published metadata that disagrees with the
+          # APK is worse than no metadata, and this is the only way to be sure.
+          badging_of() { "$aapt2" dump badging "$1" | head -n 1; }
+          field() { printf '%s' "$1" | grep -o "$2='[^']*'" | head -n1 | cut -d"'" -f2; }
+
+          if [ "$IS_RELEASE" = 'true' ]; then
+            src=app/build/outputs/apk/release/app-release.apk
+            if [ ! -f "$src" ]; then
+              # AGP names the output app-release-unsigned.apk when no signing
+              # config applied. Reaching here means the release built without
+              # the keystore.
+              echo "::error::$src is missing. The release build produced no signed APK. Present instead: $(find app/build/outputs/apk/release -maxdepth 1 -type f -printf '%f ' 2>/dev/null)"
+              exit 1
+            fi
+            b=$(badging_of "$src")
+            version=$(field "$b" versionName)
+            version_code=$(field "$b" versionCode)
+            apk="Nocturne-${version}.apk"
+            cp "$src" "dist/$apk"
+
+            # The digest ships as its own file, never inside the APK it
+            # describes. sha256sum -c reads this as-is.
+            ( cd dist && sha256sum "$apk" > "${apk}.sha256" )
+          else
+            src=app/build/outputs/apk/debug/app-debug.apk
+            b=$(badging_of "$src")
+            version=$(field "$b" versionName)
+            version_code=$(field "$b" versionCode)
+            apk="Nocturne-v${version}-$(git rev-parse --short HEAD)-debug.apk"
+            cp "$src" "dist/$apk"
+            ( cd dist && sha256sum ./*.apk > SHA256SUMS.txt )
           fi
+
+          # Nothing that is not meant to leave this runner may sit in dist/.
+          leaked=$(find dist -maxdepth 1 -type f \
+            \( -iname '*.jks' -o -iname '*.keystore' -o -iname '*.p12' -o -iname '*.properties' \))
+          if [ -n "$leaked" ]; then
+            echo "::error::Signing material in dist/ ($leaked) — refusing to upload."
+            exit 1
+          fi
+
           {
-            echo "### 📦 APKs"
+            echo "version=$version"
+            echo "version_code=$version_code"
+            echo "apk=$apk"
+          } >> "$GITHUB_OUTPUT"
+
+          # The backticks below are markdown for the job summary, not command
+          # substitution, so the single quotes are deliberate.
+          # shellcheck disable=SC2016
+          {
+            echo "### APKs"
             echo
             echo "| File | Size | SHA-256 |"
             echo "|------|------|---------|"
@@ -118,12 +255,155 @@ jobs:
               printf '| `%s` | %s | `%s` |\n' \
                 "$(basename "$f")" \
                 "$(du -h "$f" | cut -f1)" \
-                "$(sha256sum "$f" | cut -c1-16)…"
+                "$(sha256sum "$f" | cut -c1-16)..."
             done
             echo
             echo 'Install with `adb install -r <file>.apk`, or copy it to the phone and open it.'
           } >> "$GITHUB_STEP_SUMMARY"
-          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+
+      # R8 and release signing have never run on this project before this
+      # workflow. Assert the result rather than assume it: an APK signed with the
+      # throwaway debug key installs for whoever built it and then permanently
+      # blocks every future update for everyone who installed it.
+      - name: Verify the release signature
+        id: signature
+        if: steps.mode.outputs.release == 'true'
+        env:
+          APK: ${{ steps.stage.outputs.apk }}
+        run: |
+          set -euo pipefail
+          apksigner="$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner"
+          apk="dist/$APK"
+
+          if ! out=$("$apksigner" verify --print-certs -v "$apk" 2>&1); then
+            printf '%s\n' "$out"
+            echo "::error::apksigner could not verify $apk."
+            exit 1
+          fi
+          printf '%s\n' "$out"
+
+          if ! printf '%s' "$out" | grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true'; then
+            echo "::error::$apk carries no v2 signature."
+            exit 1
+          fi
+          if printf '%s' "$out" | grep -q 'CN=Android Debug'; then
+            echo "::error::$apk is signed with the Android debug key, not the release key."
+            exit 1
+          fi
+
+          signer=$(printf '%s' "$out" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          if [ -z "$signer" ]; then
+            echo "::error::Could not read the signing certificate digest from apksigner."
+            exit 1
+          fi
+          echo "signer=$signer" >> "$GITHUB_OUTPUT"
+
+          {
+            echo
+            echo "### Signature"
+            echo
+            echo "Signing certificate SHA-256: \`$signer\`"
+            echo
+            echo "This must stay the same for every release. A different value means the"
+            echo "keystore changed and no existing install can take the update."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write release notes and update manifest
+        if: steps.mode.outputs.release == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.stage.outputs.version }}
+          VERSION_CODE: ${{ steps.stage.outputs.version_code }}
+          APK: ${{ steps.stage.outputs.apk }}
+          SIGNER: ${{ steps.signature.outputs.signer }}
+          PRERELEASE: ${{ steps.mode.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          # The notes are whatever the person cutting the release wrote in the
+          # annotated tag. That is the one place they are certain to be writing
+          # for a human, and it is fixed before the build starts.
+          git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}" 2>/dev/null || true
+          git for-each-ref "refs/tags/${TAG}" --format='%(contents)' \
+            | sed '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            git log -1 --pretty=%B > "$NOTES_FILE"
+          fi
+
+          # package:, sdkVersion: and native-code: each land on their own line.
+          aapt2="$ANDROID_HOME/build-tools/${BUILD_TOOLS}/aapt2"
+          "$aapt2" dump badging "dist/$APK" \
+            | grep -E "^(package|sdkVersion|native-code):" > /tmp/badging.txt
+          cat /tmp/badging.txt
+
+          # Assembled by python so that quotes, backslashes and newlines in the
+          # notes cannot produce invalid JSON on the one file the app parses.
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess
+
+          apk = os.environ["APK"]
+          path = os.path.join("dist", apk)
+          badging = open("/tmp/badging.txt", encoding="utf-8").read()
+
+          def one(pattern, default=""):
+              m = re.search(pattern, badging, re.M)
+              return m.group(1) if m else default
+
+          notes = open(os.environ["NOTES_FILE"], encoding="utf-8").read().strip()
+          if len(notes) > 2000:
+              notes = notes[:2000].rstrip() + "\n..."
+
+          digest = hashlib.sha256()
+          with open(path, "rb") as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b""):
+                  digest.update(chunk)
+
+          tag = os.environ["TAG"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          native = re.search(r"^native-code: (.*)", badging, re.M)
+          abis = re.findall(r"'([^']+)'", native.group(1)) if native else []
+
+          manifest = {
+              # Bump when the shape changes. An updater that does not know a
+              # schema should decline the update rather than guess at it.
+              "schema": 1,
+              "versionCode": int(os.environ["VERSION_CODE"]),
+              "versionName": os.environ["VERSION"],
+              "tag": tag,
+              "commit": os.environ["GITHUB_SHA"],
+              "releasedAt": subprocess.check_output(
+                  ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip(),
+              "prerelease": os.environ["PRERELEASE"] == "true",
+              "minSdk": int(one(r"^sdkVersion:'(\d+)'", "0")),
+              "abis": abis,
+              "apk": {
+                  "name": apk,
+                  "size": os.path.getsize(path),
+                  "sha256": digest.hexdigest(),
+                  "signerSha256": os.environ["SIGNER"],
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{apk}",
+              },
+              "releaseUrl": f"https://github.com/{repo}/releases/tag/{tag}",
+              "notes": notes,
+          }
+          with open(os.path.join("dist", os.environ["UPDATE_MANIFEST"]), "w", encoding="utf-8") as fh:
+              json.dump(manifest, fh, indent=2, ensure_ascii=False)
+              fh.write("\n")
+          PY
+
+          echo "::group::$UPDATE_MANIFEST"
+          cat "dist/$UPDATE_MANIFEST"
+          echo "::endgroup::"
+
+          # The digest in the manifest and the digest in the sidecar are computed
+          # independently; they have to agree or the updater and a human checking
+          # by hand would reach different conclusions.
+          from_manifest=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["apk"]["sha256"])' "dist/$UPDATE_MANIFEST")
+          from_sidecar=$(cut -d' ' -f1 < "dist/${APK}.sha256")
+          if [ "$from_manifest" != "$from_sidecar" ]; then
+            echo "::error::Manifest and sidecar digests disagree."
+            exit 1
+          fi
 
       - name: Inspect APK
         run: |
@@ -140,6 +420,7 @@ jobs:
           done
 
       - name: Upload debug APK
+        if: steps.mode.outputs.release != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Nocturne-debug-apk
@@ -149,34 +430,115 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload release APK
-        if: steps.signing.outputs.available == 'true'
+      # Named files, not a glob: the publish job downloads exactly this artifact
+      # and attaches exactly these assets. Nothing else can ride along.
+      - name: Upload release bundle
+        if: steps.mode.outputs.release == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Nocturne-release-apk
-          path: dist/*release.apk
+          name: Nocturne-release
+          path: |
+            dist/${{ steps.stage.outputs.apk }}
+            dist/${{ steps.stage.outputs.apk }}.sha256
+            dist/${{ env.UPDATE_MANIFEST }}
+            dist/RELEASE-NOTES.md
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
       - name: Remove signing material
         if: always()
-        run: rm -f app/nocturne-release.jks app/keystore.properties
+        run: |
+          rm -f app/nocturne-release.jks app/keystore.properties
+          rm -rf app/build/intermediates/signing_config \
+                 app/build/intermediates/signing_config_versions
+          if [ -e app/nocturne-release.jks ]; then
+            echo "::error::Failed to remove the keystore from the runner."
+            exit 1
+          fi
 
   release:
     name: Attach APKs to GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Not "is this a tag". The build job already decided, and it only says true
+    # when a version tag was pushed AND every signing secret was present AND a
+    # release APK came out the far end. Gating on the tag alone would publish
+    # whatever artifacts happened to exist — including a debug-signed APK, which
+    # would then block every future update on any device that installed it.
+    if: needs.build.outputs.release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
+    # Add a required reviewer under Settings > Environments > release to hold
+    # every publish for a human approval. Undefined, this is a no-op.
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      VERSION_CODE: ${{ needs.build.outputs.version_code }}
+      APK: ${{ needs.build.outputs.apk }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download the release bundle
+        uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          merge-multiple: true
+          name: Nocturne-release
+          path: dist
+
+      - name: Refuse to publish an update that goes backwards
+        run: |
+          set -euo pipefail
+          prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -z "$prev" ] || [ "$prev" = "$TAG" ]; then
+            echo "No earlier published release to compare against."
+            exit 0
+          fi
+          rm -rf prev && mkdir -p prev
+          gh release download "$prev" -p "$UPDATE_MANIFEST" -D prev 2>/dev/null || true
+          if [ ! -f "prev/$UPDATE_MANIFEST" ]; then
+            echo "Release $prev carries no $UPDATE_MANIFEST — nothing to compare."
+            exit 0
+          fi
+          prev_code=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["versionCode"])' "prev/$UPDATE_MANIFEST")
+          echo "Latest published: $prev (versionCode $prev_code). This run: $TAG (versionCode $VERSION_CODE)."
+          if [ "$VERSION_CODE" -le "$prev_code" ]; then
+            echo "::error::versionCode $VERSION_CODE is not greater than the published $prev_code. Every device on $prev would ignore this release. Tag a higher version."
+            exit 1
+          fi
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*.apk
-          generate_release_notes: true
+        run: |
+          set -euo pipefail
+          files=("dist/$APK" "dist/${APK}.sha256" "dist/$UPDATE_MANIFEST")
+          for f in "${files[@]}" dist/RELEASE-NOTES.md; do
+            [ -f "$f" ] || { echo "::error::$f is missing from the build artifact."; exit 1; }
+          done
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-running a release that already exists: replace the assets in
+            # place rather than failing. Same tag, same inputs, same versionCode.
+            echo "Release $TAG already exists — replacing its assets."
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            args=(--verify-tag --title "Nocturne $VERSION"
+                  --notes-file dist/RELEASE-NOTES.md --generate-notes)
+            if [ "$PRERELEASE" = 'true' ]; then
+              # GitHub excludes prereleases from /releases/latest, so the
+              # updater never offers a release candidate to an ordinary user.
+              args+=(--prerelease)
+            else
+              args+=(--latest)
+            fi
+            gh release create "$TAG" "${args[@]}" "${files[@]}"
+          fi
+
+          {
+            echo "### Released"
+            echo
+            echo "- Tag: \`$TAG\`"
+            echo "- versionName: \`$VERSION\`  versionCode: \`$VERSION_CODE\`"
+            echo "- https://github.com/$GH_REPO/releases/tag/$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -14,6 +14,7 @@ captures/
 
 # Secrets — never commit signing material
 *.jks
+*.jks.b64
 keystore.properties
 *.idsig
 agent-ctx/
