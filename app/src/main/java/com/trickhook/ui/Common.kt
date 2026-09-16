@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.trickhook.model.CallEdge
 import com.trickhook.model.FunctionDetail
 import com.trickhook.vm.StudioViewModel
 
@@ -459,6 +460,17 @@ data class XrefRow(
 )
 
 /**
+ * One call-graph edge stands for every call between the same pair of functions,
+ * and the row can only show one address. Say so rather than letting the other
+ * call sites vanish into a row that looks singular.
+ */
+private fun moreSites(e: CallEdge, note: String): String = when {
+    e.sites <= 1 -> note
+    note.isEmpty() -> "+${e.sites - 1} more call sites"
+    else -> "$note · +${e.sites - 1} more call sites"
+}
+
+/**
  * Who references [d], or what [d] references.
  *
  * The engine's per-function xrefs come first and the whole-binary call-edge
@@ -479,13 +491,15 @@ fun xrefRows(vm: StudioViewModel, d: FunctionDetail, incoming: Boolean): List<Xr
             note = if (owner == null) "outside any known function" else ""
         )
     } else vm.callersOf(d.addr).map { e ->
+        // e.from is the calling FUNCTION's start — that is what resolves an
+        // owner. The site column wants the call instruction, which is e.site.
         val owner = vm.functionAt(e.from) ?: vm.functionContaining(e.from)
         XrefRow(
-            site = e.from,
+            site = e.callSite,
             target = owner?.takeIf { it.from != "import" }?.addr,
             label = owner?.let { vm.effectiveFuncName(it.addr) } ?: e.fromName.ifEmpty { "unmapped" },
             type = e.kind.ifEmpty { "call" },
-            note = if (owner == null) "outside any known function" else ""
+            note = moreSites(e, if (owner == null) "outside any known function" else "")
         )
     }
 } else {
@@ -504,11 +518,11 @@ fun xrefRows(vm: StudioViewModel, d: FunctionDetail, incoming: Boolean): List<Xr
         val callee = vm.functionAt(e.to) ?: vm.functionContaining(e.to)
         val isImport = callee?.from == "import"
         XrefRow(
-            site = e.from,
+            site = e.callSite,
             target = if (callee != null && !isImport) callee.addr else null,
             label = callee?.let { vm.effectiveFuncName(it.addr) } ?: e.toName.ifEmpty { hexFmt(e.to) },
             type = e.kind.ifEmpty { "call" },
-            note = if (isImport) "import" else if (callee == null) "unresolved target" else ""
+            note = moreSites(e, if (isImport) "import" else if (callee == null) "unresolved target" else "")
         )
     }
 }
@@ -562,8 +576,13 @@ fun XrefSheet(
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(Space.xs))
+                // The engine caps these arrays at 64 rows and reports the real
+                // count separately, so the chip that opened this sheet can read
+                // 561 while the list holds 64. Name both instead of letting the
+                // header and the list quietly disagree.
+                val shown = if (rows.size < count) "${rows.size} of $count" else "$count"
                 Text(
-                    "$count · ${vm.effectiveFuncName(d.addr)} @ ${hexFmt(d.addr)}",
+                    "$shown · ${vm.effectiveFuncName(d.addr)} @ ${hexFmt(d.addr)}",
                     color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine,
                     fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
@@ -721,11 +740,16 @@ fun KeyValue(k: String, v: String, kColor: Color? = null, vColor: Color? = null)
 /**
  * A small labelled statistic. Lifted verbatim out of DecompilePanel, where it
  * was private, so the other panels can stop reinventing it.
+ *
+ * The size is [Type.monoSmall] — the mono rung at caption size — and not the
+ * `9.5.sp` it arrived with. That half-point was the last hand-typed size left
+ * in the app, and it is the one [Type] names in its own doc as the reason the
+ * scale exists. The chips get half a point wider; nothing else moves.
  */
 @Composable
 fun StatChip(label: String, tint: Color) {
     Text(
-        label, color = tint, fontSize = 9.5.sp, fontFamily = Mono,
+        label, color = tint, fontSize = Type.monoSmall, fontFamily = Mono,
         modifier = Modifier
             .background(tint.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
             .padding(horizontal = Space.m, vertical = Space.s)
@@ -746,9 +770,9 @@ fun StatChip(label: String, value: String, tint: Color) {
             .padding(horizontal = Space.m, vertical = Space.s),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, color = ide.dim2, fontSize = 9.5.sp, fontFamily = Mono, maxLines = 1)
+        Text(label, color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
         Spacer(Modifier.width(Space.s))
-        Text(value, color = tint, fontSize = 9.5.sp, fontFamily = Mono, maxLines = 1)
+        Text(value, color = tint, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
     }
 }
 

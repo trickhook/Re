@@ -108,8 +108,13 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                 // Keyed on cheap scalars, never on `vm.meta` itself: AnalysisMeta is a
                 // data class holding tens of thousands of elements, so using it as a
                 // remember key runs a deep equals on every keystroke.
+                // Every piece of state a command's LABEL or PRESENCE depends on
+                // has to be a key here, or the row keeps the wording it was
+                // built with: `compareBackends` is in the list because the
+                // comparison row says what it will do next, not what is on.
                 val commands = remember(
-                    vm.plugins.size, vm.tab, vm.meta != null, vm.decompiler, vm.canGoBack
+                    vm.plugins.size, vm.tab, vm.meta != null, vm.decompiler, vm.canGoBack,
+                    vm.compareBackends
                 ) {
                     buildList {
                         add(Command("Open file (APK/ELF/EXE/DEX)", "pick a binary to analyse", "Ctrl+O", openFile))
@@ -125,6 +130,28 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                         add(Command("Save project", "persist renames, comments, bookmarks", "Ctrl+S") { vm.saveProject(ctx, vm.meta?.name ?: "project") })
                         add(Command("Toggle dark/light theme", "", "Ctrl+T") { vm.darkTheme = !vm.darkTheme })
                         add(Command("Load call graph", "whole binary", "") { vm.loadCallGraph(0) })
+
+                        // The graph's zoom and fit live in the ViewModel exactly
+                        // so something outside the panel can drive them, and
+                        // until now nothing did: two consumers, no producer.
+                        // The values match the panel's own toolbar buttons.
+                        if (vm.meta != null) {
+                            add(Command(
+                                "Fit graph to screen",
+                                "frame the whole control-flow graph", ""
+                            ) {
+                                vm.navigateTo(tab = Tab.GRAPH)
+                                vm.graphFitReq = true
+                            })
+                            add(Command("Zoom in on the graph", "control-flow graph", "") {
+                                vm.navigateTo(tab = Tab.GRAPH)
+                                vm.graphZoomReq = 1.25f
+                            })
+                            add(Command("Zoom out on the graph", "control-flow graph", "") {
+                                vm.navigateTo(tab = Tab.GRAPH)
+                                vm.graphZoomReq = 0.8f
+                            })
+                        }
 
                         // The decompiler backend was reachable only from the top-bar
                         // overflow menu. Only the backend you are NOT on is offered,
@@ -147,6 +174,23 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                                 vm.detail?.let { vm.selectFunction(it.addr) }
                             })
                         }
+
+                        // Same idiom as the two rows above: the label is what
+                        // this will DO, so it has to be rebuilt when the flag
+                        // moves — hence `compareBackends` in the remember keys.
+                        add(
+                            if (vm.compareBackends) Command(
+                                "Stop comparing decompiler backends",
+                                "show one backend's output again", ""
+                            ) { vm.compareBackends = false }
+                            else Command(
+                                "Compare decompiler backends",
+                                "Ghidra p-code and the IR lifter, side by side", ""
+                            ) {
+                                vm.compareBackends = true
+                                vm.navigateTo(tab = Tab.PSEUDO)
+                            }
+                        )
 
                         vm.plugins.forEach { p ->
                             add(Command("Run plugin: ${p.name}", p.description, "") { vm.runPlugin(ctx, p) })

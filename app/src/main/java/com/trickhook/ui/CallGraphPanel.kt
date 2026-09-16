@@ -67,8 +67,21 @@ fun CallGraphPanel(vm: StudioViewModel) {
     val meta = vm.meta
     // The native pass produces a richer graph, but it is not a prerequisite:
     // the edges parsed at open time are already a complete call graph.
-    val native = vm.callGraph?.takeIf { it.ok && it.edges.isNotEmpty() }
-    val edges: List<CallEdge> = native?.edges ?: meta?.callEdges.orEmpty()
+    val cg = vm.callGraph?.takeIf { it.ok && it.edges.isNotEmpty() }
+    // `focus` is the address the recompute was asked for, 0 meaning the whole
+    // binary. Engine.cpp now really filters on it — a focused answer used to
+    // come back as the entire graph, five bytes of JSON smaller — so a focused
+    // graph holds ONLY the edges touching that one function. It can stand in
+    // for no other view: the whole-binary list would silently show a slice, and
+    // another function's focus view would read "calls nothing" and be wrong.
+    val native = cg?.takeIf { it.focus == 0L || (sel != null && it.focus == sel) }
+    val whole = cg?.takeIf { it.focus == 0L }
+    val edges: List<CallEdge> = whole?.edges ?: meta?.callEdges.orEmpty()
+    // What the engine FOUND, which is not what it sent: both JSON paths cap the
+    // array and report the count beside it. Without this the header printed the
+    // cap — 12000 — in the voice of a measurement.
+    val edgesTotal = (if (whole != null) whole.edgesTotal else meta?.callEdgesTotal ?: 0)
+        .coerceAtLeast(edges.size)
 
     val open: (Long) -> Unit = { addr ->
         // navigateTo, not selectFunction: the jump belongs in Back's history.
@@ -97,8 +110,11 @@ fun CallGraphPanel(vm: StudioViewModel) {
                         // header only has to say which state it is in.
                         vm.callGraphBusy -> "recomputing…"
                         edges.isEmpty() -> "no edges"
-                        else -> "${edges.size} edges" +
-                            (if (native != null) " · recomputed" else " · from analysis")
+                        else -> {
+                            val n = if (edgesTotal > edges.size) "${edges.size} of $edgesTotal"
+                            else "${edges.size}"
+                            "$n edges · " + (if (whole != null) "recomputed" else "from analysis")
+                        }
                     },
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -337,9 +353,16 @@ private fun WholeBinaryView(
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    // One edge per (caller, target) pair, however many call
+                    // instructions are behind it — the engine merges them and
+                    // reports the count in `sites`. "7 calls" over 4 rows was
+                    // this panel's own comment about sites and edges, broken.
+                    val nSites = list.sumOf { it.sites }
                     Text(
-                        "${list.size} calls",
-                        color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
+                        if (nSites != list.size) "${list.size} targets · $nSites calls"
+                        else "${list.size} calls",
+                        color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
+                        maxLines = 1
                     )
                 }
             }

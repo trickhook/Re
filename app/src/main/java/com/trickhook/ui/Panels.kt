@@ -167,7 +167,7 @@ fun AssemblyPanel(vm: StudioViewModel) {
     // panel is the only thing that can see a move made while it was gone.
     val fnAddr = d?.addr
     val asmCount = d?.asm?.size ?: 0
-    LaunchedEffect(fnAddr, vm.asmIndexFor, asmCount) {
+    LaunchedEffect(fnAddr, vm.asmIndexFor, vm.traceStepFor, asmCount) {
         if (vm.asmIndexFor != fnAddr) {
             // The listing on screen is not the one the saved position was
             // measured in — either a move is in flight, or the one that was
@@ -178,9 +178,12 @@ fun AssemblyPanel(vm: StudioViewModel) {
             vm.asmOffset = 0
             vm.traceStep = -1
             listState.scrollToItem(0)
-        } else if (vm.traceStep >= asmCount) {
-            // Right function, but the step is past the end of what is on
-            // screen: it was counted in a listing that is no longer here.
+        } else if (vm.traceStepFor != fnAddr || vm.traceStep >= asmCount) {
+            // Either the step was counted in another function's listing, or it
+            // is past the end of this one. The second case is the visible one;
+            // the first is the quiet one, because step 5 of a 4,000-instruction
+            // body is a legal index into a 40-instruction body and simply
+            // points at the wrong line. Neither number means anything here.
             vm.traceStep = -1
         }
     }
@@ -333,6 +336,10 @@ fun AssemblyPanel(vm: StudioViewModel) {
                         Modifier
                             .clip(RoundedCornerShape(ChipCorner))
                             .clickable(enabled = asmCount > 0, role = Role.Button) {
+                                // Stamped with the listing on screen, not with
+                                // wherever selectFunction is currently headed:
+                                // a move can be in flight while this is tapped.
+                                vm.traceStepFor = fnAddr
                                 vm.traceStep = if (stepping) -1 else selectedLine.coerceAtLeast(0)
                             }
                     ) {

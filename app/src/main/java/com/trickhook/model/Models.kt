@@ -38,10 +38,35 @@ data class AnalysisMeta(
     val dexClasses: List<DexClassInfo>,
     val dexMethods: List<DexMethodInfo>,
     val callEdges: List<CallEdge>,
-    val notes: List<String>
+    val notes: List<String>,
+    /** Edges the engine FOUND. `callEdges` itself is capped at 12000 by Engine.cpp. */
+    val callEdgesTotal: Int = 0,
+    /** Raw call sites behind those edges, before the per-pair merge. */
+    val callSitesTotal: Int = 0
 )
 
-data class CallEdge(val from: Long, val to: Long, val fromName: String, val toName: String, val kind: String)
+/**
+ * One caller-callee pair.
+ *
+ * [from] is the start address of the CALLING FUNCTION, not the address of the
+ * call instruction -- that is [site]. They used to be the same field, which is
+ * why `groupBy { it.from }` and `functionAt(e.from)` never matched anything.
+ * Anything that wants to show WHERE the call is must read [callSite].
+ */
+data class CallEdge(
+    val from: Long,
+    val to: Long,
+    val fromName: String,
+    val toName: String,
+    val kind: String,
+    /** Lowest call-site address behind this pair; 0 from an engine without the field. */
+    val site: Long = 0L,
+    /** How many call instructions this single edge stands for. At least 1. */
+    val sites: Int = 1
+) {
+    /** The call instruction's address, falling back to [from] if the engine sent none. */
+    val callSite: Long get() = if (site != 0L) site else from
+}
 
 data class AsmLine(val addr: Long, val bytes: String, val mnem: String, val ops: String, val comment: String = "")
 data class CfgBlock(val id: Int, val start: Long, val end: Long, val nInstr: Int, val succ: List<Int>)
@@ -65,7 +90,17 @@ data class FunctionDetail(
     val pseudo: String,
     val blocks: List<CfgBlock>,
     val xrefsIn: List<Xref>,
-    val xrefsOut: List<Xref>
+    val xrefsOut: List<Xref>,
+    /** Call-graph degrees: one per calling/called FUNCTION, not per site. */
+    val nCallees: Int = 0,
+    val nCallers: Int = 0,
+    /**
+     * Reference SITES the engine counted. `xrefsIn` / `xrefsOut` are capped at
+     * 64 rows for the sheet, so these are the only honest totals -- without
+     * them a hot function with 561 callers renders as a flat 64.
+     */
+    val xrefsInTotal: Int = 0,
+    val xrefsOutTotal: Int = 0
 )
 
 data class DebugEvent(
@@ -84,6 +119,15 @@ private fun hx(s: String?): Long {
     if (s == null) return 0
     return if (s.startsWith("0x")) s.substring(2).toLongOrNull(16) ?: 0L else s.toLongOrNull(16) ?: 0L
 }
+
+/** One `callEdges` / `edges` element. Both parsers read the same shape. */
+private fun callEdge(e: JSONObject): CallEdge = CallEdge(
+    from = hx(e.optString("from")), to = hx(e.optString("to")),
+    fromName = e.optString("fromName"), toName = e.optString("toName"),
+    kind = e.optString("kind"),
+    site = hx(e.optString("site")),
+    sites = e.optInt("sites", 1).coerceAtLeast(1)
+)
 
 fun parseMeta(json: String): AnalysisMeta {
     val o = JSONObject(json)
@@ -169,13 +213,11 @@ fun parseMeta(json: String): AnalysisMeta {
         imports = imports, exports = exports, needed = needed, soName = o.optString("soName"),
         dexClasses = dexClasses, dexMethods = dexMethods,
         callEdges = o.optJSONArray("callEdges")?.let { arr ->
-            (0 until arr.length()).map { i ->
-                val e = arr.getJSONObject(i)
-                CallEdge(hx(e.optString("from")), hx(e.optString("to")),
-                    e.optString("fromName"), e.optString("toName"), e.optString("kind"))
-            }
+            (0 until arr.length()).map { i -> callEdge(arr.getJSONObject(i)) }
         } ?: emptyList(),
-        notes = notes
+        notes = notes,
+        callEdgesTotal = o.optInt("callEdgesTotal"),
+        callSitesTotal = o.optInt("callSitesTotal")
     )
 }
 
@@ -220,7 +262,9 @@ fun parseDetail(json: String): FunctionDetail {
         size = o.optLong("size"), from = o.optString("from"), backend = o.optString("backend"),
         arch = o.optString("arch"), pseudoMode = o.optString("pseudoMode"),
         irStats = irStats, asm = asm, pseudo = o.optString("pseudo"),
-        blocks = blocks, xrefsIn = xin, xrefsOut = xout
+        blocks = blocks, xrefsIn = xin, xrefsOut = xout,
+        nCallees = o.optInt("nCallees"), nCallers = o.optInt("nCallers"),
+        xrefsInTotal = o.optInt("xrefsInTotal"), xrefsOutTotal = o.optInt("xrefsOutTotal")
     )
 }
 
@@ -250,7 +294,17 @@ data class CallGraphData(
     val ok: Boolean,
     val error: String?,
     val edges: List<CallEdge>,
-    val funcs: List<CallGraphNode>
+    val funcs: List<CallGraphNode>,
+    /**
+     * The address this graph was BUILT for; 0 means the whole binary. Engine.cpp
+     * now really filters on it, so a focused answer holds only the edges that
+     * touch that one function and can stand in for no other view.
+     */
+    val focus: Long = 0L,
+    /** Edges that passed the focus filter. `edges` is capped at 4000 for the canvas. */
+    val edgesTotal: Int = 0,
+    /** Functions in the binary. `funcs` is the same list capped at 4000. */
+    val funcsTotal: Int = 0
 )
 
 fun parseCallGraph(json: String): CallGraphData {
@@ -259,11 +313,7 @@ fun parseCallGraph(json: String): CallGraphData {
         return CallGraphData(false, o.optString("error", "no call graph"), emptyList(), emptyList())
     }
     val edges = o.optJSONArray("edges")?.let { arr ->
-        (0 until arr.length()).map { i ->
-            val e = arr.getJSONObject(i)
-            CallEdge(hx(e.optString("from")), hx(e.optString("to")),
-                e.optString("fromName"), e.optString("toName"), e.optString("kind"))
-        }
+        (0 until arr.length()).map { i -> callEdge(arr.getJSONObject(i)) }
     } ?: emptyList()
     val funcs = o.optJSONArray("funcs")?.let { arr ->
         (0 until arr.length()).map { i ->
@@ -271,7 +321,11 @@ fun parseCallGraph(json: String): CallGraphData {
             CallGraphNode(hx(f.optString("addr")), f.optString("name"))
         }
     } ?: emptyList()
-    return CallGraphData(true, null, edges, funcs)
+    return CallGraphData(
+        true, null, edges, funcs,
+        focus = hx(o.optString("focus")),
+        edgesTotal = o.optInt("edgesTotal"), funcsTotal = o.optInt("funcsTotal")
+    )
 }
 
 data class DbgBp(val addr: Long, val hits: Int, val enabled: Boolean)
@@ -289,7 +343,14 @@ data class DbgState(
     val memData: String,       // hex string
     val memAddr: Long,
     val memLen: Long,
-    val events: List<DbgEvent>
+    val events: List<DbgEvent>,
+    /**
+     * The answer carried a `bps` array at all. `bp_list` is the one op that
+     * reports the breakpoint set, and it legitimately reports an empty one
+     * after the last breakpoint is deleted -- so an empty list is not the same
+     * answer as no answer, and the merge needs to tell them apart.
+     */
+    val hasBps: Boolean = false
 )
 
 fun parseDbg(json: String): DbgState {
@@ -325,6 +386,7 @@ fun parseDbg(json: String): DbgState {
     } ?: emptyList()
     return DbgState(
         ok = ok,
+        hasBps = o.optJSONArray("bps") != null,
         error = o.optString("error", "").ifEmpty { null },
         state = o.optString("state", "none"),
         pid = o.optLong("pid"),

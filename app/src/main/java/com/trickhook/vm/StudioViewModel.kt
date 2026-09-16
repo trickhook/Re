@@ -98,6 +98,16 @@ data class Toast(
     val action: (() -> Unit)? = null
 )
 
+/**
+ * "5203 call edges", or "12000 of 31402 call edges" when Engine.cpp had to cap
+ * the array. The cap is a rendering decision; the total is the measurement, and
+ * the line printed on open is where a user learns the size of the analysis.
+ */
+private fun edgeCount(m: AnalysisMeta): String =
+    if (m.callEdgesTotal > m.callEdges.size)
+        "${m.callEdges.size} of ${m.callEdgesTotal} call edges"
+    else "${m.callEdges.size} call edges"
+
 class StudioViewModel : ViewModel() {
 
     var meta by mutableStateOf<AnalysisMeta?>(null); private set
@@ -154,6 +164,15 @@ class StudioViewModel : ViewModel() {
     var mapMode by mutableStateOf(0)
     var apkMode by mutableStateOf(0)
     var traceStep by mutableStateOf(-1)
+    /**
+     * Which function [traceStep] counts instructions in. [traceStep] is an
+     * index into a listing exactly like [asmIndex], and a bounds check cannot
+     * catch a stale one: step 5 of a 4,000-instruction body is a perfectly
+     * legal index into a 40-instruction body and points at an arbitrary line
+     * of it. [selectFunction] keeps this in step, and the listing panel
+     * compares before it trusts the number.
+     */
+    var traceStepFor by mutableStateOf<Long?>(null)
     // Float-specialised: pan and zoom write these on every pointer frame, and
     // a boxed Float per frame per axis is three allocations a frame.
     var graphScale by mutableFloatStateOf(1f)
@@ -214,9 +233,8 @@ class StudioViewModel : ViewModel() {
     var plugins by mutableStateOf<List<PluginDef>>(emptyList()); private set
     var pluginOutput by mutableStateOf<String>(""); private set
     var pluginRunning by mutableStateOf(false); private set
-    /** Name and effect count of the last run, for the result header. */
+    /** Name of the last run, for the result header. */
     var lastPluginName by mutableStateOf(""); private set
-    var lastPluginEffects by mutableStateOf(0); private set
     var lastPluginOk by mutableStateOf(true); private set
     /** True while the last plugin run can still be rolled back. */
     var lastPluginUndoable by mutableStateOf(false); private set
@@ -234,7 +252,15 @@ class StudioViewModel : ViewModel() {
     // v2: AI assistant
 
     val console = mutableStateListOf<ConsoleLine>()
-    private var apkFile: File? = null
+    /**
+     * The package the open file came out of, or null when the open file is not
+     * from one. Public and observable because the APK tab reads it during
+     * composition to know which archive its resource rows can be read back
+     * from: `currentPath` is the EXTRACTED classes.dex, so opening the archive
+     * by that path failed on every entry and blamed the entry for it.
+     * Only this class may write it.
+     */
+    var apkFile by mutableStateOf<File?>(null); private set
     private var db: ProjectDb? = null
 
     fun database(context: Context): ProjectDb {
@@ -382,17 +408,42 @@ class StudioViewModel : ViewModel() {
             val dst = File(apk.parentFile, "apk_$safe")
             zf.getInputStream(zentry).use { ins -> dst.outputStream().use { ins.copyTo(it) } }
             log("INFO", "Extracted ${entry.name} (${humanSize(dst.length())})")
-            loadFile(dst, entry.name.substringAfterLast('/'))
+            loadFile(dst, entry.name.substringAfterLast('/'), fromApk = true)
         }
     }
 
-    private fun loadFile(file: File, name: String) {
+    /**
+     * Everything the APK tab shows about the open package. Cleared together,
+     * because a manifest without its entry list is a half-truth about which
+     * file is open.
+     */
+    private fun clearApkState() {
+        apkFile = null
+        apkEntries = emptyList()
+        apkResources = emptyList()
+        manifest = null
+    }
+
+    /**
+     * [fromApk] marks the one caller that is part of an APK open —
+     * [extractApkEntry], which hands this the .dex or .so it just pulled OUT of
+     * the package. Every other caller is opening something the package knows
+     * nothing about, and the APK tab's contents then describe a file that is no
+     * longer open.
+     */
+    private fun loadFile(file: File, name: String, fromApk: Boolean = false) {
         // Restored rather than cleared: an APK walks openApk -> extractApkEntry
         // -> loadFile, and the outer phase should survive the inner one.
         val outerPhase = globalPhase
         globalPhase = "Analyzing $name"
         try {
             currentPath = file.absolutePath
+            // Before the analysis, not after it: the moment currentPath moves,
+            // the previous package's manifest, components and resources are
+            // about a file that is not open any more — and that is just as true
+            // when the new file fails to analyse. Opening a plain .so after an
+            // APK used to leave the whole APK tab standing.
+            if (!fromApk) clearApkState()
             val cap = 8L * 1024 * 1024
             hexData = file.inputStream().use { ins ->
                 val buf = ByteArray(minOf(file.length(), cap).toInt())
@@ -411,7 +462,7 @@ class StudioViewModel : ViewModel() {
                 log(
                     "OK",
                     "${m.format} · ${m.arch.ifEmpty { "-" }} · ${m.functions.size} functions · " +
-                        "${m.callEdges.size} call edges · ${m.strings.size} strings · backend: ${m.backend.ifEmpty { "-" }}"
+                        edgeCount(m) + " · ${m.strings.size} strings · backend: ${m.backend.ifEmpty { "-" }}"
                 )
                 m.notes.forEach { log("INFO", it) }
                 selectedFunc = null
@@ -438,7 +489,7 @@ class StudioViewModel : ViewModel() {
     private fun resetPanelState() {
         asmIndex = 0; asmOffset = 0; asmIndexFor = null; hexIndex = 0
         funcQuery = ""; stringQuery = ""
-        traceStep = -1
+        traceStep = -1; traceStepFor = null
         graphScale = 1f; graphPanX = 0f; graphPanY = 0f
         graphZoomReq = 1f; graphFitReq = false
         gotoAddr = null; hexGotoOffset = null
@@ -704,16 +755,22 @@ class StudioViewModel : ViewModel() {
      *
      * The engine fills xrefsIn only for functions it disassembled, so an empty
      * list means "not analysed", not "nobody calls this" — the call-graph index
-     * answers that case. Both arrays are truncated by the engine, so this is a
-     * count of what is *shown*; swap in a true total the moment Models.kt
-     * carries one.
+     * answers that case.
+     *
+     * `xrefsInTotal` is what the engine COUNTED; `xrefsIn` is the first 64 of
+     * them, which is all a bottom sheet can use. The total is the number, and
+     * the sheet says how many of it it is showing — before this, the hot
+     * function at 0x11149C reported 64 references when it has 561. `maxOf`
+     * because an engine built before the field sends no total at all.
      */
     fun xrefInCount(d: FunctionDetail): Int =
-        if (d.xrefsIn.isNotEmpty()) d.xrefsIn.size else callersOf(d.addr).size
+        if (d.xrefsIn.isNotEmpty()) maxOf(d.xrefsInTotal, d.xrefsIn.size)
+        else callersOf(d.addr).size
 
     /** How many references go OUT of [d]. Counterpart to [xrefInCount]. */
     fun xrefOutCount(d: FunctionDetail): Int =
-        if (d.xrefsOut.isNotEmpty()) d.xrefsOut.size else calleesOf(d.addr).size
+        if (d.xrefsOut.isNotEmpty()) maxOf(d.xrefsOutTotal, d.xrefsOut.size)
+        else calleesOf(d.addr).size
 
     /**
      * Virtual address to offset in the file on disk. The hex view highlighted
@@ -749,8 +806,13 @@ class StudioViewModel : ViewModel() {
         if (selectedFunc != addr) {
             asmIndex = 0
             asmOffset = 0
+            // traceStep indexes the same listing, so it dies with the position
+            // it was counted in. The panel's bounds check cannot see this: a
+            // step inside the new function's range is wrong, not out of range.
+            traceStep = -1
         }
         asmIndexFor = addr
+        traceStepFor = addr
         selectedFunc = addr
         // The comparison column belongs to the previous function.
         pseudoAlt = null
@@ -798,7 +860,12 @@ class StudioViewModel : ViewModel() {
                 }
                 if (g.ok) {
                     callGraph = g
-                    log("OK", "Call graph: ${g.edges.size} edges, ${g.funcs.size} functions")
+                    // Both arrays are capped by Engine.cpp and both totals
+                    // come back beside them, so neither number is the cap
+                    // wearing a measurement's clothes.
+                    val eOf = if (g.edgesTotal > g.edges.size) " of ${g.edgesTotal}" else ""
+                    val fOf = if (g.funcsTotal > g.funcs.size) " of ${g.funcsTotal}" else ""
+                    log("OK", "Call graph: ${g.edges.size}$eOf edges, ${g.funcs.size}$fOf functions")
                 } else log("WARN", g.error ?: "call graph failed")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "callgraph error")
@@ -966,6 +1033,46 @@ class StudioViewModel : ViewModel() {
         if (dbgMode == DbgMode.SESSION) dbgCmd("kill")
     }
 
+    /**
+     * Fold one command's answer into the session state instead of replacing it.
+     *
+     * Every op answers with only the fields it is about: `poll` carries the
+     * state, the pid and the events but no registers; `regs` carries the
+     * registers and the arch but no state; `stack`, `read` and `bp_list` carry
+     * neither. Overwriting [dbgState] with the last answer is why the screen
+     * flipped between STOPPED and NONE twice a second while a process sat at a
+     * breakpoint, why Continue and Step were disabled on every other flip, and
+     * why the register strip blanked itself at the moment the registers
+     * arrived. The debugger screen worked around it with a private accumulator;
+     * the state belongs here, where every reader gets the same answer.
+     *
+     * The discriminators are fields that only the real answer carries. `arch`
+     * marks a register set: parseDbg files every top-level 0x value as a
+     * register, so the lone "addr" that `read` and `bp_add` echo back would
+     * otherwise replace all of them. `hasBps` marks the breakpoint set, so
+     * deleting the last breakpoint stays an empty list rather than reading as
+     * "this answer said nothing about breakpoints".
+     */
+    private fun mergeDbg(prev: DbgState?, s: DbgState): DbgState {
+        // "none" is what parseDbg reports for an answer with no state field at
+        // all, which is most of them. It is not news that the session ended.
+        val st = if (s.state.isNotEmpty() && s.state != "none") s.state else prev?.state ?: "none"
+        val hasRegs = s.arch.isNotEmpty()
+        return s.copy(
+            state = st,
+            pid = if (s.pid != 0L) s.pid else prev?.pid ?: 0L,
+            arch = if (hasRegs) s.arch else prev?.arch ?: "",
+            // Registers belong to a stop. While the process runs they are a
+            // lie, and the last stop's values would be worse than none at all.
+            regs = when {
+                st == "running" || st == "exited" -> emptyMap()
+                hasRegs -> s.regs
+                else -> prev?.regs ?: emptyMap()
+            },
+            bps = if (s.hasBps) s.bps else prev?.bps ?: emptyList()
+        )
+    }
+
     // v2: interactive session
     fun dbgCmd(json: String, onDone: ((DbgState) -> Unit)? = null) {
         viewModelScope.launch {
@@ -973,7 +1080,7 @@ class StudioViewModel : ViewModel() {
             try {
                 val s = withContext(Dispatchers.IO) { parseDbg(NativeBridge.nativeDbgCmd(json)) }
                 if (s.ok) {
-                    dbgState = s
+                    dbgState = mergeDbg(dbgState, s)
                     if (s.events.isNotEmpty()) {
                         val lines = s.events.map { ev ->
                             when (ev.type) {
@@ -1013,11 +1120,17 @@ class StudioViewModel : ViewModel() {
         dbgCmd("""{"op":"attach","pid":$pid}""")
     }
 
-    /** Bytes, stack and threads all belong to one process; none survive it. */
+    /**
+     * Bytes, stack, threads and the merged session state all belong to one
+     * process; none survive it. [dbgState] is in here because it now
+     * ACCUMULATES — a new session that inherited the old one's registers and
+     * breakpoints would be describing a process that no longer exists.
+     */
     private fun clearDbgSessionViews() {
         dbgMem = null
         dbgStack = null
         dbgThreads = emptyList()
+        dbgState = null
     }
 
     /**
@@ -1055,7 +1168,6 @@ class StudioViewModel : ViewModel() {
     fun dbgKill() {
         dbgCmd("""{"op":"kill"}""")
         dbgMode = DbgMode.NONE
-        dbgState = null
         clearDbgSessionViews()
     }
 
@@ -1182,7 +1294,6 @@ class StudioViewModel : ViewModel() {
         pluginRunning = true
         pluginOutput = ""
         lastPluginName = plugin.name
-        lastPluginEffects = 0
         lastPluginOk = true
         lastPluginUndoable = false
         pluginUndo = null
@@ -1243,7 +1354,6 @@ class StudioViewModel : ViewModel() {
                 }
                 pluginOutput = sb.toString()
                 lastPluginOk = res.ok
-                lastPluginEffects = res.effects.size
                 log(if (res.ok) "OK" else "ERROR", "Plugin '${plugin.name}' ${if (res.ok) "finished" else "failed: ${res.error}"}")
                 if (lastPluginUndoable) {
                     notify("OK", "${plugin.name}: $applied changes", "Undo") { undoLastPlugin(appCtx) }

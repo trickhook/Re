@@ -467,6 +467,19 @@ u64 Engine::vaToOff(const Ctx& c, u64 va) {
 }
 
 // ---------------------------------------------------------------- context --
+/**
+ * Function discovery is capped, like the call-edge list and the two graph
+ * arrays — but unlike them it used to throw the pre-cut count away, so the
+ * engine could not report its own truncation even in a note. This is the same
+ * sentence the other three caps write, in the same place.
+ */
+static void noteFunctionCap(std::vector<std::string>& notes, size_t have, size_t found) {
+    if (found <= have) return;
+    notes.push_back("Function discovery: carrying " + std::to_string(have)
+                    + " of " + std::to_string(found)
+                    + " functions found, lowest address first");
+}
+
 bool Engine::ensureCtx(const std::string& path) {
     if (ctxPath_ == path && !ctx_.bin.data.empty()) return true;
 
@@ -493,7 +506,9 @@ bool Engine::ensureCtx(const std::string& path) {
             c.elf = parseElf(c.bin);
             c.arch = c.elf.archEnum;
             if (c.elf.bits == 32 && c.arch == "X86_64") c.arch = "X86";
-            c.funcs = discoverFunctionsElf(c.bin, c.elf);
+            size_t nFound = 0;
+            c.funcs = discoverFunctionsElf(c.bin, c.elf, &nFound);
+            noteFunctionCap(c.notes, c.funcs.size(), nFound);
             u64 va = 0, size = 0;
             if (elfExecRange(c.elf, va, size)) {
                 u64 off = elfVaToOff(c.elf, va);
@@ -539,7 +554,9 @@ bool Engine::ensureCtx(const std::string& path) {
         case Fmt::PE: {
             c.pe = parsePe(c.bin);
             c.arch = c.pe.archEnum;
-            c.funcs = discoverFunctionsPe(c.bin, c.pe);
+            size_t nFound = 0;
+            c.funcs = discoverFunctionsPe(c.bin, c.pe, &nFound);
+            noteFunctionCap(c.notes, c.funcs.size(), nFound);
             u64 va = 0, size = 0;
             if (peExecRange(c.pe, va, size)) {
                 u64 off = peVaToOff(c.pe, va);

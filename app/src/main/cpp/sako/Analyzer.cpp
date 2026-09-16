@@ -5,7 +5,14 @@
 namespace sako {
 
 // ---------------- function discovery ----------------
-std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e) {
+// How many functions the rest of the engine will carry. Everything downstream
+// — the xref map, the call graph, the JSON function list — is sized against
+// this, so it is a real limit and not a rendering choice. What IS a defect is
+// losing the number that was found, so both scans report it through `found`.
+// The kept slice is the lowest addresses: `out` is sorted before the cut.
+static const size_t kMaxFunctions = 4000;
+
+std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e, size_t* found) {
     std::map<u64, FuncInfo> byAddr;
 
     // PLT ranges: call targets landing here are import stubs, not functions
@@ -114,11 +121,12 @@ std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e) {
         }
         if (out[i].size > 1024 * 1024) out[i].size = 1024 * 1024;
     }
-    if (out.size() > 4000) out.resize(4000);
+    if (found) *found = out.size();
+    if (out.size() > kMaxFunctions) out.resize(kMaxFunctions);
     return out;
 }
 
-std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e) {
+std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e, size_t* found) {
     std::map<u64, FuncInfo> byAddr;
     for (auto& s : e.exports) {
         FuncInfo f;
@@ -162,7 +170,8 @@ std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e) {
             out[i].size = std::min<u64>(end - out[i].addr, 65536);
         }
     }
-    if (out.size() > 4000) out.resize(4000);
+    if (found) *found = out.size();
+    if (out.size() > kMaxFunctions) out.resize(kMaxFunctions);
     return out;
 }
 

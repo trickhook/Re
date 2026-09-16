@@ -136,28 +136,22 @@ private fun dangerousGroup(permission: String): String? {
 }
 
 /**
- * The archive the resource list was read out of, or null when the file the
- * app has open is not that archive.
+ * The archive the resource list was read out of, or null when nothing here
+ * came out of a package.
  *
- * `vm.currentPath` is not it. Opening an APK extracts classes.dex and then
- * repoints currentPath at the extracted file, so the `ZipFile(currentPath)`
- * the preview used to do could never open — and it blamed the entry the user
- * had just tapped for the failure. The handle to the real package is
- * `StudioViewModel.apkFile`, which is `private`, so this panel cannot ask for
- * it; and guessing at one out of the cache directory would risk previewing a
- * different APK's resources, which is worse than previewing none.
+ * `vm.currentPath` is not it, and that was the original bug: opening an APK
+ * extracts classes.dex and repoints currentPath at the extracted file, so the
+ * `ZipFile(currentPath)` the preview used to do could never open — and it
+ * blamed the entry the user had just tapped for the failure. The stand-in
+ * that replaced it, "is the open file itself a ZIP", was true only while the
+ * APK happened to also be the analysed file.
  *
- * So the panel asks the one question it can answer truthfully: is the open
- * file itself a ZIP? That is the same two-byte test `openUri` uses to tell an
- * APK from a raw binary, answered off `hexData`, which is already in memory.
- * The day `apkFile` is exposed, this body becomes `vm.apkFile?.absolutePath`
- * and the preview below starts working with no other change.
+ * `vm.apkFile` is the handle to the real package, and it is observable, so a
+ * preview started before an open finishes is recomposed rather than stale.
+ * It is null once a file from outside the package is opened, which is exactly
+ * when these rows stop being about anything readable.
  */
-private fun apkArchivePath(vm: StudioViewModel): String? {
-    val head = vm.hexData ?: return null
-    if (head.size < 2 || head[0] != 'P'.code.toByte() || head[1] != 'K'.code.toByte()) return null
-    return vm.currentPath
-}
+private fun apkArchivePath(vm: StudioViewModel): String? = vm.apkFile?.absolutePath
 
 // ============================================================== APK panel ==
 /**

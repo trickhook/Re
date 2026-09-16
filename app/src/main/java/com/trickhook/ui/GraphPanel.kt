@@ -6,6 +6,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -77,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.trickhook.model.CfgBlock
 import com.trickhook.vm.StudioViewModel
+import com.trickhook.vm.Tab
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -385,8 +387,15 @@ fun GraphPanel(vm: StudioViewModel) {
             var gotoTried by remember { mutableStateOf<Long?>(null) }
 
             // ---- external requests, now owned by the ViewModel ----------------
-            LaunchedEffect(vm.gotoAddr, d.addr, nodes0, vpW) {
+            LaunchedEffect(vm.gotoAddr, d.addr, nodes0, vpW, vm.tab) {
                 val g = vm.gotoAddr ?: return@LaunchedEffect
+                // A goto is addressed to the tab the user is being sent to, and
+                // the Assembly, Hex and Graph panels all read the same field.
+                // StudioApp's AnimatedContent keeps the OUTGOING panel composed
+                // for the whole transition, so without this the graph answers a
+                // request aimed at somewhere else and the destination finds
+                // nothing waiting. Panels.kt:196 and :845 carry the same guard.
+                if (vm.tab != Tab.GRAPH) return@LaunchedEffect
                 val n = nodes0.firstOrNull { g >= it.block.start && g < it.block.end }
                 if (n != null) {
                     vm.consumeGoto()
@@ -565,6 +574,9 @@ fun GraphPanel(vm: StudioViewModel) {
                         }
                     }
 
+                    // One shape for the clip and for the edge, so the two can
+                    // never drift a corner apart.
+                    val miniShape = RoundedCornerShape(4.dp)
                     Canvas(
                         Modifier
                             .align(Alignment.BottomEnd)
@@ -575,7 +587,18 @@ fun GraphPanel(vm: StudioViewModel) {
                             // this needs: the node rectangles below are drawn in
                             // raw canvas space and would otherwise paint over
                             // the rounded corners.
-                            .surface1(RoundedCornerShape(4.dp))
+                            .surface1(miniShape)
+                            // …but surface1's hairline is `ide.border`, the
+                            // decorative 1.2:1 tier, and this is not a panel
+                            // sitting in a layout. It FLOATS over the graph and
+                            // it is dragged with a finger, which is the exact
+                            // case borderStrong exists for: WCAG 1.4.11 asks 3:1
+                            // for the boundary of a control you can operate. It
+                            // is also the only control in this file with no edge
+                            // of its own. The layer token stays; the one
+                            // property that is wrong for a floating control is
+                            // put back over it.
+                            .border(1.dp, ide.borderStrong, miniShape)
                             .pointerInput(nodeW) {
                                 detectDragGestures(onDragStart = { stopGlide() }) { change, amt ->
                                     change.consume()

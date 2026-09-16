@@ -166,8 +166,12 @@ std::vector<AsmLine> disassemble(const std::string& arch, const u8* code, size_t
 }
 
 // ---------------- Functions & XREFs ----------------
-std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e);
-std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e);
+// `found`, when given, receives how many functions the scan found BEFORE the
+// cap on what the rest of the engine carries. The count used to be dropped on
+// the floor, which made this the one truncation in the engine that could not
+// even be reported: the caller saw 4000 and had no way to know of the 12631.
+std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e, size_t* found = nullptr);
+std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e, size_t* found = nullptr);
 
 std::map<u64, std::vector<Xref>> buildXrefs(const std::string& arch, const u8* code, size_t size,
                                             u64 va, size_t cap = 200000);

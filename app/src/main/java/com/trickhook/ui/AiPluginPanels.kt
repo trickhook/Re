@@ -101,9 +101,12 @@ private fun pluginWriteOps(script: String): List<String> {
  * What a finished run actually changed — counted the way undo restores it.
  *
  * Three answers to "how much did this change?" used to be on screen at once:
- * `vm.lastPluginEffects` (every effect the script emitted), this parser (one
- * per effect line in the log) and `undoLastPlugin` (one per key it has to put
- * back). They agree only while a run never touches the same address twice.
+ * the ViewModel's raw effect count (every effect the script emitted), this
+ * parser (one per effect line in the log) and `undoLastPlugin` (one per key it
+ * has to put back). They agree only while a run never touches the same address
+ * twice. The raw count is gone from the ViewModel — it is still written into
+ * the log as "N effects applied", where it is a fact about the run rather than
+ * a claim about the project.
  *
  * The number a user can act on is the last one, because it is exactly what
  * Undo will restore, so it is the only one this panel reports. The rule is
@@ -591,7 +594,10 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                     )
                 }
             }
-            NavBarSpacer()
+            // No NavBarSpacer here: material3 1.3.1 gives ModalBottomSheet
+            // BottomSheetDefaults.windowInsets, which already carries the
+            // bottom system-bar inset. One inside the content is a second one.
+            // Same rule as XrefSheet and the export sheet.
         }
     }
 }

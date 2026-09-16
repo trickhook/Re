@@ -117,17 +117,13 @@ private val DumpHeightPaired = 96.dp
 private const val PulseMs = 900
 
 /**
- * One merged view of the session.
+ * The session, as this screen asks about it.
  *
- * `vm.dbgState` is "the answer to the last debugger command", and each op
- * answers with only the fields it is about: `poll` carries the state, the pid
- * and the events but no registers; `regs` carries the registers and the arch
- * but no state; `stack`, `read` and `bp_list` carry neither. Reading dbgState
- * directly — which this screen used to do — is why it flipped between STOPPED
- * and NONE twice a second while a process sat at a breakpoint, why Continue and
- * Step were disabled on every other flip, and why the register strip blanked
- * itself at the moment the registers arrived. Merging means the view only ever
- * gains information; a new session starts from a fresh one.
+ * `vm.dbgState` is now the accumulated session state, not the answer to the
+ * last command: [StudioViewModel.dbgCmd] folds each op's answer into it, and
+ * [StudioViewModel] clears it when a session ends. This class carries no
+ * merging of its own any more — it is a projection plus the four questions the
+ * screen actually asks, which is the part that was never the ViewModel's job.
  */
 private data class DbgView(
     val state: String = "none",
@@ -148,28 +144,10 @@ private data class DbgView(
      */
     val active: Boolean get() = stopped || running
 
-    fun merge(s: DbgState): DbgView {
-        // "none" is what parseDbg reports for an answer carrying no state field
-        // at all, which is most of them. It is not news that the session ended.
-        val st = if (s.state.isNotEmpty() && s.state != "none") s.state else state
-        // Only the register answer emits "arch", so it is the one reliable mark
-        // of a real register set. Without that test the lone "addr" that `read`
-        // and `bp_add` echo back — which parseDbg files as a register, because
-        // it takes every top-level 0x field — would replace all of them.
-        val hasRegs = s.arch.isNotEmpty()
-        return DbgView(
-            state = st,
-            pid = if (s.pid != 0L) s.pid else pid,
-            arch = if (hasRegs) s.arch else arch,
-            // Registers belong to a stop. While the process runs they are a
-            // lie, and last stop's values would be worse than none at all.
-            regs = when {
-                st == "running" || st == "exited" -> emptyMap()
-                hasRegs -> s.regs
-                else -> regs
-            },
-            bps = bps
-        )
+    companion object {
+        fun of(s: DbgState?): DbgView =
+            if (s == null) DbgView()
+            else DbgView(s.state, s.pid, s.arch, s.regs, s.bps)
     }
 }
 
@@ -186,10 +164,7 @@ fun DebuggerPanel(vm: StudioViewModel) {
     // The address the MEMORY dump is pinned to. Null means it follows the
     // program counter, which is what makes the dump appear without being asked.
     var memWatch by remember { mutableStateOf<Long?>(null) }
-    var view by remember { mutableStateOf(DbgView()) }
-
-    val answer = vm.dbgState
-    LaunchedEffect(answer) { view = if (answer == null) DbgView() else view.merge(answer) }
+    val view = DbgView.of(vm.dbgState)
 
     // A spawn that fails leaves dbgMode on SESSION with no process behind it
     // and never answers, so the skeleton needs an end of its own — otherwise it
@@ -204,17 +179,21 @@ fun DebuggerPanel(vm: StudioViewModel) {
     // poll debugger state while a session is live
     LaunchedEffect(vm.dbgMode) {
         vm.dbgThreads = emptyList()
-        view = DbgView()
         var readPc: Long? = null
         while (vm.dbgMode == DbgMode.SESSION) {
             vm.dbgCmd("""{"op":"poll"}""")
+            // Read the session state back from the ViewModel on every turn,
+            // never from a value captured in composition: this loop outlives
+            // the composition that started it, so a captured `view` would be
+            // frozen at whatever the session looked like when Spawn was tapped.
+            val live = DbgView.of(vm.dbgState)
             // bp_list is the only op that reports the breakpoint set — bp_add
-            // answers with just the address it installed — and the merge above
-            // is what lets its answer, which carries nothing else, be asked for
-            // without blanking the rest of the screen.
-            if (view.active) vm.dbgCmd("""{"op":"bp_list"}""") { s -> view = view.copy(bps = s.bps) }
-            if (view.live) launching = false
-            if (view.stopped) {
+            // answers with just the address it installed — and the ViewModel's
+            // merge is what lets its answer, which carries nothing else, be
+            // asked for without blanking the rest of the screen.
+            if (live.active) vm.dbgCmd("""{"op":"bp_list"}""")
+            if (live.live) launching = false
+            if (live.stopped) {
                 // One regs command feeds both the strip and the memory read:
                 // its answer is the only place the PC is ever reported.
                 vm.dbgCmd("""{"op":"regs"}""") { r ->
