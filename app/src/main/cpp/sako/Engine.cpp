@@ -10,6 +10,13 @@
 
 namespace sako {
 
+// Address->string table size. Large enough to cover a real .rodata; the UI
+// list is trimmed separately at serialisation time.
+static const size_t kStringCap = 20000;
+// How many of those to put in the analysis JSON the UI reads.
+static const size_t kStringsInJson = 3000;
+
+
 Engine& Engine::instance() {
     static Engine e;
     return e;
@@ -69,7 +76,10 @@ bool Engine::ensureCtx(const std::string& path) {
             c.cg = buildCallGraph(c.xrefs, c.funcs, c.names);
             if (!c.cg.edges.empty())
                 c.notes.push_back("Call graph: " + std::to_string(c.cg.edges.size()) + " call edges");
-            // strings from alloc non-exec sections (or whole file fallback)
+            // strings from alloc non-exec sections (or whole file fallback).
+            // The cap is the decompiler's address->string table, not the list
+            // the UI shows: at 3000 it ran out inside .rodata and never reached
+            // .data, so references there stayed as bare addresses.
             {
                 std::vector<FoundString> all;
                 bool any = false;
@@ -78,12 +88,12 @@ bool Engine::ensureCtx(const std::string& path) {
                     if (s.flags.find('X') != std::string::npos) continue;
                     if (s.type != "PROGBITS" || s.offset == 0 || s.size == 0) continue;
                     if (s.offset + s.size > n) continue;
-                    auto v = extractPrintableStrings(p + s.offset, s.size, s.addr, 3000, 4);
+                    auto v = extractPrintableStrings(p + s.offset, s.size, s.addr, kStringCap, 4);
                     if (!v.empty()) any = true;
-                    for (auto& fs : v) { if (all.size() < 3000) all.push_back(fs); else break; }
-                    if (all.size() >= 3000) break;
+                    for (auto& fs : v) { if (all.size() < kStringCap) all.push_back(fs); else break; }
+                    if (all.size() >= kStringCap) break;
                 }
-                if (!any) all = extractPrintableStrings(p, n, c.elf.base, 3000, 5);
+                if (!any) all = extractPrintableStrings(p, n, c.elf.base, kStringCap, 5);
                 c.strings = std::move(all);
             }
             if (c.funcs.empty()) c.notes.push_back("No function symbols — used linear scan");
@@ -264,7 +274,8 @@ std::string Engine::analyze(const std::string& path) {
 
     // strings
     out << ",\"strings\":[";
-    for (size_t i = 0; i < c.strings.size(); ++i) {
+    size_t nStr = c.strings.size() < kStringsInJson ? c.strings.size() : kStringsInJson;
+    for (size_t i = 0; i < nStr; ++i) {
         if (i) out << ",";
         out << "{\"addr\":" << hq(c.strings[i].addr)
             << ",\"value\":" << q(c.strings[i].value.substr(0, 256)) << "}";
@@ -748,14 +759,23 @@ struct FnSource {
     u64 size = 0;
 };
 
-std::string fnSignature(const FuncInfo& f) {
+// Prototype for the header stub. Taken from the decompiled body so the stub and
+// the exported source agree; a lifter that recovered two parameters should not
+// publish a (void) prototype next to a definition that takes them.
+std::string fnSignature(const FuncInfo& f, const std::string& pseudo) {
+    size_t brace = pseudo.find('{');
+    if (brace != std::string::npos) {
+        std::string sig = pseudo.substr(0, brace);
+        while (!sig.empty() && (sig.back() == ' ' || sig.back() == '\n')) sig.pop_back();
+        if (sig.find('(') != std::string::npos && sig.find(')') != std::string::npos &&
+            sig.find('\n') == std::string::npos)
+            return sig;
+    }
     std::string n = f.name;
     if (looksMangled(n)) {
         std::string d = demangle(n);
         if (!d.empty()) n = d;
     }
-    // The IR lifter types everything as u64; a signature-only header should say
-    // so rather than invent argument lists it cannot recover.
     return "u64 " + n + "(void)";
 }
 
@@ -797,9 +817,22 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
     f << " * Architecture: " << (c.arch.empty() ? "-" : c.arch) << "\n";
     f << " * Disassembler: " << c.backend << "\n";
     f << " *\n";
-    f << " * This is reconstructed from machine code, not original source. The IR\n";
-    f << " * lifter types every value as u64 and does not recover argument lists,\n";
-    f << " * structs, vtables or exception handling. It will not recompile as-is.\n";
+    f << " * This is reconstructed from machine code, not original source. It will\n";
+    f << " * not recompile as-is. What the lifter does and does not recover:\n";
+    f << " *\n";
+    f << " *   - Every value is typed by its register or access width, never by\n";
+    f << " *     the original C type. Structs, classes and vtables are offsets.\n";
+    f << " *   - An argument list holds the registers this function was seen to\n";
+    f << " *     set up before the call. f(...) means none were, so the callee's\n";
+    f << " *     arguments are unknown rather than absent.\n";
+    f << " *   - Values are tracked within a basic block and along single-\n";
+    f << " *     predecessor edges. A register named bare in an expression (w8,\n";
+    f << " *     x19, fp) reaches that point from a path the lifter did not\n";
+    f << " *     merge, and is declared but never assigned.\n";
+    f << " *   - CC_xx stands for a condition whose flag-setting instruction was\n";
+    f << " *     not traced. A loop prints as do/while only where the back edge\n";
+    f << " *     forms a region with one entry; everything else stays as gotos.\n";
+    f << " *   - Exception handling and unwind tables are not reconstructed.\n";
     f << " */\n\n";
 
     if (!wantAsm) {
@@ -859,9 +892,13 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
 
     if (wantHdr) {
         f << "/* " << targets.size() << " functions */\n\n";
-        for (auto* fn : targets)
-            f << fnSignature(*fn) << ";  /* 0x" << std::hex << std::uppercase
+        FnSource hs;
+        for (auto* fn : targets) {
+            hs = FnSource{};
+            std::string pseudo = buildFnSource(*fn, hs) ? hs.pseudo : std::string();
+            f << fnSignature(*fn, pseudo) << ";  /* 0x" << std::hex << std::uppercase
               << fn->addr << std::dec << std::nouppercase << " */\n";
+        }
         f << "\n";
         f.flush();
         st << "{\"ok\":true,\"functions\":" << targets.size() << ",\"bytes\":" << u64(f.tellp()) << "}";
