@@ -26,7 +26,7 @@ std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e) {
         f.addr = s.addr;
         f.size = s.size;
         f.thumb = s.thumb;
-        f.name = s.name.empty() ? "SUB_" + hexAddr(s.addr) : s.name;
+        f.name = s.name.empty() ? "SUB_" + hexAddr(s.addr).substr(2) : s.name;
         f.from = "symtab";
         auto it = byAddr.find(s.addr);
         if (it == byAddr.end()) byAddr[s.addr] = f;
@@ -44,14 +44,31 @@ std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e) {
                 std::set<u64> starts;
 
                 if (e.archEnum == "ARM64") {
+                    // An address taken with adr is only a function start if it
+                    // reads like one; adr also materialises jump tables and
+                    // literals that live inside .text.
+                    auto looksLikePrologue = [&](u64 target) -> bool {
+                        if (target < va || target + 4 > va + size) return false;
+                        u32 w0 = rd32(p + (target - va));
+                        if (w0 == 0xD503237F || w0 == 0xD503233F) return true;  // pacibsp/paciasp
+                        if ((w0 & 0xFFC003E0) == 0xA98003E0) return true;       // stp _,_,[sp,#-N]!
+                        if ((w0 & 0xFFC003FF) == 0xD10003FF) return true;       // sub sp, sp, #N
+                        return false;
+                    };
+                    std::vector<u64> adrTargets;
                     for (u64 i = 0; i + 4 <= size; i += 4) {
                         u32 w = rd32(p + i);
                         if (w == 0xD503237F) starts.insert(va + i);                 // pacibsp
                         else if ((w & 0xFC000000) == 0x94000000) {                  // bl
                             u64 target = va + i + u64(sext(i64(w & 0x03FFFFFF), 26)) * 4;
                             starts.insert(target);
+                        } else if ((w & 0x9F000000) == 0x10000000) {                // adr
+                            i64 imm = i64(((w >> 5) & 0x7FFFF) << 2) | i64((w >> 29) & 3);
+                            adrTargets.push_back(va + i + u64(sext(imm, 21)));
                         }
                     }
+                    for (u64 t : adrTargets)
+                        if (looksLikePrologue(t)) starts.insert(t);
                 } else if (e.archEnum == "X86_64" || e.archEnum == "X86") {
                     for (u64 i = 0; i + 5 <= size; ++i) {
                         if (p[i] == 0x55 && i + 4 <= size &&

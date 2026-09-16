@@ -73,6 +73,12 @@ bool Engine::ensureCtx(const std::string& path) {
                 }
             }
             c.names = buildAddrNamesElf(c.bin, c.elf);
+            // Functions found by the scan are not in the symbol table, so a
+            // pointer to one printed as a bare address. Registering them lets
+            // the decompiler name callbacks and vtable entries, which is most
+            // of what a function pointer is used for in the binaries this
+            // tool is pointed at.
+            for (auto& fn : c.funcs) c.names.add(fn.addr, fn.name);
             c.cg = buildCallGraph(c.xrefs, c.funcs, c.names);
             if (!c.cg.edges.empty())
                 c.notes.push_back("Call graph: " + std::to_string(c.cg.edges.size()) + " call edges");

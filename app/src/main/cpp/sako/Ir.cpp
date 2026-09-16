@@ -479,6 +479,24 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
     // also reads as three separate calls.
     int tmpSeq = 0;
 
+    // A call clobbers the caller-saved registers, so anything they held before
+    // it is not an argument to whatever is called next. Without this a value
+    // set up for one call kept being listed as an argument to every later one.
+    auto clobberVolatile = [&](const std::string& ret) {
+        if (arm) {
+            for (int i = 1; i <= 18; ++i) {
+                regs.erase("x" + std::to_string(i));
+                regs.erase("w" + std::to_string(i));
+            }
+        } else {
+            for (const char* r : {"rcx","rdx","rsi","rdi","r8","r9","r10","r11",
+                                  "ecx","edx","esi","edi"})
+                regs.erase(r);
+        }
+        (void)ret;
+        clearFlags();
+    };
+
     // Width of the operands the last compare set the flags from. Needed to
     // fold a constant comparison with the right signedness and truncation.
     int flWidth = 8;
@@ -780,6 +798,7 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
                 IrStmt s; s.kind = IrStmt::CALL; s.rhs = callE; s.addr = l.addr;
                 s.lhs = IrExpr::makeReg("v" + std::to_string(++tmpSeq), 8);
                 out.push_back(s);
+                clobberVolatile("x0");
                 setReg("x0", s.lhs->clone());
                 ++res.nCalls;
                 return "";
@@ -794,6 +813,7 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
                 IrStmt s; s.kind = IrStmt::CALL; s.rhs = callE; s.addr = l.addr;
                 s.lhs = IrExpr::makeReg("v" + std::to_string(++tmpSeq), 8);
                 out.push_back(s);
+                clobberVolatile("x0");
                 setReg("x0", s.lhs->clone());
                 ++res.nCalls;
                 return "";
@@ -959,6 +979,7 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
             IrStmt s; s.kind = IrStmt::CALL; s.rhs = callE; s.addr = l.addr;
             s.lhs = IrExpr::makeReg("v" + std::to_string(++tmpSeq), 8);
             out.push_back(s);
+            clobberVolatile("rax");
             regs["rax"] = s.lhs->clone();
             ++res.nCalls;
             return "";
