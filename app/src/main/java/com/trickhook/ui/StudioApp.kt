@@ -1278,12 +1278,18 @@ private fun AnalysisFailure(vm: StudioViewModel, onOpen: () -> Unit) {
 @Composable
 private fun ArchChips() {
     val ide = LocalIde.current
-    // Colour ranks them: what the IR decompiler lifts, what only disassembles.
+    // Colour ranks them by what the user actually gets, so the launch screen
+    // cannot promise more than the engine delivers. Violet and cyan are the
+    // two families the built-in IR lifter also covers; the rest decompile
+    // through Ghidra alone. SystemZ is dim because it genuinely does not
+    // decompile — Ghidra ships no z/Architecture processor module, so there is
+    // no specification to compile. It disassembles and stops there.
     val chips = listOf(
         "ARM64" to ide.violet, "ARM/Thumb" to ide.violet,
         "x86-64" to ide.cyan, "x86" to ide.cyan,
-        "MIPS" to ide.dim, "PowerPC" to ide.dim,
-        "SPARC" to ide.dim, "SystemZ" to ide.dim, "m68k" to ide.dim
+        "MIPS" to ide.cyan, "PowerPC" to ide.cyan,
+        "SPARC" to ide.cyan, "m68k" to ide.cyan,
+        "SystemZ" to ide.dim
     )
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(Space.s, Alignment.CenterHorizontally),

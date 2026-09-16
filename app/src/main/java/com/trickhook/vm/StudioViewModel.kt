@@ -1503,7 +1503,7 @@ class StudioViewModel : ViewModel() {
 
     /**
      * Copy the SLEIGH specifications out of assets and hand the directory to
-     * the engine. They are ~1.8 MB and never change for a given build, so a
+     * the engine. They are ~3.2 MB and never change for a given build, so a
      * version marker keeps this to a single pass on first run and after an
      * update.
      */
