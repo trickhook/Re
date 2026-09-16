@@ -1,0 +1,168 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The project pins these in app/build.gradle.kts — keep them in sync.
+  NDK_VERSION: '27.2.12479018'
+  CMAKE_VERSION: '3.22.1'
+  COMPILE_SDK: '35'
+  BUILD_TOOLS: '35.0.0'
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install SDK platform, NDK and CMake
+        run: |
+          sdkmanager --install \
+            "platforms;android-${COMPILE_SDK}" \
+            "build-tools;${BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Read app version
+        id: meta
+        run: |
+          version=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "App version: $version"
+
+      # Release signing is optional. Without these secrets the release APK is
+      # unsigned and cannot be installed — use the debug APK instead.
+      - name: Check for release signing secrets
+        id: signing
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No RELEASE_KEYSTORE_BASE64 secret — building the debug APK only."
+          fi
+
+      - name: Materialise release keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEYSTORE" | base64 -d > app/sakore-release.jks
+          {
+            echo "storeFile=sakore-release.jks"
+            echo "storePassword=${STORE_PASSWORD}"
+            echo "keyAlias=${KEY_ALIAS}"
+            echo "keyPassword=${KEY_PASSWORD}"
+          } > app/keystore.properties
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" assembleDebug
+
+      - name: Build release APK
+        if: steps.signing.outputs.available == 'true'
+        run: ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" assembleRelease
+
+      - name: Stage APKs
+        id: stage
+        run: |
+          mkdir -p dist
+          v='${{ steps.meta.outputs.version }}'
+          sha=$(git rev-parse --short HEAD)
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/SakoREStudio-v${v}-${sha}-debug.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk "dist/SakoREStudio-v${v}-release.apk"
+          fi
+          {
+            echo "### 📦 APKs"
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "|------|------|---------|"
+            for f in dist/*.apk; do
+              printf '| `%s` | %s | `%s` |\n' \
+                "$(basename "$f")" \
+                "$(du -h "$f" | cut -f1)" \
+                "$(sha256sum "$f" | cut -c1-16)…"
+            done
+            echo
+            echo 'Install with `adb install -r <file>.apk`, or copy it to the phone and open it.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SakoREStudio-debug-apk
+          path: |
+            dist/*debug.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release APK
+        if: steps.signing.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SakoREStudio-release-apk
+          path: dist/*release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f app/sakore-release.jks app/keystore.properties
+
+  release:
+    name: Attach APKs to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.apk
+          generate_release_notes: true

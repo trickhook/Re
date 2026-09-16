@@ -16,6 +16,7 @@
 [![Made In Somalia](https://img.shields.io/badge/%F0%9F%87%B8%F0%9F%87%B4_MADE_IN-SOMALIA-4189DD?style=for-the-badge)](#-qoraaga--author)
 [![Author](https://img.shields.io/badge/Author-Maxamed_Xasan_Muse-34D399?style=for-the-badge)](#-qoraaga--author)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/trickhook/Re/build.yml?style=for-the-badge&label=Build%20APK&logo=githubactions&logoColor=white)](https://github.com/trickhook/Re/actions/workflows/build.yml)
 
 **[⬇️ DOWNLOAD APK](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** · [🌐 Website/Landing](https://maxamedxasa.github.io/SakoREStudio/) · [🇸🇴 Soomaali](#soomaali) · [🇬🇧 English](#english)
 
@@ -50,7 +51,7 @@ App-kan waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed — waa qalabkii u
 
 ### 📲 Sida Loo Rakibo
 
-1. Fur **[Releases](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** → soo dejiso `SakoREStudio-v2.0.3.apk` (~10 MB)
+1. Fur **[Releases](https://github.com/Maxamedxasa/SakoREStudio/releases/latest)** → soo dejiso `SakoREStudio-v2.0.3.apk` (~10 MB) — ama APK-ga ugu cusub ka soo qaado [**Actions → Build APK → Artifacts**](https://github.com/trickhook/Re/actions/workflows/build.yml)
 2. Fur APK-ga → hadduu browser-ku ama file manager-ku dhib ku qado → ogol **"Install unknown apps"**
 3. Rakib → fur → **diyaar!** (Android 8.0+ · arm64-v8a & x86_64 · ma u baahna root — debugger-keliya ayaa root u baahan)
 
@@ -217,6 +218,35 @@ git clone https://github.com/Maxamedxasa/SakoREStudio.git
 ```bash
 ./gradlew assembleDebug          # debug APK — works out of the box
 ```
+
+**Build + install on a connected device in one step:**
+```bash
+./scripts/install-apk.sh                 # builds, installs over adb, launches the app
+./scripts/install-apk.sh -s SERIAL       # when several devices are attached
+./scripts/install-apk.sh --skip-build    # reinstall the APK you already built
+```
+Requires USB debugging and `adb` on your PATH. The debug APK is signed with the
+standard Android debug key, so it installs with no keystore setup at all.
+
+**Don't want to build locally? Download the APK from CI.**
+Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml),
+which provisions the pinned NDK/CMake, builds the native engine for both ABIs
+and uploads the APK:
+
+1. Open the [**Build APK**](https://github.com/trickhook/Re/actions/workflows/build.yml)
+   workflow (or press **Run workflow** to start one by hand)
+2. Pick the run → **Artifacts** → `SakoREStudio-debug-apk`
+3. Unzip, then `adb install -r SakoREStudio-*-debug.apk` — or copy the APK to the
+   phone and tap it (allow *Install unknown apps* when prompted)
+
+The run summary lists each APK with its size and SHA-256. Pushing a `v*` tag
+additionally attaches the APKs to a GitHub Release.
+
+CI builds the **release** APK too, but only when release signing secrets are
+configured on the repository — `RELEASE_KEYSTORE_BASE64` (the `.jks`,
+base64-encoded), `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS` and
+`RELEASE_KEY_PASSWORD`. Without them an unsigned release APK cannot be
+installed, so CI skips it and ships the debug APK only.
 
 **Release signing (optional):** create `app/keystore.properties` (gitignored):
 ```properties

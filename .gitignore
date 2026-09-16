@@ -17,3 +17,6 @@ captures/
 keystore.properties
 *.idsig
 agent-ctx/
+
+# CI APK staging
+dist/
