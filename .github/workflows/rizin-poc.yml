@@ -1,0 +1,143 @@
+# Proof of concept only — measures what adopting rizin as the analysis engine
+# would cost. It does not touch the app: nothing here is linked into Nocturne.
+name: Rizin size PoC
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'rizin git ref to build'
+        default: 'v0.7.4'
+  push:
+    paths: ['.github/workflows/rizin-poc.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rizin-poc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: Cross-compile rizin for arm64-v8a
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: '27.2.12479018'
+      RIZIN_REF: ${{ github.event.inputs.ref || 'v0.7.4' }}
+      API: '26'          # Nocturne's minSdk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tooling
+        run: |
+          python3 -m pip install --quiet 'meson>=1.1' ninja
+          meson --version
+          ninja --version
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install NDK
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+
+      - name: Write the meson cross file
+        run: |
+          NDK="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "TOOLCHAIN=$TC" >> "$GITHUB_ENV"
+          cat > android-arm64.ini <<EOF
+          [binaries]
+          c = '$TC/bin/aarch64-linux-android${API}-clang'
+          cpp = '$TC/bin/aarch64-linux-android${API}-clang++'
+          ar = '$TC/bin/llvm-ar'
+          strip = '$TC/bin/llvm-strip'
+          ranlib = '$TC/bin/llvm-ranlib'
+          pkg-config = 'false'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+
+          [properties]
+          needs_exe_wrapper = true
+          EOF
+          cat android-arm64.ini
+
+      - name: Clone rizin
+        run: |
+          git clone --depth 1 --branch "$RIZIN_REF" --recurse-submodules \
+            https://github.com/rizinorg/rizin.git rizin
+          echo "rizin $RIZIN_REF at $(git -C rizin rev-parse --short HEAD)"
+
+      - name: Configure
+        id: configure
+        working-directory: rizin
+        run: |
+          set -o pipefail
+          meson setup build \
+            --cross-file ../android-arm64.ini \
+            --buildtype=release \
+            --prefix=/data/local/tmp/rizin \
+            -Dportable=true 2>&1 | tee ../configure.log
+
+      - name: Build
+        id: build
+        working-directory: rizin
+        run: |
+          start=$(date +%s)
+          ninja -C build 2>&1 | tail -40
+          echo "seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+
+      - name: Measure
+        run: |
+          STRIP="$TOOLCHAIN/bin/llvm-strip"
+          mkdir -p measured
+          find rizin/build -name 'librz_*.so*' -type f -exec cp {} measured/ \; 2>/dev/null || true
+          find rizin/build -name '*.so' -type f | head -50
+
+          echo "## Rizin on arm64-v8a — size PoC" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "rizin \`${RIZIN_REF}\` · NDK ${NDK_VERSION} · API ${API} · release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| library | unstripped | stripped |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|-----------:|---------:|" >> "$GITHUB_STEP_SUMMARY"
+
+          raw=0; str=0
+          for f in measured/*.so*; do
+            [ -f "$f" ] || continue
+            a=$(stat -c%s "$f")
+            "$STRIP" --strip-unneeded "$f" -o "$f.stripped" 2>/dev/null || cp "$f" "$f.stripped"
+            b=$(stat -c%s "$f.stripped")
+            raw=$((raw + a)); str=$((str + b))
+            printf '| `%s` | %s | %s |\n' "$(basename "$f")" \
+              "$(numfmt --to=iec --suffix=B $a)" "$(numfmt --to=iec --suffix=B $b)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total stripped: $(numfmt --to=iec --suffix=B $str)** (unstripped $(numfmt --to=iec --suffix=B $raw))" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "For comparison, Nocturne ships **9.3 MiB** of \`libnocturne.so\` per ABI today." >> "$GITHUB_STEP_SUMMARY"
+          echo "Two ABIs are packaged, so double both figures for the APK cost." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Build took **${{ steps.build.outputs.seconds }}s** on a 4-core runner." >> "$GITHUB_STEP_SUMMARY"
+
+          echo "TOTAL_STRIPPED=$str" >> "$GITHUB_ENV"
+          echo "TOTAL_RAW=$raw" >> "$GITHUB_ENV"
+
+      - name: Upload the built libraries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rizin-arm64-poc
+          path: |
+            measured/*.stripped
+            configure.log
+          if-no-files-found: warn
+          retention-days: 7
