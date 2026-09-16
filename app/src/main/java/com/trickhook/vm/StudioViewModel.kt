@@ -977,27 +977,27 @@ class StudioViewModel : ViewModel() {
                 val dir = File(context.filesDir, "sleigh").apply { mkdirs() }
                 val stamp = try {
                     context.packageManager.getPackageInfo(context.packageName, 0).let {
-                        "${'$'}{it.versionName}-${'$'}{names.size}"
+                        "${it.versionName}-${names.size}"
                     }
-                } catch (e: Exception) { "unknown-${'$'}{names.size}" }
+                } catch (e: Exception) { "unknown-${names.size}" }
                 val marker = File(dir, ".installed")
                 if (marker.takeIf { it.exists() }?.readText() != stamp) {
                     var bytes = 0L
                     names.forEach { name ->
-                        context.assets.open("sleigh/${'$'}name").use { ins ->
+                        context.assets.open("sleigh/$name").use { ins ->
                             File(dir, name).outputStream().use { bytes += ins.copyTo(it) }
                         }
                     }
                     marker.writeText(stamp)
-                    log("INFO", "SLEIGH specifications installed: ${'$'}{names.size} files, " +
-                        "${'$'}{bytes / 1024} KB")
+                    log("INFO", "SLEIGH specifications installed: ${names.size} files, " +
+                        "${bytes / 1024} KB")
                 }
                 NativeBridge.nativeSetSleighDir(dir.absolutePath)
                 NativeBridge.nativeSetDecompiler(decompiler)
                 withContext(Dispatchers.Main) { sleighReady = true }
                 refreshDecompilerStatus()
             } catch (e: Exception) {
-                log("ERROR", "SLEIGH install: ${'$'}{e.message}")
+                log("ERROR", "SLEIGH install: ${e.message}")
             }
         }
     }

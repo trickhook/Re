@@ -153,6 +153,24 @@ for dp, _, fns in os.walk(ROOT):
                 bad.append('%s:%d fun %s%s clashes with the accessor of `var %s`'
                            % (p, t[:m.start()].count('\n') + 1, m.group(1), m.group(2), prop))
 
+        # 6. `${'$'}` inside an ordinary string template. It is the idiom for
+        #    emitting a LITERAL dollar sign, and it is what a generator writes
+        #    when it is escaping its own heredoc one level too many. The result
+        #    compiles and is silently wrong: `"sleigh/${'$'}name"` is the path
+        #    `sleigh/$name`, not the value of `name`.
+        #
+        #    That exact line meant the SLEIGH specifications never installed, so
+        #    assets.open threw on first launch, sleighReady stayed false forever
+        #    and the Ghidra backend could not run on any device — while the app
+        #    quietly fell back to the IR lifter and said nothing. Six more sites
+        #    in the same function printed `${names.size}` to the log as text.
+        #
+        #    A genuine literal dollar is rare and belongs in a raw string or as
+        #    '\u0024'; if one is ever really wanted here, spell it that way.
+        for m in re.finditer(r"\$\{\s*'\$'\s*\}", t):
+            bad.append("%s:%d `${'$'}` emits a literal dollar, not an interpolation"
+                       % (p, t[:m.start()].count('\n') + 1))
+
 for b in bad:
     print(b)
 print('KOTLIN AUDIT:', 'FAIL (%d)' % len(bad) if bad else 'clean')

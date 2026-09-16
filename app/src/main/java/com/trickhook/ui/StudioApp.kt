@@ -228,7 +228,13 @@ fun StudioApp(vm: StudioViewModel) {
     val keyHandler = Modifier.onPreviewKeyEvent { e ->
         if (e.type == KeyEventType.KeyDown) {
             val isDigit = e.key.keyCode >= Key.One.keyCode && e.key.keyCode <= Key.Nine.keyCode
-            val digit = (e.key.keyCode - Key.One.keyCode).toInt()
+            // Key.keyCode is NOT the Android keycode: on Android a Key is built as
+            // packInts(nativeKeyCode, 0), i.e. nativeKeyCode shl 32. So subtracting two
+            // of them leaves the difference in the HIGH word and the low 32 bits at
+            // zero — a plain .toInt() returned 0 for every digit, which is why Ctrl+1
+            // through Ctrl+9 all selected the first tab. The range test above is fine,
+            // since KEYCODE_1..KEYCODE_9 are contiguous and so is their packed form.
+            val digit = ((e.key.keyCode - Key.One.keyCode) ushr 32).toInt()
             when {
                 e.isCtrlPressed && e.key == Key.K -> { showPalette = !showPalette; true }
                 e.isCtrlPressed && e.key == Key.F -> { showSearch = true; true }
