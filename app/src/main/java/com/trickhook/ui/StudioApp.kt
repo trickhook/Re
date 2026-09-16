@@ -345,7 +345,7 @@ private fun ProjectDrawer(vm: StudioViewModel, onClose: () -> Unit, openFile: ()
                         }
                         .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
-                    Text(fileIcon(rp.format), fontSize = 13.sp, modifier = Modifier.width(24.dp))
+                    RowIcon(fileIcon(rp.format), ide.dim, 13.dp)
                     Text(
                         rp.name, color = ide.cyan, fontSize = 12.sp, fontFamily = Mono,
                         maxLines = 1, modifier = Modifier.weight(1f)
