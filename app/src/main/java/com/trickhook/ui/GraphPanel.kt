@@ -140,7 +140,7 @@ fun GraphPanel(vm: StudioViewModel) {
         }
         if (d == null || d.blocks.isEmpty()) {
             Hint(
-                "Select a function to see its Control Flow Graph — dooro shaqo si aad u arkid graph-ka.",
+                "Select a function to see its control-flow graph.",
                 "Drag nodes · pinch zoom · colored: green=entry, red=exit, amber=branch."
             )
         } else {

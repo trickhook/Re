@@ -373,7 +373,6 @@ private fun PluginLogSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
             }
         }
     }
-    }
 }
 
 /** Icon and tint per bundled plugin, falling back to a generic extension mark. */

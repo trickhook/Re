@@ -54,7 +54,7 @@ fun StringsPanel(vm: StudioViewModel) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                label = { Text("Search strings · raadi") },
+                label = { Text("Search strings") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
                 textStyle = TextStyle(fontSize = 12.sp, fontFamily = Mono, color = ide.text)
@@ -97,7 +97,7 @@ fun FunctionsPanel(vm: StudioViewModel) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                label = { Text("Search functions · raadi shaqo") },
+                label = { Text("Search functions") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
                 textStyle = TextStyle(fontSize = 12.sp, fontFamily = Mono, color = ide.text)
@@ -172,8 +172,8 @@ fun MapPanel(vm: StudioViewModel) {
             }
             Spacer(Modifier.weight(1f))
             Text(
-                if (showSegments) "Memory Map · Khariidadaha memory-ga"
-                else "Section Table · Shaxda qaybaha",
+                if (showSegments) "Memory map"
+                else "Section table",
                 color = ide.dim, fontSize = 10.sp
             )
         }
@@ -232,7 +232,7 @@ fun ConsolePanel(vm: StudioViewModel) {
                 .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Console · Console-ka Nocturne", color = ide.text, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            Text("Console", color = ide.text, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { vm.console.clear(); vm.log("INFO", "Console cleared") }) {
                 Text("Clear", color = ide.dim)
@@ -276,7 +276,7 @@ fun LegacyTracerPanel(vm: StudioViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Debugger (experimental ptrace) · Tijaabo",
+                "Debugger — experimental ptrace",
                 color = ide.text, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
             )
             Spacer(Modifier.weight(1f))

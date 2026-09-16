@@ -74,7 +74,7 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
 
                 val commands = remember(vm.plugins.size, vm.tab) {
                     buildList {
-                        add(Command("Open file (APK/ELF/EXE/DEX)", "soo dooro fayl", "Ctrl+O", openFile))
+                        add(Command("Open file (APK/ELF/EXE/DEX)", "pick a binary to analyse", "Ctrl+O", openFile))
                         add(Command("Go to address…", "jump to a virtual address", "Ctrl+G") { showGoto = true })
                         add(Command("Search everywhere", "functions + strings + comments", "Ctrl+F") { showSearch = true })
                         add(Command("Save project", "persist renames, comments, bookmarks", "Ctrl+S") { vm.saveProject(ctx, vm.meta?.name ?: "project") })

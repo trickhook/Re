@@ -368,7 +368,7 @@ fun HexPanel(vm: StudioViewModel) {
             Text("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII", color = ide.dim, fontSize = 10.sp, fontFamily = Mono)
         }
         if (data == null) {
-            Hint("Open a file to inspect raw bytes — fur fayl si aad u arkid bytes-ka.")
+            Hint("Open a file to inspect its raw bytes.")
         } else {
             val selStart = vm.detail?.addr ?: -1L
             val selEnd = if (vm.detail != null) vm.detail!!.addr + vm.detail!!.size else -1L
