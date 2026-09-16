@@ -2,6 +2,8 @@
 
 <img src="assets/banner.svg" width="100%" alt="Sako RE Studio — Mobile-first Interactive Disassembler & Decompiler Framework"/>
 
+<img src="assets/app-icon.png" width="128" alt="Sako RE Studio app icon"/>
+
 # 🛡️ Sako RE Studio
 
 ### Mobile-first Interactive Disassembler & Decompiler Framework
