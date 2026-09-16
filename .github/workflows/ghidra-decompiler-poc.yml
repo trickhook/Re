@@ -1,23 +1,30 @@
-# Proof of concept only — measures what adopting Ghidra's decompiler core as
-# Nocturne's analysis engine would cost. It does not touch the app: nothing
-# here is linked into Nocturne.
+# Builds the SLEIGH compiler, regenerates every specification the app ships in
+# app/src/main/assets/sleigh/, and checks the committed ones byte for byte —
+# then measures what the decompiler core costs on arm64-v8a, which is what this
+# workflow was originally for.
+#
+# The check is the point. A .sla is a compiled artefact whose format is
+# versioned against the decompiler that reads it, and the decompiler is
+# vendored under app/src/main/cpp/ghidra at one commit. Nothing else in the
+# repository can tell you that the two still agree; this can, because it
+# recompiles the specs from that same commit and compares hashes.
 #
 # Ghidra's decompiler is a standalone C++ program (Apache-2.0) under
 # Ghidra/Features/Decompiler/src/decompile/cpp. It has no Java or JNI
-# dependency; the Java side drives it over a pipe. It is driven per
-# architecture by a compiled SLEIGH specification, so this job builds the
-# SLEIGH compiler for the host, compiles the AARCH64 and ARM specs with it,
-# and cross-compiles the decompiler library itself for arm64-v8a.
-name: Ghidra decompiler size PoC
+# dependency; the Java side drives it over a pipe.
+name: Ghidra SLEIGH specs and decompiler size
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'ghidra git ref to build'
-        default: 'master'
+        description: 'ghidra git ref (default: the commit vendored under app/src/main/cpp/ghidra)'
+        default: '263160cf57db21a9e25f1e0a8bc42fde5b8824eb'
   push:
-    paths: ['.github/workflows/ghidra-decompiler-poc.yml']
+    paths:
+      - '.github/workflows/ghidra-decompiler-poc.yml'
+      - 'app/src/main/assets/sleigh/**'
+      - 'app/src/main/cpp/ghidra/**'
 
 permissions:
   contents: read
@@ -33,7 +40,9 @@ jobs:
     timeout-minutes: 90
     env:
       NDK_VERSION: '27.2.12479018'
-      GHIDRA_REF: ${{ github.event.inputs.ref || 'master' }}
+      # The vendored decompiler's commit. The .sla format is versioned
+      # against it, so the specs the app ships must come from here.
+      GHIDRA_REF: ${{ github.event.inputs.ref || '263160cf57db21a9e25f1e0a8bc42fde5b8824eb' }}
       API: '26'          # Nocturne's minSdk
 
     steps:
@@ -51,18 +60,23 @@ jobs:
         run: |
           # Ghidra is a very large repository and the decompiler is a small
           # corner of it, so take a blobless sparse checkout of just the parts
-          # this PoC needs.
-          git clone --filter=blob:none --no-checkout --depth 1 \
-            --branch "$GHIDRA_REF" \
-            https://github.com/NationalSecurityAgency/ghidra.git ghidra
-          cd ghidra
+          # this job needs. Fetching the ref by name rather than cloning it
+          # lets an exact commit be named, which is what the default is.
+          mkdir ghidra && cd ghidra
+          git init -q .
+          git remote add origin https://github.com/NationalSecurityAgency/ghidra.git
           git sparse-checkout init --cone
           git sparse-checkout set \
             Ghidra/Features/Decompiler/src/decompile \
             Ghidra/Processors/AARCH64/data \
             Ghidra/Processors/ARM/data \
-            Ghidra/Processors/x86/data
-          git checkout
+            Ghidra/Processors/x86/data \
+            Ghidra/Processors/MIPS/data \
+            Ghidra/Processors/PowerPC/data \
+            Ghidra/Processors/Sparc/data \
+            Ghidra/Processors/68000/data
+          git fetch -q --filter=blob:none --depth 1 origin "$GHIDRA_REF"
+          git checkout -q FETCH_HEAD
           echo "ghidra $GHIDRA_REF at $(git rev-parse --short HEAD)"
           du -sh Ghidra/Features/Decompiler/src/decompile
 
@@ -74,25 +88,82 @@ jobs:
           echo "sleigh compiler built in $(( $(date +%s) - start ))s"
           ls -la sleigh_opt
 
-      - name: Compile the processor specifications
+      - name: Compile the processor specifications the app ships
         id: specs
         run: |
+          set -euo pipefail
           SLEIGH="$PWD/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_opt"
-          compile() {
-            d="ghidra/Ghidra/Processors/$1/data/languages"
-            [ -f "$d/$2" ] || { echo "missing $d/$2"; return 0; }
-            ( cd "$d" && "$SLEIGH" "$2" >/dev/null 2>&1 || true )
-          }
-          compile AARCH64 AARCH64.slaspec
-          compile ARM     ARM7_le.slaspec
-          compile x86     x86-64.slaspec
           mkdir -p specs
-          find ghidra/Ghidra/Processors -name '*.sla' -exec cp {} specs/ \;
-          # The decompiler also reads the compiler and processor spec XML.
-          find ghidra/Ghidra/Processors \
-            \( -name '*.cspec' -o -name '*.pspec' -o -name '*.ldefs' \) \
-            -exec cp {} specs/ \; 2>/dev/null || true
-          ls -la specs/ || true
+          # processor-directory  .slaspec — one line per .sla in assets/sleigh.
+          # Adding an architecture means adding a line here, a language id to
+          # GhidraArch.cpp's languageFor(), and the .ldefs/.pspec/.cspec.
+          for entry in \
+            "AARCH64 AARCH64.slaspec" \
+            "ARM ARM7_le.slaspec" \
+            "x86 x86.slaspec" \
+            "x86 x86-64.slaspec" \
+            "MIPS mips32be.slaspec" \
+            "MIPS mips32le.slaspec" \
+            "MIPS mips64be.slaspec" \
+            "MIPS mips64le.slaspec" \
+            "PowerPC ppc_32_be.slaspec" \
+            "PowerPC ppc_64_isa_altivec_be.slaspec" \
+            "PowerPC ppc_64_isa_altivec_le.slaspec" \
+            "Sparc SparcV9_32.slaspec" \
+            "Sparc SparcV9_64.slaspec" \
+            "68000 68040.slaspec"
+          do
+            set -- $entry
+            d="ghidra/Ghidra/Processors/$1/data/languages"
+            [ -f "$d/$2" ] || { echo "::error::missing $d/$2"; exit 1; }
+            ( cd "$d" && "$SLEIGH" "$2" > "$2.log" 2>&1 ) || {
+              echo "::error::sleigh failed on $2"; tail -20 "$d/$2.log"; exit 1; }
+            cp "$d/${2%.slaspec}.sla" specs/
+          done
+          ls -la specs/
+
+      - name: Check the committed specifications against the ones just built
+        run: |
+          set -euo pipefail
+          A=app/src/main/assets/sleigh
+          fail=0
+          # .sla: compiled here, so compare the bytes. A mismatch means the
+          # assets and the vendored decompiler have drifted apart.
+          for f in specs/*.sla; do
+            b=$(basename "$f")
+            if [ ! -f "$A/$b" ]; then echo "::error::$b is built but not shipped"; fail=1; continue; fi
+            if ! cmp -s "$f" "$A/$b"; then
+              echo "::error::$b differs from the committed asset ($(stat -c%s "$f") vs $(stat -c%s "$A/$b") bytes)"
+              fail=1
+            fi
+          done
+          for f in "$A"/*.sla; do
+            b=$(basename "$f")
+            [ -f "specs/$b" ] || { echo "::error::$b is shipped but nothing here builds it"; fail=1; }
+          done
+          # .pspec/.cspec: copied from upstream unchanged, so they must be
+          # identical to the file of the same name in the Ghidra tree.
+          for f in "$A"/*.pspec "$A"/*.cspec; do
+            b=$(basename "$f")
+            u=$(find ghidra/Ghidra/Processors -name "$b" -print -quit)
+            if [ -z "$u" ]; then echo "::error::$b matches no upstream file"; fail=1; continue; fi
+            cmp -s "$u" "$f" || { echo "::error::$b differs from $u"; fail=1; }
+          done
+          # .ldefs are trimmed by hand to the languages we ship, so check the
+          # references instead: every file one names must be in the directory.
+          for f in "$A"/*.ldefs; do
+            for ref in $(grep -oE '(slafile|processorspec|spec)="[^"]+"' "$f" | cut -d'"' -f2 | sort -u); do
+              [ -f "$A/$ref" ] || { echo "::error::$(basename "$f") names $ref, which is not shipped"; fail=1; }
+            done
+          done
+          # And the other end of the same loop: every language id the engine
+          # can ask for has to exist in one of those .ldefs.
+          for id in $(grep -oE 'return "[A-Za-z0-9_]+:(LE|BE):[0-9]+:[A-Za-z0-9_-]+"' \
+                        app/src/main/cpp/sako/GhidraArch.cpp | cut -d'"' -f2 | sort -u); do
+            grep -qF "id=\"$id\"" "$A"/*.ldefs || { echo "::error::languageFor() returns $id, which no .ldefs defines"; fail=1; }
+          done
+          [ "$fail" = 0 ] && echo "assets match the specs built from $GHIDRA_REF"
+          exit "$fail"
 
       - name: Cross-compile the decompiler for arm64-v8a
         id: build
@@ -134,7 +205,7 @@ jobs:
           cp -r specs measured/specs 2>/dev/null || true
 
           {
-            echo "## Ghidra decompiler on arm64-v8a — size PoC"
+            echo "## SLEIGH specifications, and the decompiler on arm64-v8a"
             echo
             echo "ghidra \`${GHIDRA_REF}\` · NDK ${NDK_VERSION} · API ${API} · -O2 · Apache-2.0"
             echo
@@ -164,9 +235,15 @@ jobs:
               "$(numfmt --to=iec --suffix=B $b)" >> "$GITHUB_STEP_SUMMARY"
           done
 
+          # What the APK actually carries is the whole assets directory, not
+          # just the .sla: the .ldefs/.pspec/.cspec go with them.
+          assets=$(du -sb app/src/main/assets/sleigh | cut -f1)
+
           {
             echo
-            echo "**Engine $(numfmt --to=iec --suffix=B $so) stripped per ABI, plus $(numfmt --to=iec --suffix=B $spec) of SLEIGH specs shared across ABIs.**"
+            echo "**Engine $(numfmt --to=iec --suffix=B $so) stripped per ABI** — the app builds two, arm64-v8a and x86_64 —"
+            echo "**plus $(numfmt --to=iec --suffix=B $assets) of SLEIGH specifications, which ship once for every ABI**"
+            echo "($(numfmt --to=iec --suffix=B $spec) of that is the .sla files listed above)."
             echo
             echo "Translation units that failed to cross-compile: **${{ steps.build.outputs.failures }}**."
             echo "Build took **${{ steps.build.outputs.seconds }}s** on a 4-core runner."

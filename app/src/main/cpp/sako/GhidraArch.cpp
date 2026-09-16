@@ -29,12 +29,69 @@ bool GhidraDecomp::compiledIn() {
 
 std::string GhidraDecomp::languageFor(const std::string& arch) {
     // Only the specifications shipped in assets/sleigh. Anything else falls
-    // back to the built-in IR lifter rather than failing.
+    // back to the built-in IR lifter rather than failing. The keys are the
+    // arch ids the loaders emit (ElfLoader.cpp's e_machine table and
+    // PeLoader.cpp's), not display names.
     if (arch == "ARM64")  return "AARCH64:LE:64:v8A";
     if (arch == "ARM")    return "ARM:LE:32:v7";
     if (arch == "THUMB")  return "ARM:LE:32:v7";
     if (arch == "X86_64") return "x86:LE:64:default";
     if (arch == "X86")    return "x86:LE:32:default";
+    // MIPS: all four the loader can name. Both endiannesses are everyday
+    // sights — big-endian in Broadcom and Atheros router firmware,
+    // little-endian in Ralink/MediaTek firmware and in the old Android
+    // `mips`/`mips64` ABIs — and neither .sla decodes the other.
+    if (arch == "MIPS32")   return "MIPS:LE:32:default";
+    if (arch == "MIPS32BE") return "MIPS:BE:32:default";
+    if (arch == "MIPS64")   return "MIPS:LE:64:default";
+    if (arch == "MIPS64BE") return "MIPS:BE:64:default";
+    // PowerPC: 32-bit big-endian (embedded, PowerQUICC, classic Mac), and
+    // both 64-bit orders — big for AIX/PS3/POWER7, little for everything
+    // built for POWER8 and later. 32-bit little-endian PowerPC is not a
+    // shipping ABI anywhere, so it is deliberately not carried: a PPC32 LE
+    // object still disassembles, and decompilerStatus() says why it stops.
+    //
+    // A2ALT, not default, for the 64-bit pair: Ghidra's "default" PowerPC is
+    // the pre-ISA-2.06 G2 instruction set, and every ppc64le compiler emits
+    // isel, which that specification cannot decode — the decompiler stops at
+    // the first one with "bad instruction data". A2ALT is Power ISA 3.0 with
+    // Altivec: the same .pspec and .cspec, 50 KB more .sla.
+    if (arch == "PPC32BE")  return "PowerPC:BE:32:default";
+    if (arch == "PPC64BE")  return "PowerPC:BE:64:A2ALT";
+    if (arch == "PPC64")    return "PowerPC:LE:64:A2ALT";
+    // SPARC is big-endian only, and Ghidra's V9 specification covers V8
+    // binaries at 32-bit pointer width.
+    if (arch == "SPARC")    return "sparc:BE:32:default";
+    if (arch == "SPARCV9")  return "sparc:BE:64:default";
+    // 68000:BE:32:default is Ghidra's 68040 specification, a superset of the
+    // 68020/68030 user-mode encodings. ColdFire is a different, reduced ISA
+    // and nothing in an ELF header separates it from a 68k, so it is not a
+    // separate entry here.
+    if (arch == "M68K")     return "68000:BE:32:default";
+    // SYSZ is missing on purpose: Ghidra ships no z/Architecture processor
+    // module, so there is no .slaspec upstream to compile. SystemZ stays a
+    // disassemble-only target.
+    return std::string();
+}
+
+const std::vector<std::string>& GhidraDecomp::pipelines() {
+    // The order the picker should offer them in. Ghidra's ActionDatabase
+    // registers six root actions (decompile, jumptable, normalize, paramid,
+    // register, firstpass); the other three are internal steps the decompiler
+    // runs on its own behalf and produce nothing a reader would want.
+    static const std::vector<std::string> p{"decompile", "normalize", "paramid"};
+    return p;
+}
+
+std::string GhidraDecomp::pipelineDescription(const std::string& id) {
+    if (id == "decompile")
+        return "Full C recovery: types, parameters, structure.";
+    if (id == "normalize")
+        return "Normalized p-code, not C: the SSA data flow Ghidra compares "
+               "when it has to tell two builds of the same function apart.";
+    if (id == "paramid")
+        return "Parameter and signature identification on its own, including "
+               "the register or stack slot each argument arrived in.";
     return std::string();
 }
 
@@ -58,7 +115,8 @@ bool GhidraDecomp::open(const std::string&, const std::string&, const u8*, size_
     err = "built without the Ghidra decompiler";
     return false;
 }
-std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err, int) {
+std::string GhidraDecomp::decompile(u64, const std::string&, std::string& err, int,
+                                    const std::string&) {
     err = "built without the Ghidra decompiler";
     return std::string();
 }
@@ -569,8 +627,12 @@ void GhidraDecomp::applyJniPrototype(void* fdv, const std::string& name, int jni
 }
 
 std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::string& err,
-                                    int jniEnvArg) {
+                                    int jniEnvArg, const std::string& pipeline) {
     err.clear();
+    bool known = false;
+    for (const std::string& p : pipelines()) if (p == pipeline) { known = true; break; }
+    if (!known) { err = "unknown analysis pipeline: " + pipeline; return std::string(); }
+
     std::lock_guard<std::mutex> lock(ghidraMutex());
     if (!impl_ || !impl_->arch) { err = "no architecture bound"; return std::string(); }
 
@@ -587,6 +649,13 @@ std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::stri
 
         // A Funcdata already taken through the pipeline cannot be run again;
         // clearing it puts it back to the state a fresh one would be in.
+        // Switching pipeline is that same case and not a new one: all three
+        // are derived from one universal Action and rewrite this one Funcdata
+        // in place, and every one of them starts with ActionStart, which calls
+        // Funcdata::startProcessing(). Reach that twice and it throws
+        // "Function processing already started" (funcdata.cc:154) — verified
+        // by taking this clear out, which turns the second run of any pipeline
+        // into that error.
         if (fd->isProcStarted()) {
             scope->removeSymbolMappings(fd->getSymbol());
             fd = scope->addFunction(a, fd->getName())->getFunction();
@@ -594,12 +663,67 @@ std::string GhidraDecomp::decompile(u64 addr, const std::string& name, std::stri
 
         applyJniPrototype(fd, name.empty() ? fd->getName() : name, jniEnvArg);
 
-        glb->allacts.setCurrent("decompile");
+        glb->allacts.setCurrent(pipeline);
         Action* act = glb->allacts.getCurrent();
         act->reset(*fd);
         act->perform(*fd);
 
         std::ostringstream out;
+        // paramid answers one question — what does this function take and
+        // return — and to answer it cheaply it leaves out the block
+        // structuring the C printer needs. Printing what it does recover is
+        // the whole output, and it is the piece Prototypes.cpp approximates
+        // from a hand-written table.
+        if (pipeline == "paramid") {
+            const FuncProto& proto = fd->getFuncProto();
+            proto.printRaw(fd->getName(), out);
+            out << "\n";
+            int4 n = proto.numParams();
+            for (int4 i = 0; i < n; ++i) {
+                ProtoParameter* p = proto.getParam(i);
+                if (p == nullptr) continue;
+                Address pa = p->getAddress();
+                // Storage is the half of the answer a signature alone loses:
+                // which register or stack slot each parameter arrived in.
+                std::string where = glb->translate->getRegisterName(
+                    pa.getSpace(), pa.getOffset(), p->getSize());
+                if (where.empty()) {
+                    std::ostringstream w;
+                    w << pa.getSpace()->getName() << "+0x" << std::hex << pa.getOffset();
+                    where = w.str();
+                }
+                // A recovered parameter has no name of its own; Ghidra's
+                // placeholder for one is "$$undef00000000", which is not
+                // something to show a reader.
+                std::string pname = p->isNameUndefined()
+                                        ? ("param_" + std::to_string(i + 1))
+                                        : p->getName();
+                out << "// param " << i << ": " << pname << " in " << where
+                    << ", " << p->getSize() << " bytes\n";
+            }
+            out << "// model: " << proto.getModelName()
+                << (proto.isInputLocked() ? ", locked" : ", recovered")
+                << (proto.isDotdotdot() ? ", varargs" : "") << "\n";
+            std::string sig = out.str();
+            if (sig.empty()) err = "no signature recovered";
+            return sig;
+        }
+        // normalize deliberately stops short of C, and upstream agrees: its
+        // own comment on ActionNormalizeBranches is that it runs "when
+        // normalization of the data-flow is important but structured source
+        // code doesn't need to be emitted", and ghidra_process.cc pairs the
+        // normalize action with the syntax-tree reply, never the C one. Ask
+        // the C printer for it and it throws — first for the missing block
+        // structure, and if that is forced past, for the HighVariables the
+        // merge pass never built. So this prints what the pass does produce:
+        // the p-code of each basic block in SSA form, which is the thing two
+        // builds of the same function are compared on.
+        if (pipeline == "normalize") {
+            fd->printRaw(out);
+            std::string tree = out.str();
+            if (tree.empty()) err = "normalize produced no p-code";
+            return tree;
+        }
         glb->print->setOutputStream(&out);
         glb->print->setMarkup(false);
         glb->print->docFunction(fd);

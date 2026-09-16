@@ -50,7 +50,12 @@ ElfInfo parseElf(const Binary& b) {
         return info;
     }
     u8 eiClass = p[4], eiData = p[5];
-    if (eiData != 1) { info.error = "Big-endian ELF not supported"; return info; }
+    // EI_DATA is 1 (little) or 2 (big); anything else is not an ELF we can
+    // read. Big-endian used to be rejected here even though every structural
+    // read below already honours it, which made MIPS, PowerPC, SPARC and 68k
+    // objects unopenable — the four architectures the chips on the start
+    // screen promise and the SLEIGH specifications in assets now decompile.
+    if (eiData != 1 && eiData != 2) { info.error = "Unknown ELF byte order"; return info; }
     bool is64 = (eiClass == 2);
     info.bits = is64 ? 64 : 32;
 

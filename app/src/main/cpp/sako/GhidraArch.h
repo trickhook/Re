@@ -60,12 +60,24 @@ public:
     bool ready() const;
     std::string backendName() const;
 
+    // The analysis pipelines this build can run, most useful first. Ghidra
+    // derives every one of them from the same universal action by filtering
+    // it down to a list of rule groups, so all three are already compiled in;
+    // only "decompile" was ever reachable.
+    static const std::vector<std::string>& pipelines();
+    // One sentence about a pipeline, for the picker. "" for an unknown id.
+    static std::string pipelineDescription(const std::string& id);
+
     // Decompiled C for one function, or "" with `err` set. Never throws.
     // `jniEnvArg` is the index of the parameter that carries a JNIEnv*, or
     // -1 for none. Typing it is what turns an Android library's most common
     // line into a named call. The caller decides: only it has the call graph.
+    // `pipeline` is one of pipelines(); anything else is an error rather than
+    // a silent fall back to the default, because the difference between these
+    // is exactly what the caller asked for.
     std::string decompile(u64 addr, const std::string& name, std::string& err,
-                          int jniEnvArg = -1);
+                          int jniEnvArg = -1,
+                          const std::string& pipeline = "decompile");
 
 private:
     // Takes a ghidra::Funcdata* as void* so this header stays Ghidra-free.

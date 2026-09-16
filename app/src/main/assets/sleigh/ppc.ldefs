@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<language_definitions>
+  <language processor="PowerPC"
+            endian="big"
+            size="32"
+            variant="default"
+            version="1.7"
+            slafile="ppc_32_be.sla"
+            processorspec="ppc_32.pspec"
+            manualindexfile="../manuals/PowerPC.idx"
+            id="PowerPC:BE:32:default">
+    <description>PowerPC 32-bit big endian w/Altivec, G2</description>
+    <compiler name="default" spec="ppc_32.cspec" id="default"/>
+    <external_name tool="gnu" name="powerpc:common"/>
+    <external_name tool="IDA-PRO" name="ppc"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
+    <external_name tool="qemu" name="qemu-ppc"/>
+    <external_name tool="qemu_system" name="qemu-system-ppc"/>
+  </language>
+  <language processor="PowerPC"
+            endian="big"
+            size="64"
+            variant="PowerISA-Altivec"
+            version="1.7"
+            slafile="ppc_64_isa_altivec_be.sla"
+            processorspec="ppc_64.pspec"
+            manualindexfile="../manuals/PowerISA.idx"
+            id="PowerPC:BE:64:A2ALT">
+    <description>Power ISA 3.0 Big Endian w/Altivec</description>
+    <compiler name="default" spec="ppc_64_be.cspec" id="default"/>
+	<external_name tool="gnu" name="powerpc:e500mc"/>
+	<external_name tool="IDA-PRO" name="ppc"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
+    <external_name tool="qemu" name="qemu-ppc64"/>
+    <external_name tool="qemu_system" name="qemu-system-ppc64"/>
+  </language>
+  <language processor="PowerPC"
+            endian="little"
+            size="64"
+            variant="PowerISA-Altivec"
+            version="1.7"
+            slafile="ppc_64_isa_altivec_le.sla"
+            processorspec="ppc_64.pspec"
+            manualindexfile="../manuals/PowerISA.idx"
+            id="PowerPC:LE:64:A2ALT">
+    <description>Power ISA 3.0 Little Endian w/Altivec</description>
+    <compiler name="default" spec="ppc_64_le.cspec" id="default"/>
+    <external_name tool="gnu" name="powerpc:e500mc"/>
+	<external_name tool="IDA-PRO" name="ppcl"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
+    <external_name tool="qemu" name="qemu-ppc64le"/>
+    <external_name tool="qemu_system" name="qemu-system-ppc64le"/>
+  </language>
+</language_definitions>
