@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -90,6 +91,8 @@ private val PanelGutter = Space.l
 // screen holds 13 instructions where it held 37, and reading control flow
 // means seeing the block, not one line of it. 28dp still gives the row a real
 // target, which 17dp and an empty onClick never did.
+private val XrefChipTouch = 48.dp
+
 private val AsmRowMinHeight = 28.dp
 
 /**
@@ -316,16 +319,26 @@ fun AssemblyPanel(vm: StudioViewModel) {
                 val nOut = vm.xrefOutCount(d)
                 Spacer(Modifier.height(Space.s))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // sizeIn, not the chip's own padding: the visible chip stays
+                    // the size the header was designed around, and only the
+                    // touch area grows to 48dp. The twin of this control in the
+                    // Pseudo-C header had the minimum and this one did not, so
+                    // the same chip was reachable on one tab and fiddly on the
+                    // other.
                     Box(
                         Modifier
+                            .sizeIn(minHeight = XrefChipTouch)
                             .clip(RoundedCornerShape(ChipCorner))
-                            .clickable(enabled = nIn > 0, role = Role.Button) { xrefIncoming = true }
+                            .clickable(enabled = nIn > 0, role = Role.Button) { xrefIncoming = true },
+                        contentAlignment = Alignment.Center
                     ) { StatChip("refs in", nIn.toString(), ide.cyan) }
                     Spacer(Modifier.width(Space.s))
                     Box(
                         Modifier
+                            .sizeIn(minHeight = XrefChipTouch)
                             .clip(RoundedCornerShape(ChipCorner))
-                            .clickable(enabled = nOut > 0, role = Role.Button) { xrefIncoming = false }
+                            .clickable(enabled = nOut > 0, role = Role.Button) { xrefIncoming = false },
+                        contentAlignment = Alignment.Center
                     ) { StatChip("calls out", nOut.toString(), ide.accent) }
                     Spacer(Modifier.width(Space.s))
                     // Clamped, because traceStep is an index into a listing that
