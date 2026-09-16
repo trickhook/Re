@@ -80,7 +80,6 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit) {
                         add(Command("Save project", "persist renames, comments, bookmarks", "Ctrl+S") { vm.saveProject(ctx, vm.meta?.name ?: "project") })
                         add(Command("Toggle dark/light theme", "", "Ctrl+T") { vm.darkTheme = !vm.darkTheme })
                         add(Command("Load call graph", "whole binary", "") { vm.loadCallGraph(0) })
-                        add(Command("AI: explain current function", "offline heuristic", "") { vm.tab = Tab.AI; vm.explainLocally() })
                         vm.plugins.forEach { p ->
                             add(Command("Run plugin: ${p.name}", p.description, "") { vm.runPlugin(ctx, p) })
                         }

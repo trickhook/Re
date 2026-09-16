@@ -37,8 +37,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.zip.ZipFile
 
 /**
@@ -64,7 +62,6 @@ enum class Tab(val title: String, val group: TabGroup) {
     MAP("Map", TabGroup.EXPLORE),
     APK("APK", TabGroup.ANALYZE),
     DEBUGGER("Debugger", TabGroup.ANALYZE),
-    AI("AI", TabGroup.ANALYZE),
     PLUGINS("Plugins", TabGroup.OUTPUT),
     CONSOLE("Console", TabGroup.OUTPUT);
 
@@ -125,11 +122,6 @@ class StudioViewModel : ViewModel() {
     var recents by mutableStateOf<List<RecentProject>>(emptyList()); private set
 
     // v2: AI assistant
-    var aiExplanation by mutableStateOf<String>(""); private set
-    var aiBusy by mutableStateOf(false); private set
-    var aiEndpoint by mutableStateOf("")
-    var aiKey by mutableStateOf("")
-    var aiModel by mutableStateOf("")
 
     val console = mutableStateListOf<ConsoleLine>()
     private var apkFile: File? = null
@@ -700,17 +692,6 @@ class StudioViewModel : ViewModel() {
         }
     }
 
-    // --------------------------------------------------------- AI assistant --
-    fun explainLocally() {
-        val d = detail ?: run { aiExplanation = "Select a function first."; return }
-        aiBusy = true
-        viewModelScope.launch {
-            val text = withContext(Dispatchers.Default) { localExplanation(d) }
-            aiExplanation = text
-            aiBusy = false
-        }
-    }
-
     private fun localExplanation(d: FunctionDetail): String {
         val sb = StringBuilder()
         val calls = d.asm.mapNotNull { l ->
@@ -772,52 +753,6 @@ class StudioViewModel : ViewModel() {
         sb.appendLine()
         sb.appendLine("(Offline heuristic analysis — connect an LLM endpoint in AI settings for deeper explanation.)")
         return sb.toString()
-    }
-
-    fun explainRemote() {
-        val d = detail ?: return
-        if (aiEndpoint.isBlank()) { aiExplanation = "Set endpoint in AI settings first."; return }
-        aiBusy = true
-        viewModelScope.launch {
-            try {
-                val asmSnippet = d.asm.take(60).joinToString("\n") {
-                    "${"0x%X".format(it.addr)}  ${it.mnem} ${it.ops}" +
-                        (if (it.comment.isNotEmpty()) "  ; ${it.comment}" else "")
-                }
-                val prompt = "You are a reverse-engineering assistant. Explain what this ${d.arch} function does, " +
-                    "in plain language, list called APIs and their purposes, and flag anything suspicious.\n\n" +
-                    "Function ${d.displayName.ifEmpty { d.name }}:\n$asmSnippet"
-                val body = JSONObject().apply {
-                    put("model", aiModel.ifBlank { "gpt-4o-mini" })
-                    put("messages", org.json.JSONArray().put(
-                        JSONObject().put("role", "user").put("content", prompt)))
-                    put("temperature", 0.3)
-                }
-                val resp = withContext(Dispatchers.IO) {
-                    val conn = URL(aiEndpoint).openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.connectTimeout = 15000
-                    conn.readTimeout = 60000
-                    conn.doOutput = true
-                    conn.setRequestProperty("Content-Type", "application/json")
-                    if (aiKey.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $aiKey")
-                    conn.outputStream.use { it.write(body.toString().toByteArray()) }
-                    val code = conn.responseCode
-                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                    stream?.bufferedReader()?.readText() ?: ""
-                }
-                // OpenAI-compatible: choices[0].message.content
-                val content = try {
-                    JSONObject(resp).optJSONArray("choices")?.optJSONObject(0)
-                        ?.optJSONObject("message")?.optString("content") ?: resp
-                } catch (e: Exception) { resp }
-                aiExplanation = content.ifBlank { "Empty response (HTTP error?)" }
-                log("OK", "AI explanation received (${content.length} chars)")
-            } catch (e: Exception) {
-                aiExplanation = "AI request failed: ${e.message}"
-                log("ERROR", "AI: ${e.message}")
-            } finally { aiBusy = false }
-        }
     }
 
     // -------------------------------------------------------------- helpers --

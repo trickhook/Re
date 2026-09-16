@@ -40,7 +40,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import com.trickhook.R
 import androidx.compose.material.icons.filled.AccountTree
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Grid4x4
@@ -330,7 +329,6 @@ fun StudioApp(vm: StudioViewModel) {
                         Tab.MAP -> MapPanel(vm)
                         Tab.APK -> ApkPanel(vm)
                         Tab.DEBUGGER -> DebuggerPanel(vm)
-                        Tab.AI -> AiPanel(vm)
                         Tab.PLUGINS -> PluginsPanel(vm)
                         Tab.CONSOLE -> ConsolePanel(vm)
                     }
@@ -819,7 +817,6 @@ private fun tabIcon(t: Tab): ImageVector = when (t) {
     Tab.MAP       -> Icons.Filled.Layers
     Tab.APK       -> Icons.Filled.Android
     Tab.DEBUGGER  -> Icons.Filled.BugReport
-    Tab.AI        -> Icons.Filled.AutoAwesome
     Tab.PLUGINS   -> Icons.Filled.Extension
     Tab.CONSOLE   -> Icons.Filled.Terminal
 }
@@ -870,7 +867,6 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                 KeyValue("Project DB", "SQLite: renames, comments, bookmarks, notes, recents")
                 KeyValue("Debugger", "ptrace session: spawn/attach, breakpoints, regs, memory, stack, threads")
                 KeyValue("Plugins", "NocturneScript interpreter + bundled sample plugins")
-                KeyValue("AI", "offline heuristic explain + optional OpenAI-compatible LLM endpoint")
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "The debugger needs a rooted or debuggable device; SELinux may still deny ptrace. " +

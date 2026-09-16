@@ -34,7 +34,7 @@ architecture Capstone supports. Original work and MIT licence: see [Author](#-qo
 
 ### 🧠 Waa maxay Nocturne?
 
-**Nocturne** waa qalab buuxa oo *reverse engineering* ah oo mobile-ka lagu shaqeeyo — disassembler, decompiler, call graph, debugger, APK analyzer iyo nidaam plugins oo dhan ayaa isku hal app ku dhex jira. Hadalka uga gaabkan: **waa IDA Pro ama Ghidra, laakiin telefoonkaada gacanta ku jira.** Engine-ka waa C++17 (NDK) oo ku shaqeeya Capstone 4.0.2, UI-guna waa Kotlin Jetpack Compose oo casri ah. Waxaa lagu falanqayn karaa **APK · ELF · PE · DEX** — **ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · SystemZ · m68k** (little- iyo big-endian labadaba). Wax walba app-ka dhexdiisa ayay ka dhacaan (falanqayntu way offline tahay).
+**Nocturne** waa qalab buuxa oo *reverse engineering* ah oo mobile-ka lagu shaqeeyo — disassembler, decompiler, call graph, debugger, APK analyzer iyo nidaam plugins oo dhan ayaa isku hal app ku dhex jira. Hadalka uga gaabkan: **waa IDA Pro ama Ghidra, laakiin telefoonkaada gacanta ku jira.** Engine-ka waa C++17 (NDK) oo ku shaqeeya Capstone 4.0.2, UI-guna waa Kotlin Jetpack Compose oo casri ah. Waxaa lagu falanqayn karaa **APK · ELF · PE · DEX** — **ARM64 · ARM/Thumb · x86 · x86-64 · MIPS · PowerPC · SPARC · SystemZ · m68k** (little- iyo big-endian labadaba). Wax walba app-ka dhexdiisa ayay ka dhacaan (app-ku ma laha ogolaansho internet).
 
 App-kan waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed — waa qalabkii ugu horreeyay ee noocaan ah oo ka soo saarma Soomaaliya 🇸🇴
 
@@ -49,8 +49,7 @@ App-kan waxaa si buuxda ah u sameeyay horumariye Soomaaliyeed — waa qalabkii u
 | 5 | 🐞 **Debugger Dhab Ah** | ptrace session: **Spawn / Attach PID**, software breakpoints (BRK / 0xCC), registers (akhris/qorid), memory read/write, stack view, thread list |
 | 6 | 📦 **APK Analyzer** | Manifest (AXML binary parser): package, version, **permissions** (kuwo khatar ah ayaa ⚠ lagu calaamadaynayaa), activities/services/receivers + intent-filters, DEX classes, native libs, resources wata image preview |
 | 7 | 🧩 **Plugin System (NocturneScript)** | Luuqad programming oo app-ka ku dhex jirta (variables, if/while/for, functions) + host API 20+ oo function ah. 4 plugin ayaa la soo shubay |
-| 8 | 🤖 **AI Assistant** | *Explain (offline)* — sharaxaad function kasta oo internet la'aan shaqeysa; ama ku xir **OpenAI / DeepSeek / Ollama** endpoint gaar ah |
-| 9 | 📱 **UI Casri Ah** | 13 tab, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), shortcuts buuxa (F1 = caawimo) |
+| 8 | 📱 **UI Casri Ah** | 13 tab, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), shortcuts buuxa (F1 = caawimo) |
 
 ### 📲 Sida Loo Rakibo
 
@@ -84,13 +83,10 @@ Tab-ka **APK** → Manifest (laga furay AXML-ka binary-ga ah), Permissions (kuwo
 **8 · Debugger** *(root ama debuggable device)*
 Tab-ka **Debugger** → **Spawn** (tusaale: `/system/bin/toybox sleep 30`) → **BP @ function** → markuu breakpoint-ku gaaro: registers, memory, stack, threads → **Continue**. Ama **Attach PID** process jira.
 
-**9 · AI**
-Tab-ka **AI** → dooro function → **Explain (offline)** — sharaxaad degdeg ah. Ama **⚙ Settings** → geli OpenAI-compatible endpoint (OpenAI / DeepSeek / Ollama) → **Ask LLM**.
+**9 · Plugins**
+Tab-ka **Plugins** → 10 plugin ayaa diyaar (`security-auditor`, `crypto-finder`, `anti-debug-scanner`, `jni-mapper`, `xref-hotspots`, `attack-surface`, `string-triage`, `arm-analyzer`, `dex-helper`, `string-hunter`) → **Run** → effects-ka (rename/comment) si toos ah DB-ga u geliyaan.
 
-**10 · Plugins**
-Tab-ka **Plugins** → 4 plugin ayaa diyaar: `security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter` → **Run** → effects-ka (rename/comment) si toos ah DB-ga u geliyaan.
-
-**11 · Kaydi**
+**10 · Kaydi**
 `Ctrl+S` → mashruuca SQLite-ga ayaa la kaydiyaa → drawer-ka **RECENT PROJECTS** ka fur markale.
 
 ### 🧩 NocturneScript — Luuqada Plugins-ka
@@ -141,7 +137,7 @@ for i in 0..n-1 {
 
 ### 🧠 What is Nocturne?
 
-**Nocturne** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64, ARM/Thumb, x86, x86-64, MIPS, PowerPC, SPARC, SystemZ and m68k** — little- and big-endian alike — and all analysis runs 100% offline — nothing leaves your device unless you configure your own AI endpoint.
+**Nocturne** is a complete *reverse engineering* suite that runs entirely on your phone — an interactive disassembler, an IR-based decompiler, a call-graph explorer, a real ptrace debugger, an APK analyzer and a plugin scripting system, all inside one app. In the shortest possible terms: **it is IDA Pro / Ghidra, rebuilt mobile-first.** The engine is C++17 (Android NDK) powered by Capstone 4.0.2, the UI is modern Kotlin Jetpack Compose. It analyzes **APK · ELF · PE · DEX** binaries for **ARM64, ARM/Thumb, x86, x86-64, MIPS, PowerPC, SPARC, SystemZ and m68k** — little- and big-endian alike — and every byte of it stays on the device: the app declares no network permission at all.
 
 Built end-to-end by a Somali developer — the first mobile reverse-engineering studio of its kind out of Somalia 🇸🇴
 
@@ -156,8 +152,7 @@ Built end-to-end by a Somali developer — the first mobile reverse-engineering 
 | 5 | 🐞 **Real Debugger** | ptrace session: **Spawn / Attach PID**, software breakpoints (BRK / 0xCC with auto-rewind), register read/write, memory read/write, stack view, thread list |
 | 6 | 📦 **APK Analyzer** | Binary AXML manifest parser: package/version/SDK, **permissions** (dangerous ones flagged ⚠), components + intent-filters, DEX classes, native libs, resources with image preview |
 | 7 | 🧩 **Plugin System (NocturneScript)** | An embedded scripting language (variables, if/while/for, functions) + a 20+-function host API. 4 plugins bundled |
-| 8 | 🤖 **AI Assistant** | *Explain (offline)* — heuristic explanation of any function without internet; or plug in your own **OpenAI / DeepSeek / Ollama** endpoint |
-| 9 | 📱 **Modern UI** | 13 tabs, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), full keyboard shortcuts (F1 = help) |
+| 8 | 📱 **Modern UI** | 13 tabs, **command palette (Ctrl+K)**, search everywhere (Ctrl+F), goto address (Ctrl+G), full keyboard shortcuts (F1 = help) |
 
 ### 📲 Install
 
@@ -175,9 +170,8 @@ Built end-to-end by a Somali developer — the first mobile reverse-engineering 
 6. **CallGraph** — whole-binary tree or per-function callers/callees; imports highlighted in amber.
 7. **APK** — decoded manifest, permissions (dangerous flagged ⚠), components with intent-filters, DEX classes, native libs (**tap = extract + analyze**), resources (**tap image = preview**).
 8. **Debugger** *(root/debuggable device)* — **Spawn** (e.g. `/system/bin/toybox sleep 30`) → **BP @ function** → on hit inspect registers/memory/stack/threads → **Continue**. Or **Attach** to a running PID.
-9. **AI** — select a function → **Explain (offline)**; or **⚙ Settings** → add an OpenAI-compatible endpoint (OpenAI / DeepSeek / Ollama) → **Ask LLM**.
-10. **Plugins** — run the 4 bundled NocturneScript plugins (`security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter`); effects are applied straight into the project database.
-11. **Save** — `Ctrl+S` persists the SQLite project; reopen later from **RECENT PROJECTS** in the drawer.
+9. **Plugins** — run the 10 bundled NocturneScript plugins (`security-auditor`, `arm-analyzer`, `dex-helper`, `string-hunter`); effects are applied straight into the project database.
+10. **Save** — `Ctrl+S` persists the SQLite project; reopen later from **RECENT PROJECTS** in the drawer.
 
 ### 🧩 NocturneScript — the Plugin Language
 
