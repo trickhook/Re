@@ -2,10 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Two permissions, for one feature, and nothing else in the app touches
-      either of them.
+      The updater's two permissions. Nothing else in the app touches
+      REQUEST_INSTALL_PACKAGES; INTERNET is shared with the MCP control port
+      below, which needs it to open a socket at all.
 
-      INTERNET is held solely by com.trickhook.update: one HTTPS request to
+      com.trickhook.update makes one HTTPS request to
       api.github.com for the latest release, one for that release's metadata
       asset, and one for the APK itself once the user has seen what it is and
       pressed Download. There is no schedule, no background work and no
@@ -20,6 +21,29 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      The MCP control port (com.trickhook.mcp).
+
+      INTERNET is listed above for the updater, and the server needs it too:
+      Android gates the creation of ANY socket on the inet group, which that
+      permission is what grants. It makes no outbound connections of its own.
+
+      FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE are for McpService.
+      The service exists so the listening socket is not frozen or killed in the
+      background, and — the part that matters more — so that a phone which is
+      listening on a network port says so in the status bar for as long as it
+      is. specialUse rather than dataSync: this is not a sync, it holds a
+      user-initiated local control port, and dataSync carries a six-hour daily
+      budget on Android 15 that has nothing to do with this.
+
+      POST_NOTIFICATIONS is asked for at the moment the user turns the server
+      on, never at launch. Refusing it does not stop the server; it only hides
+      the notification, which is why the app asks rather than assumes.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -76,6 +100,34 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/update_file_paths" />
         </provider>
+
+        <!--
+          The MCP control port. Off until a person switches it on in the app:
+          there is no BOOT_COMPLETED receiver, nothing starts it on launch, and
+          McpService returns START_NOT_STICKY so the system will not restart it
+          after a kill either.
+
+          exported="false" so no other app on the device can start or stop it
+          with an Intent. The socket it opens is protected separately, by a
+          256-bit bearer token required on every request.
+
+          stopWithTask="true" because swiping Nocturne away should take the
+          listener with it. A port left open by an app the user thinks they
+          closed is exactly the situation this feature must never create.
+
+          specialUse is the honest type: this is a user-initiated local control
+          port, not a sync, a media session or a location fix. The subtype
+          property below is what Android asks an app to declare when it uses it.
+        -->
+        <service
+            android:name=".mcp.McpService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="true">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local MCP control port, started by the user, stopped when idle" />
+        </service>
     </application>
 
 </manifest>

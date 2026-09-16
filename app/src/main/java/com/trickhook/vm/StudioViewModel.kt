@@ -18,6 +18,7 @@ import com.trickhook.data.Note
 import com.trickhook.data.ProjectDb
 import com.trickhook.data.RecentProject
 import com.trickhook.engine.NativeBridge
+import com.trickhook.mcp.McpRuntime
 import com.trickhook.model.ApkEntry
 import com.trickhook.model.ApkResourceEntry
 import com.trickhook.model.AnalysisMeta
@@ -330,6 +331,26 @@ class StudioViewModel : ViewModel() {
 
     init {
         log("INFO", "Nocturne ready — engine loaded (IR decompiler, call graph, debugger, plugins)")
+        // The MCP control port, when the user turns it on, drives THIS session:
+        // the binary that is open here, the annotations recorded here. Nothing
+        // is started by registering — McpRuntime only learns where the analysis
+        // lives, so its tools can answer "nothing is open" instead of guessing.
+        //
+        // This is not an AI feature. Nocturne holds no model client and no API
+        // key; com.trickhook.mcp is the far end of a wire whose other end is an
+        // assistant running on somebody's own computer.
+        McpRuntime.attach(this)
+    }
+
+    /**
+     * The analysis session is over, which means the Activity was finished for
+     * real. Handing that to McpRuntime lets it take a running control port down
+     * with it: a listener with nothing to analyse and no screen to read its
+     * token off is a port open for no reason.
+     */
+    override fun onCleared() {
+        McpRuntime.detach(this)
+        super.onCleared()
     }
 
     fun log(level: String, msg: String) {

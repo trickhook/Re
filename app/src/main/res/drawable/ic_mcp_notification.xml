@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The status-bar icon for the MCP listener. A notification small icon is drawn
+  as a silhouette by the system, so this is a single white path with no fill
+  colours of its own: an open port with a link through it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,4h7v2H6v12h5v2H4V4zM20,4h-7v2h5v12h-5v2h7V4zM8.5,11h7v2h-7v-2z" />
+</vector>

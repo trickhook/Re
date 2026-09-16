@@ -66,6 +66,16 @@ var showExportSheet by mutableStateOf(false)
 var showUpdateSheet by mutableStateOf(false)
 
 /**
+ * Raised from the overflow menu and the command palette, which is the file
+ * invariant StudioApp states: everything in the overflow is reachable here too.
+ *
+ * The row below deliberately carries no state in its label, so the palette's
+ * `remember` keys do not need to grow for it — whether the server is up is the
+ * sheet's business, not this list's.
+ */
+var showMcpSheet by mutableStateOf(false)
+
+/**
  * How many hits of one kind the search dialog draws before it stops and says
  * how many more there are. The number itself matters far less than the fact
  * that the header always prints "{shown} of {total}": the old dialog capped
@@ -220,6 +230,10 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                         }
 
                         add(Command("Keyboard shortcuts help", "", "F1") { showShortcutsHelp = true })
+                        add(Command(
+                            "MCP server",
+                            "let an AI client on your computer drive Nocturne's analysis", ""
+                        ) { showMcpSheet = true })
                         add(Command(
                             "Check for updates",
                             "compare this build against the latest release on GitHub", ""

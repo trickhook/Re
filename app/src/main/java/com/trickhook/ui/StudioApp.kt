@@ -1,8 +1,11 @@
 package com.trickhook.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.content.ActivityNotFoundException
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -100,6 +103,7 @@ import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -161,9 +165,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.trickhook.BuildConfig
 import com.trickhook.R
+import com.trickhook.mcp.McpRuntime
+import com.trickhook.mcp.McpSheet
 import com.trickhook.update.UpdateSheet
 import com.trickhook.update.installIntentFor
 import com.trickhook.vm.StudioViewModel
@@ -221,6 +228,24 @@ fun StudioApp(vm: StudioViewModel) {
     val installLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result -> vm.updateInstallerReturned(result.resultCode == Activity.RESULT_OK) }
+
+    // POST_NOTIFICATIONS, asked for at the one moment it means something: the
+    // user has just pressed Start on the MCP server, and the notification is
+    // how they will know the port is open. Registered here with the others
+    // because the sheet that raises it is composed conditionally. The answer is
+    // not acted on — a refusal does not stop the server, it only hides the
+    // badge, and the sheet says so.
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    val askForNotifications: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     // rememberSaveable, not remember: rotating recreates the Activity, and these
     // four are the only pieces of screen state StudioApp still owns — everything
@@ -527,6 +552,25 @@ fun StudioApp(vm: StudioViewModel) {
                                 onClick = { showOverflow = false; vm.darkTheme = !vm.darkTheme }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("MCP server", color = ide.text, fontSize = Type.body)
+                                        Text(
+                                            if (McpRuntime.running)
+                                                "listening on ${McpRuntime.host}:${McpRuntime.PORT}"
+                                            else "let an AI client on your computer drive this app",
+                                            color = if (McpRuntime.running) ide.entry else ide.dim,
+                                            fontSize = Type.caption
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.SettingsEthernet, null, tint = ide.dim,
+                                        modifier = Modifier.size(18.dp))
+                                },
+                                onClick = { showOverflow = false; showMcpSheet = true }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Shortcuts", color = ide.text, fontSize = Type.body) },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Keyboard, null, tint = ide.dim,
@@ -643,6 +687,14 @@ fun StudioApp(vm: StudioViewModel) {
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
     if (showAnnotations) AnnotationsSheet(vm, onDismiss = { showAnnotations = false })
+
+    if (showMcpSheet) {
+        McpSheet(
+            vm,
+            requestNotifications = askForNotifications,
+            onDismiss = { showMcpSheet = false }
+        )
+    }
 
     if (showUpdateSheet) {
         UpdateSheet(
