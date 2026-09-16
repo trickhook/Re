@@ -85,7 +85,7 @@ bool Engine::ghidraReady(Ctx& c, const std::string& path) {
 
     std::string err;
     if (!GhidraDecomp::instance().open(path, c.arch, c.bin.data.data(), c.bin.data.size(),
-                                       segs, funcs, c.strings, err)) {
+                                       segs, funcs, c.strings, c.elf.armMapping, err)) {
         ghidraNote_ = err.empty() ? "could not build the architecture" : err;
         return false;
     }

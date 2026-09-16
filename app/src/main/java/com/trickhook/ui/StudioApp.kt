@@ -268,7 +268,7 @@ fun StudioApp(vm: StudioViewModel) {
                             },
                             onClick = {
                                 showOverflow = false
-                                vm.setDecompiler(if (vm.decompiler == "ghidra") "ir" else "ghidra")
+                                vm.selectDecompiler(if (vm.decompiler == "ghidra") "ir" else "ghidra")
                                 vm.detail?.let { vm.selectFunction(it.addr) }
                             }
                         )

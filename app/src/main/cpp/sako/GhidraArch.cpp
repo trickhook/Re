@@ -9,6 +9,7 @@
 #include "funcdata.hh"
 #include "loadimage.hh"
 #include "printc.hh"
+#include "globalcontext.hh"
 #include "sleigh_arch.hh"
 #include <sstream>
 #endif
@@ -48,6 +49,7 @@ bool GhidraDecomp::open(const std::string&, const std::string&, const u8*, size_
                         const std::vector<GhidraSeg>&,
                         const std::vector<std::pair<u64, std::string>>&,
                         const std::vector<FoundString>&,
+                        const std::vector<std::pair<u64, char>>&,
                         std::string& err) {
     err = "built without the Ghidra decompiler";
     return false;
@@ -231,6 +233,7 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
                         const std::vector<GhidraSeg>& segs,
                         const std::vector<std::pair<u64, std::string>>& funcs,
                         const std::vector<FoundString>& strings,
+                        const std::vector<std::pair<u64, char>>& armMapping,
                         std::string& err) {
     err.clear();
     if (specDir_.empty()) { err = "no SLEIGH specification directory"; return false; }
@@ -273,6 +276,28 @@ bool GhidraDecomp::open(const std::string& key, const std::string& arch,
         err = "unknown failure building the architecture";
         delete impl_; impl_ = nullptr;
         return false;
+    }
+
+    // ARM32 interworks between ARM and Thumb inside one object. The
+    // specification decodes Thumb only where the TMode context variable says
+    // so, so a Thumb region with TMode left at 0 would decode as ARM and
+    // produce confident nonsense. The mapping symbols are what we have.
+    if ((lang == "ARM:LE:32:v7") && !armMapping.empty()) {
+        try {
+            ContextDatabase* ctx = impl_->arch->context;
+            AddrSpace* code = impl_->arch->getDefaultCodeSpace();
+            for (size_t i = 0; i < armMapping.size(); ++i) {
+                char kind = armMapping[i].second;
+                if (kind != 'a' && kind != 't') continue;
+                u64 from = armMapping[i].first;
+                u64 to = (i + 1 < armMapping.size()) ? armMapping[i + 1].first : from + 4;
+                if (to <= from) continue;
+                ctx->setVariableRegion("TMode", Address(code, from),
+                                       Address(code, to - 1), kind == 't' ? 1 : 0);
+            }
+        } catch (...) {
+            // Falling back to the default mode is worse than this, but not fatal.
+        }
     }
 
     // Publishing the known functions is what turns a call into a name. Doing

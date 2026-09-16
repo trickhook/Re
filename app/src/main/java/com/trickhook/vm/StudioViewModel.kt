@@ -664,7 +664,7 @@ class StudioViewModel : ViewModel() {
         }
     }
 
-    fun setDecompiler(which: String) {
+    fun selectDecompiler(which: String) {
         decompiler = if (which == "ir") "ir" else "ghidra"
         NativeBridge.nativeSetDecompiler(decompiler)
         log("INFO", "Decompiler: " + if (decompiler == "ir") "built-in IR lifter" else "Ghidra p-code")

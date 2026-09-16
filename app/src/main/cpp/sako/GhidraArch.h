@@ -45,6 +45,10 @@ public:
               const std::vector<GhidraSeg>& segs,
               const std::vector<std::pair<u64, std::string>>& funcs,
               const std::vector<FoundString>& strings,
+              // ARM32 only: ($a|$t|$d, address) mapping symbols, sorted. The
+              // ARM specification decodes Thumb only where TMode says so, so
+              // without these every Thumb region would decode as ARM.
+              const std::vector<std::pair<u64, char>>& armMapping,
               std::string& err);
     void close();
 
