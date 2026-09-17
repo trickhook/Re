@@ -1,4 +1,15 @@
 import java.util.Properties
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 
 plugins {
     alias(libs.plugins.android.application)
@@ -201,6 +212,49 @@ android {
     }
 }
 
+// ---- Bundled crackme test target -------------------------------------------
+// The native build produces a small PIE executable named `crackme` for each ABI
+// at <module>/build/crackme/<abi>/crackme (see src/main/cpp/CMakeLists.txt).
+// Copy each one into a GENERATED assets directory, registered through the AGP
+// variant API so AGP merges it into the APK and makes merge<Variant>Assets
+// depend on the copy. That is what keeps this off the asset-merge race: the
+// dependency is declared, not hoped for, and nothing is written into the
+// tracked source tree (no built binaries in git).
+//
+// The copy runs after merge<Variant>NativeLibs — the stable, variant-scoped
+// task that pulls the CMake build (and therefore the crackme target, which the
+// engine now depends on) into existence — so the executables are on disk before
+// this task reads them.
+//
+// Result in the APK: assets/samples/<abi>/crackme, reached at runtime with
+// context.assets.open("samples/<abi>/crackme").
+androidComponents {
+    onVariants { variant ->
+        val cap = variant.name.replaceFirstChar { it.uppercase() }
+        val bundle = tasks.register<BundleCrackmeAssets>("bundle${cap}CrackmeAssets") {
+            group = "build"
+            description = "Copies the per-ABI crackme test target into $cap assets."
+            abis.set(listOf("arm64-v8a", "x86_64"))
+            stagedBinaries.from(
+                layout.buildDirectory.dir("crackme").map { dir ->
+                    dir.asFileTree.matching { include("*/crackme") }
+                }
+            )
+            // merge<Variant>NativeLibs depends on the per-ABI CMake build, which
+            // is what runs add_executable(crackme). Depending on it guarantees
+            // the executables exist before this copy reads them, using a stable
+            // variant-scoped task name rather than the per-ABI buildCMake* tasks
+            // (whose names embed the CMake config: RelWithDebInfo, not Release).
+            dependsOn("merge${cap}NativeLibs")
+        }
+        // AGP wires `outputDir` to a managed generated-assets location, adds it
+        // to the asset merge, and makes merge<Variant>Assets depend on `bundle`.
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            bundle, BundleCrackmeAssets::outputDir
+        )
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
@@ -239,4 +293,55 @@ dependencies {
     implementation(libs.shizuku.provider)
 
     debugImplementation(libs.androidx.ui.tooling)
+}
+
+/**
+ * Copies each ABI's freshly-built `crackme` executable into a generated assets
+ * directory as `samples/<abi>/crackme`. AGP owns [outputDir] and merges it into
+ * the APK; this task only fills it.
+ *
+ * It fails loudly when the native build produced nothing, so a broken build
+ * wiring is a red CI run with a pointed message rather than an APK that is
+ * silently missing its test target.
+ */
+abstract class BundleCrackmeAssets : DefaultTask() {
+    /** The built executables, one per ABI, under the module's build/crackme dir. */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val stagedBinaries: ConfigurableFileCollection
+
+    /** The ABIs this build ships, for the diagnostic when none were built. */
+    @get:Input
+    abstract val abis: ListProperty<String>
+
+    /** Wired by AGP to a managed generated-assets directory. */
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun bundle() {
+        val root = outputDir.get().asFile
+        val samples = root.resolve("samples")
+        // Deterministic output: clear the subtree this task owns, then refill.
+        if (samples.exists()) samples.deleteRecursively()
+        var copied = 0
+        stagedBinaries.files.forEach { f ->
+            if (f.isFile && f.name == "crackme") {
+                // f is <build>/crackme/<abi>/crackme, so the parent is the ABI.
+                val abi = f.parentFile.name
+                val dst = samples.resolve(abi).also { it.mkdirs() }.resolve("crackme")
+                f.copyTo(dst, overwrite = true)
+                copied++
+                logger.lifecycle("crackme: bundled $abi -> ${dst.relativeTo(root)}")
+            }
+        }
+        if (copied == 0) {
+            throw GradleException(
+                "crackme test target was not built for any ABI (${abis.get().joinToString()}). " +
+                    "Expected <module>/build/crackme/<abi>/crackme from the native build. Check the " +
+                    "add_executable(crackme) target in app/src/main/cpp/CMakeLists.txt and this task's " +
+                    "dependency on the native build."
+            )
+        }
+    }
 }

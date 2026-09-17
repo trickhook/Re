@@ -146,6 +146,11 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                 ) {
                     buildList {
                         add(Command("Open file (APK/ELF/EXE/DEX)", "pick a binary to analyse", "Ctrl+O", openFile))
+                        add(Command(
+                            "Load bundled test target",
+                            "a crackme to analyse and defeat · running it needs a Shizuku backend",
+                            ""
+                        ) { vm.openBundledSample(ctx) })
                         add(Command("Go to address…", "resolve a virtual address and jump there", "Ctrl+G") { showGoto = true })
                         add(Command(
                             "Search everywhere",

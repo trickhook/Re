@@ -1157,6 +1157,30 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
                 )
 
+                // No binary to hand? Load the one that ships in the APK. Analysis
+                // needs nothing; running it needs a Shizuku backend, and this
+                // says so rather than implying the in-process backend can.
+                Spacer(Modifier.height(Space.l))
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = !vm.busy, role = Role.Button) {
+                            vm.openBundledSample(ctx)
+                        }
+                        .padding(horizontal = Space.m, vertical = Space.s),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "Load bundled test target",
+                        color = ide.accent, fontSize = Type.label,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "a crackme to analyse · running it needs a Shizuku backend",
+                        color = ide.dim2, fontSize = Type.caption
+                    )
+                }
+
                 // What the app actually does, for someone who has never opened a
                 // binary in it. It retires itself the moment there is a recent
                 // project: after the first binary this is three lines of advice

@@ -176,3 +176,45 @@ if(SAKO_GHIDRA)
 endif()
 
 target_link_libraries(nocturne PRIVATE android log)
+
+
+# --- crackme: bundled reverse-engineering test target ------------------------
+# A tiny PIE executable, one per ABI, so Nocturne ships a sample to load,
+# breakpoint and defeat (see docs/TEST-TARGET.md). Pure C: no libc++, no name
+# mangling, clean disassembly. It is NOT linked into the engine and shares none
+# of its code — it is built beside libnocturne.so, then copied into the APK's
+# assets by app/build.gradle.kts.
+#
+# Nothing here is packaged as a native library: `crackme` is a plain executable
+# (no lib prefix, no .so suffix), so AGP's jniLibs globbing (**/*.so) never
+# picks it up. It is delivered as asset bytes and staged by the debugger, not
+# auto-extracted or dlopen'd.
+#
+# The top-level project is declared `project(nocturne CXX)` — C++ only — and
+# Capstone's C sources compile inside its own add_subdirectory scope, which does
+# not enable C here. crackme.c is the only C source in this scope, so C has to
+# be turned on explicitly or CMake fails to configure with "No CMAKE_C_COMPILER
+# could be found". The NDK toolchain already provides the C compiler; this just
+# tells CMake to use it in this directory.
+enable_language(C)
+add_executable(crackme samples/crackme.c)
+
+# Land the executable where app/build.gradle.kts can find it without knowing
+# CMake's per-ABI .cxx layout: <module>/build/crackme/<abi>/crackme. ANDROID_ABI
+# is set by the NDK toolchain; Ninja (a single-config generator) uses this
+# directory verbatim, with no per-config subdirectory.
+set_target_properties(crackme PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/crackme/${ANDROID_ABI}")
+
+# -O0 keeps the byte-compare loop and the single result branch legible in every
+# build type; -fno-builtin stops the loop being folded into a memcmp call.
+# CMAKE_POSITION_INDEPENDENT_CODE (set at the top of this file) already makes
+# this a PIE, which Android requires of every executable.
+target_compile_options(crackme PRIVATE -O0 -fno-builtin)
+
+# The engine is the one target AGP is guaranteed to build, so hang crackme off
+# it: this forces the executable to be built on every native build without a
+# `targets` filter, which would otherwise change how libnocturne.so itself is
+# built. This is a build-ordering edge only — it does not alter nocturne's
+# compile flags, sources or link line.
+add_dependencies(nocturne crackme)

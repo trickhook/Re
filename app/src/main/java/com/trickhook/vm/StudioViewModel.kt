@@ -2,6 +2,7 @@ package com.trickhook.vm
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -503,6 +504,68 @@ class StudioViewModel : ViewModel() {
             }
         } catch (e: Exception) {
             log("ERROR", e.message ?: "open failed")
+        } finally {
+            busy = false
+            globalPhase = ""
+        }
+    }
+
+    /**
+     * The ABIs a crackme is bundled for. Mirror of the abiFilters in
+     * build.gradle.kts and the executables app/build.gradle.kts copies into
+     * assets/samples/<abi>/crackme.
+     */
+    private val bundledSampleAbis = listOf("arm64-v8a", "x86_64")
+
+    /**
+     * Open the crackme test target that ships inside the APK: pick the first
+     * ABI this device supports that we actually shipped, copy that executable
+     * out of assets into cacheDir, then route it through the SAME analyse path
+     * [openUri] uses so `currentPath` is set and the function list populates.
+     *
+     * Analysis then needs nothing further. RUNNING it needs a Shizuku backend
+     * connected — `dbgSpawnStaged` stages the file into /data/local/tmp through
+     * the privileged process. The in-process (LOCAL) backend cannot execute a
+     * file from app storage and never will; that is Android's W^X, not a bug.
+     */
+    fun openBundledSample(context: Context) = viewModelScope.launch {
+        busy = true
+        globalPhase = "Opening test target"
+        try {
+            withContext(Dispatchers.IO) {
+                val abi = Build.SUPPORTED_ABIS.firstOrNull { it in bundledSampleAbis }
+                if (abi == null) {
+                    log(
+                        "ERROR",
+                        "No bundled test target for this device (ABIs: " +
+                            "${Build.SUPPORTED_ABIS.joinToString()}). Shipped: " +
+                            bundledSampleAbis.joinToString()
+                    )
+                    return@withContext
+                }
+                val assetPath = "samples/$abi/crackme"
+                val dst = File(context.cacheDir, "current_crackme")
+                try {
+                    context.assets.open(assetPath).use { ins ->
+                        dst.outputStream().use { ins.copyTo(it) }
+                    }
+                } catch (e: Exception) {
+                    log(
+                        "ERROR",
+                        "Bundled test target is missing ($assetPath). It is built into the " +
+                            "APK by CI; a local build must run the native build that produces it."
+                    )
+                    return@withContext
+                }
+                log("INFO", "Loaded bundled test target 'crackme' ($abi, ${humanSize(dst.length())})")
+                // A plain ELF executable, not an archive: analyse it directly,
+                // exactly as openUri does for a non-PK file. loadFile sets
+                // currentPath, so the staged-run flow can debug it unchanged.
+                loadFile(dst, "crackme")
+                refreshRecents(context)
+            }
+        } catch (e: Exception) {
+            log("ERROR", e.message ?: "failed to open test target")
         } finally {
             busy = false
             globalPhase = ""
