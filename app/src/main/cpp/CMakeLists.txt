@@ -245,9 +245,12 @@ add_dependencies(nocturne crackme)
 #
 # It is a plain executable — no `lib` prefix, no `.so` suffix — so AGP's jniLibs
 # globbing (**/*.so) never packages it as a library; app/build.gradle.kts copies
-# it into assets/bin/<abi>/nocturned instead. The include dirs, the
-# capstone/ghidra defines and the link line mirror `nocturne` exactly, so the
-# shared sources compile identically in both targets.
+# it into assets/bin/<abi>/nocturned instead. The include dirs and the capstone
+# define mirror `nocturne`, so the shared engine sources compile the same way in
+# both targets — with one deliberate exception: the daemon does NOT build in the
+# Ghidra decompiler (see the note below its link line). It is a ptrace debugger,
+# never a decompiler, and statically duplicating the whole decompiler per ABI
+# roughly tripled the downloadable APK.
 add_executable(nocturned samples/nocturned.cpp ${SAKO_ENGINE_SOURCES})
 
 # Same include roots as nocturne, PLUS the cpp root itself: nocturned.cpp lives
@@ -264,10 +267,20 @@ if(SAKO_CAP_LIB)
     target_link_libraries(nocturned PRIVATE ${SAKO_CAP_LIB})
 endif()
 
-if(SAKO_GHIDRA)
-    target_compile_definitions(nocturned PRIVATE SAKO_HAVE_GHIDRA=1)
-    target_link_libraries(nocturned PRIVATE ghidra_decomp)
-endif()
+# No Ghidra in the daemon — on purpose, and this is the ONLY place nocturned's
+# flags/links diverge from nocturne. `nocturned` is the su-root ptrace debugger
+# (spawn, attach, ps, registers, memory, step, breakpoints); its whole protocol
+# is Engine::dbgCmd -> DebugSession, which never decompiles. So it is built
+# WITHOUT SAKO_HAVE_GHIDRA and does NOT link ghidra_decomp, which stops the
+# daemon statically duplicating the entire decompiler in every ABI — the thing
+# that had roughly tripled the downloadable APK. The engine's Ghidra bridge
+# (GhidraArch.cpp / GhidraEmu.cpp) is in ${SAKO_ENGINE_SOURCES} and still
+# compiles here, but to its no-ghidra stubs: GhidraDecomp/GhidraEmu::compiledIn()
+# report false and the decompile/emulate entry points return an honest error
+# instead of referencing any ghidra_decomp symbol. Capstone stays (above) so the
+# debugger can still disassemble around the PC. libnocturne.so, the app engine
+# above, keeps Ghidra linked in full — its decompiler and the MCP
+# decompile_function tool depend on it.
 
 target_link_libraries(nocturned PRIVATE android log)
 
