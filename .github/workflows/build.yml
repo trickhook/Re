@@ -445,6 +445,63 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      # The crackme test target is a by-product of the native compile, left at
+      # app/build/crackme/<abi>/crackme by the CMake target. It also travels
+      # inside the APK's assets; this publishes it on its own so it can be pushed
+      # to a device and run under adb, or opened in Nocturne as an imported file
+      # rather than only through the bundled loader. Fails loudly when the native
+      # build produced nothing, the same stance as the in-build copy task — a red
+      # run with a cause, not a silently empty artifact. Runs in both variants
+      # because the native build (and so the crackme) is built in both.
+      - name: Stage crackme test target
+        run: |
+          set -euo pipefail
+          mkdir -p dist/crackme
+          missing=''
+          for abi in arm64-v8a x86_64; do
+            src="app/build/crackme/$abi/crackme"
+            if [ -f "$src" ]; then
+              cp "$src" "dist/crackme/crackme-$abi"
+            else
+              missing="$missing $abi"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::crackme test target missing for:$missing. Expected app/build/crackme/<abi>/crackme from the native build — see app/src/main/cpp/CMakeLists.txt."
+            exit 1
+          fi
+          ( cd dist/crackme && sha256sum crackme-* > SHA256SUMS.txt )
+          # The backticks below are job-summary markdown, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            echo "### Crackme test target"
+            echo
+            echo "ELF executables, not APKs. Push to a device and run under a shell"
+            echo '(`adb push crackme-arm64-v8a /data/local/tmp/ && adb shell chmod +x /data/local/tmp/crackme-arm64-v8a`),'
+            echo "or open one in Nocturne as an imported file. The same binary ships"
+            echo "inside the APK under assets/samples/."
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "|------|------|---------|"
+            for f in dist/crackme/crackme-*; do
+              printf '| `%s` | %s | `%s` |\n' \
+                "$(basename "$f")" \
+                "$(du -h "$f" | cut -f1)" \
+                "$(sha256sum "$f" | cut -c1-16)..."
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload crackme test target
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nocturne-crackme
+          path: |
+            dist/crackme/crackme-arm64-v8a
+            dist/crackme/crackme-x86_64
+            dist/crackme/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Remove signing material
         if: always()
         run: |
