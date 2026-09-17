@@ -25,6 +25,15 @@ public:
     void setDecompiler(const std::string& which);
     std::string decompilerStatus(const std::string& path);
 
+    // Path to a library-function signature database (a .nsig produced by
+    // tools/siggen). When set and the file loads, analysis of a binary of a
+    // matching architecture names the functions that would otherwise be
+    // SUB_xxxxxxxx (see LibSig.h). Empty (the default) disables the pass, so
+    // the engine is unchanged until a database is installed. Phase 2 points
+    // this at the bundled bionic/libc++ database extracted from assets, the
+    // same way setSleighDir installs the SLEIGH specifications.
+    void setLibSigDb(const std::string& path);
+
     // Full-file analysis → JSON (meta: format, sections, functions, strings,
     // imports, exports, callgraph, notes...)
     //
@@ -161,6 +170,7 @@ private:
     Ctx ctx_;
     std::string ctxPath_;
     std::string sleighDir_;
+    std::string libSigDbPath_;    // library-signature database path ("" = off)
     std::string decompiler_ = "ghidra";
     std::string ghidraNote_;
     // The image the decompiler backend is currently bound to, so a rebuild

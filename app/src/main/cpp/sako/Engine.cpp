@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "LibSig.h"
 #include "GhidraArch.h"
 #include "GhidraEmu.h"
 #include "JniTypes.h"
@@ -221,6 +222,20 @@ void Engine::setSleighDir(const std::string& dir) {
 void Engine::setDecompiler(const std::string& which) {
     std::lock_guard<std::mutex> lock(mutex_);
     decompiler_ = (which == "ir") ? "ir" : "ghidra";
+}
+
+// The loaded signature database. Kept at file scope, loaded once and reused
+// across analyses, because it can be large and never changes once installed.
+// Guarded by Engine::mutex_ (setLibSigDb and ensureCtx both hold it).
+namespace {
+    libsig::Db  g_libSigDb;
+    std::string g_libSigLoadedPath;   // path g_libSigDb currently holds ("" = none)
+    bool        g_libSigLoadOk = false;
+}
+
+void Engine::setLibSigDb(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    libSigDbPath_ = path;
 }
 
 // Binds the Ghidra backend to the loaded image. Failure here is never fatal:
@@ -674,6 +689,33 @@ bool Engine::ensureCtx(const std::string& path) {
             size_t nFound = 0;
             c.funcs = discoverFunctionsElf(c.bin, c.elf, &nFound);
             c.funcsFound = nFound;   // no cap between the two any more
+            // Library-function recognition. Runs right after discovery so the
+            // names it recovers flow into the address-name table, the call
+            // graph and every later answer, exactly like a symbol would. A
+            // no-op until a database is installed (setLibSigDb); it only ever
+            // renames SUB_ functions, never a real symbol or a user rename, and
+            // the architecture guard is inside applyLibSignaturesElf.
+            if (!libSigDbPath_.empty()) {
+                if (g_libSigLoadedPath != libSigDbPath_) {
+                    std::string sigErr;
+                    g_libSigLoadOk = loadLibSigDb(libSigDbPath_, g_libSigDb, &sigErr);
+                    g_libSigLoadedPath = libSigDbPath_;
+                    if (!g_libSigLoadOk)
+                        c.notes.push_back("Library signatures: could not load database (" + sigErr + ")");
+                }
+                if (g_libSigLoadOk) {
+                    LibMatchStats ms;
+                    applyLibSignaturesElf(c.bin, c.elf, c.funcs, g_libSigDb, &ms);
+                    if (ms.unknownBefore) {
+                        char buf[192];
+                        std::snprintf(buf, sizeof buf,
+                            "Library signatures: named %zu of %zu unknown functions"
+                            " (%zu ambiguous left unnamed)",
+                            ms.named, ms.unknownBefore, ms.collisions);
+                        c.notes.push_back(buf);
+                    }
+                }
+            }
             u64 va = 0, size = 0;
             if (elfExecRange(c.elf, va, size)) {
                 u64 off = elfVaToOff(c.elf, va);
