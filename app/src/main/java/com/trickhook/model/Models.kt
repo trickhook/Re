@@ -546,6 +546,173 @@ fun parseDetections(json: String): DetectionResult {
     )
 }
 
+// ---------------- DEX / smali ----------------
+
+/**
+ * One decoded Dalvik instruction, from Engine::dexSmali. [off] is the dex byte
+ * offset of the instruction, [unit] its code-unit index within the method,
+ * [bytes] its code units in hex, [mnem] + [ops] the smali (with index operands
+ * resolved to names), and [comment] the raw pool tag or the absolute branch
+ * target.
+ */
+data class SmaliLine(
+    val off: Long,
+    val unit: Int,
+    val bytes: String,
+    val mnem: String,
+    val ops: String,
+    val comment: String
+)
+
+/**
+ * One DEX method decoded to smali, from
+ * [com.trickhook.engine.NativeBridge.nativeDexSmali]. [addr] is the method's
+ * codeOff. [truncated] means the decode stopped at the line cap or the code item
+ * ran short, so [lines] is not the whole method. [nCallers] / [nCallees] are the
+ * call-graph degrees, the same numbers the function list shows for this method.
+ */
+data class SmaliMethod(
+    val ok: Boolean,
+    val error: String?,
+    val addr: Long,
+    val clazz: String,
+    val classShort: String,
+    val method: String,
+    val proto: String,
+    val name: String,
+    val registers: Int,
+    val ins: Int,
+    val outs: Int,
+    val tries: Int,
+    val insnsUnits: Int,
+    val insnBytes: Int,
+    val nCallers: Int,
+    val nCallees: Int,
+    val total: Int,
+    val shown: Int,
+    val truncated: Boolean,
+    val lines: List<SmaliLine>
+)
+
+fun parseSmali(json: String): SmaliMethod {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return SmaliMethod(
+            false, o.optString("error", "smali failed"), 0, "", "", "", "", "",
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, emptyList()
+        )
+    }
+    val lines = o.optJSONArray("smali")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val s = arr.getJSONObject(i)
+            SmaliLine(
+                hx(s.optString("off")), s.optInt("unit"), s.optString("bytes"),
+                s.optString("mnem"), s.optString("ops"), s.optString("comment")
+            )
+        }
+    } ?: emptyList()
+    return SmaliMethod(
+        ok = true, error = null, addr = hx(o.optString("addr")),
+        clazz = o.optString("class"), classShort = o.optString("classShort"),
+        method = o.optString("method"), proto = o.optString("proto"), name = o.optString("name"),
+        registers = o.optInt("registers"), ins = o.optInt("ins"), outs = o.optInt("outs"),
+        tries = o.optInt("tries"), insnsUnits = o.optInt("insnsUnits"),
+        insnBytes = o.optInt("insnBytes"),
+        nCallers = o.optInt("nCallers"), nCallees = o.optInt("nCallees"),
+        total = maxOf(o.optInt("total"), lines.size),
+        shown = minOf(o.optInt("shown"), lines.size),
+        truncated = o.optBoolean("truncated"), lines = lines
+    )
+}
+
+/**
+ * One page of a DEX string-pool search, from
+ * [com.trickhook.engine.NativeBridge.nativeDexStrings]. [rows] carry each
+ * matched string with its pool index as the address. [total] is matches over the
+ * whole pool the loader read; [poolRead] < [poolTotal] means the loader capped
+ * the pool, so a search reaches [poolRead] of [poolTotal] string_ids.
+ */
+data class DexStringsPage(
+    val ok: Boolean,
+    val error: String?,
+    val query: String,
+    val total: Int,
+    val offset: Int,
+    val shown: Int,
+    val poolRead: Int,
+    val poolTotal: Int,
+    val rows: List<FoundStr>
+)
+
+fun parseDexStrings(json: String): DexStringsPage {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return DexStringsPage(
+            false, o.optString("error", "dex strings failed"), "", 0, 0, 0, 0, 0, emptyList()
+        )
+    }
+    val rows = o.optJSONArray("strings")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val s = arr.getJSONObject(i)
+            FoundStr(hx(s.optString("addr")), s.optString("value"))
+        }
+    } ?: emptyList()
+    return DexStringsPage(
+        ok = true, error = null, query = o.optString("query"),
+        total = maxOf(o.optInt("total"), rows.size),
+        offset = o.optInt("offset"),
+        shown = minOf(o.optInt("shown"), rows.size),
+        poolRead = o.optInt("poolRead"), poolTotal = o.optInt("poolTotal"),
+        rows = rows
+    )
+}
+
+/** One end of a DEX method-xref edge: the other method, and the invoke site. */
+data class DexXrefEdge(val addr: Long, val name: String, val site: Long, val sites: Int)
+
+/**
+ * DEX method xrefs from
+ * [com.trickhook.engine.NativeBridge.nativeDexMethodXrefs] — who invokes a
+ * method ([callers]) and what it invokes ([callees]), surfaced from the call
+ * graph the engine already built at analysis time rather than a fresh scan.
+ * [callersTotal] / [calleesTotal] are the honest counts; the lists are capped.
+ */
+data class DexMethodXrefs(
+    val ok: Boolean,
+    val error: String?,
+    val addr: Long,
+    val name: String,
+    val callersTotal: Int,
+    val callers: List<DexXrefEdge>,
+    val calleesTotal: Int,
+    val callees: List<DexXrefEdge>
+)
+
+fun parseDexMethodXrefs(json: String): DexMethodXrefs {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return DexMethodXrefs(
+            false, o.optString("error", "dex xrefs failed"), 0, "", 0, emptyList(), 0, emptyList()
+        )
+    }
+    fun edges(key: String): List<DexXrefEdge> = o.optJSONArray(key)?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val e = arr.getJSONObject(i)
+            DexXrefEdge(
+                hx(e.optString("addr")), e.optString("name"),
+                hx(e.optString("site")), e.optInt("sites", 1)
+            )
+        }
+    } ?: emptyList()
+    val callers = edges("callers")
+    val callees = edges("callees")
+    return DexMethodXrefs(
+        ok = true, error = null, addr = hx(o.optString("addr")), name = o.optString("name"),
+        callersTotal = maxOf(o.optInt("callersTotal"), callers.size), callers = callers,
+        calleesTotal = maxOf(o.optInt("calleesTotal"), callees.size), callees = callees
+    )
+}
+
 fun parseDebug(json: String): DebugResult {
     val o = JSONObject(json)
     val ok = o.optBoolean("ok", false)

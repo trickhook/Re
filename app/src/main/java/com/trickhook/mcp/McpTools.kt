@@ -10,7 +10,10 @@ import com.trickhook.model.Detection
 import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseDetail
 import com.trickhook.model.parseDetections
+import com.trickhook.model.parseDexMethodXrefs
+import com.trickhook.model.parseDexStrings
 import com.trickhook.model.parseFunctionPage
+import com.trickhook.model.parseSmali
 import com.trickhook.ui.parseAddr
 import com.trickhook.ui.xrefRows
 import com.trickhook.vm.StudioViewModel
@@ -618,6 +621,76 @@ class McpTools(allowWrites: Boolean) {
                 )
             ), false
         ) { scanProtections(it) })
+
+        // ---- DEX / smali (only meaningful when a .dex is open) -------------
+        add(Tool(
+            "dex_method_smali", "Disassemble a DEX method to smali",
+            "Decode one Dalvik method's bytecode to smali — the DEX equivalent of " +
+                "disassemble_function, which only handles native machine code. `address` is a " +
+                "method's code offset: take it from list_functions (a DEX method is a function " +
+                "whose address is its codeOff) or from analysis_overview's DEX method list. Each " +
+                "row is a decoded instruction — offset, code-unit bytes, mnemonic, operands (with " +
+                "string/type/field/method references resolved to names) and a comment carrying the " +
+                "raw pool index or the branch target. An opcode the decoder does not know renders " +
+                "as an unknown marker, never a guess. Paginated by instruction; the method header " +
+                "reports registers, ins, outs, tries and the call-graph degrees. Only works when " +
+                "the open file is a DEX.",
+            schema(
+                listOf("address"),
+                listOf(
+                    "address" to strProp(
+                        "The method's code offset in hex (\"0x2a10\", \"2a10\"). From " +
+                            "list_functions or analysis_overview's DEX methods."
+                    ),
+                    "offset" to offsetProp(),
+                    "limit" to limitProp(200, ASM_CAP)
+                )
+            ), false
+        ) { dexMethodSmali(it) })
+
+        add(Tool(
+            "dex_strings", "Search the DEX string pool",
+            "Search the DEX string pool — a case-insensitive substring over the string_ids the " +
+                "loader read, which reaches far more than list_strings' first 3000. Each row is a " +
+                "string with its pool index as `address`. `total` is matches over the whole pool; " +
+                "`poolRead` < `poolTotal` means the loader capped the pool. Paginated. Only works " +
+                "when the open file is a DEX.",
+            schema(
+                emptyList(),
+                listOf(
+                    "query" to strProp("Case-insensitive substring to match. Omit for all strings."),
+                    "offset" to offsetProp(),
+                    "limit" to limitProp(50, 200)
+                )
+            ), false
+        ) { dexStrings(it) })
+
+        add(Tool(
+            "dex_find_method_xrefs", "Who invokes a DEX method",
+            "Given a DEX method's code offset, the methods that invoke it (`callers`) and the " +
+                "methods it invokes (`callees`). This runs no new scan: the engine built a DEX " +
+                "call graph at analysis time by walking every method's invoke instructions, and " +
+                "this surfaces the edges touching one method, each resolved to its Class.method " +
+                "name and carrying the invoke site and how many call sites the edge stands for. " +
+                "For a DEX method, `xrefs` and `call_graph` answer the same question from the same " +
+                "graph; this is the DEX-framed view. Paginated. Only works when the open file is a " +
+                "DEX.",
+            schema(
+                listOf("address"),
+                listOf(
+                    "address" to strProp(
+                        "The method's code offset in hex. From list_functions or " +
+                            "analysis_overview's DEX methods."
+                    ),
+                    "direction" to enumProp(
+                        "`callers` is who invokes it, `callees` what it invokes.",
+                        listOf("callers", "callees", "both"), "both"
+                    ),
+                    "offset" to offsetProp(),
+                    "limit" to limitProp(50, 200)
+                )
+            ), false
+        ) { dexFindMethodXrefs(it) })
 
         add(Tool(
             "call_graph", "Walk the call graph",
@@ -1691,6 +1764,131 @@ class McpTools(allowWrites: Boolean) {
             if (filtered.isEmpty()) append(" · nothing matched")
         }
         return Outcome(out, "${page.size} of ${filtered.size} detections$tail")
+    }
+
+    // ------------------------------------------------------------ DEX / smali --
+
+    /** The open binary as a DEX, or a clear failure when it is not one. */
+    private fun openDex(): AnalysisMeta {
+        val m = openMeta()
+        if (m.format != "DEX") throw Failure(
+            "The open file is ${m.format.ifBlank { "not a DEX" }}, and this tool decodes Dalvik " +
+                "bytecode. Open a .dex — or an APK, whose classes.dex is extracted for you."
+        )
+        return m
+    }
+
+    private fun dexMethodSmali(args: JSONObject): Outcome {
+        openDex()
+        val addr = addressArg(args, "address")
+        val s = parseSmali(NativeBridge.nativeDexSmali(openPath(), addr))
+        if (!s.ok) throw Failure(s.error ?: "the engine could not decode a method at ${hx(addr)}")
+        val w = window(args, 200, ASM_CAP)
+        val page = slice(s.lines, w)
+        val arr = JSONArray()
+        for (l in page) {
+            val row = JSONObject()
+                .put("offset", hx(l.off))
+                .put("unit", l.unit)
+                .put("bytes", l.bytes)
+                .put("mnemonic", l.mnem)
+                .put("operands", l.ops)
+            if (l.comment.isNotEmpty()) row.put("comment", l.comment)
+            arr.put(row)
+        }
+        val method = JSONObject()
+            .put("address", hx(s.addr))
+            .put("name", s.name)
+            .put("class", s.clazz)
+            .put("method", s.method)
+            .put("proto", s.proto)
+            .put("registers", s.registers)
+            .put("ins", s.ins)
+            .put("outs", s.outs)
+            .put("tries", s.tries)
+            .put("instructions", s.lines.size)
+            .put("insnBytes", s.insnBytes)
+            .put("callers", s.nCallers)
+            .put("callees", s.nCallees)
+        val out = JSONObject().put("method", method).put("smali", arr)
+        if (s.truncated) {
+            out.put("listingTruncated", true)
+            out.put("coverage", "The decode stopped early; the smali here is not the whole method.")
+        }
+        paginate(out, s.lines.size, w, page.size)
+        return Outcome(out, "${s.name} · ${page.size} of ${s.lines.size} smali lines")
+    }
+
+    private fun dexStrings(args: JSONObject): Outcome {
+        openDex()
+        val q = textArg(args, "query", false).trim()
+        val w = window(args, 50, 200)
+        val page = parseDexStrings(
+            NativeBridge.nativeDexStrings(openPath(), q, w.offset.toLong(), w.limit.toLong())
+        )
+        if (!page.ok) throw Failure(page.error ?: "the engine could not search the DEX string pool")
+        val arr = JSONArray()
+        for (s in page.rows) {
+            val row = JSONObject().put("address", hx(s.addr))
+            if (s.value.length > 240) {
+                row.put("value", s.value.take(240)).put("truncated", true).put("length", s.value.length)
+            } else {
+                row.put("value", s.value)
+            }
+            arr.put(row)
+        }
+        val out = JSONObject().put("strings", arr)
+        if (q.isNotEmpty()) out.put("query", q)
+        out.put("total", page.total)
+        out.put("offset", page.offset)
+        out.put("count", page.rows.size)
+        val next = page.offset + page.rows.size
+        if (next < page.total) out.put("nextOffset", next) else out.put("nextOffset", JSONObject.NULL)
+        out.put("poolRead", page.poolRead)
+        out.put("poolTotal", page.poolTotal)
+        if (page.poolTotal > page.poolRead) out.put(
+            "coverage",
+            "Searched ${page.poolRead} of ${page.poolTotal} string_ids; the loader capped the pool."
+        )
+        val note = if (q.isEmpty()) "" else " matching \"$q\""
+        return Outcome(out, "${page.rows.size} of ${page.total}$note")
+    }
+
+    private fun dexFindMethodXrefs(args: JSONObject): Outcome {
+        openDex()
+        val addr = addressArg(args, "address")
+        val dir = enumArg(args, "direction", listOf("callers", "callees", "both"), "both")
+        val x = parseDexMethodXrefs(NativeBridge.nativeDexMethodXrefs(openPath(), addr))
+        if (!x.ok) throw Failure(x.error ?: "the engine could not read xrefs for ${hx(addr)}")
+        val w = window(args, 50, 200)
+        val out = JSONObject().put("method", x.name).put("address", hx(x.addr))
+        var shown = 0
+        var total = 0
+        if (dir == "callers" || dir == "both") {
+            val page = slice(x.callers, w)
+            out.put("callers", dexEdgeArray(page))
+            out.put("callersTotal", x.callersTotal)
+            shown += page.size; total += x.callers.size
+        }
+        if (dir == "callees" || dir == "both") {
+            val page = slice(x.callees, w)
+            out.put("callees", dexEdgeArray(page))
+            out.put("calleesTotal", x.calleesTotal)
+            shown += page.size; total += x.callees.size
+        }
+        paginate(out, total, w, shown)
+        return Outcome(out, "${x.name} · $dir · callers ${x.callersTotal}, callees ${x.calleesTotal}")
+    }
+
+    private fun dexEdgeArray(edges: List<com.trickhook.model.DexXrefEdge>): JSONArray {
+        val arr = JSONArray()
+        for (e in edges) {
+            arr.put(
+                JSONObject().put("address", hx(e.addr)).put("name", e.name)
+                    .put("site", hx(e.site)).put("sites", e.sites)
+            )
+        }
+        return arr
     }
 
     private fun confRank(c: String): Int = when (c) {

@@ -99,6 +99,53 @@ public:
     // many it carries. `funcAddr` is 0x0 for an unattributed hit.
     std::string detect(const std::string& path);
 
+    // ------------------------------------------------------------ DEX / smali
+    // The Dalvik half of the engine. The native disassembler decodes machine
+    // code and cannot touch DEX bytecode, so these three surface the .dex the
+    // analyst opened the app for: read a method's bytecode as smali, search the
+    // DEX string pool, and see who invokes a method. Each takes the same lock
+    // and the same ensureCtx error path as xrefsTo/detect, answers only when the
+    // open file is a DEX, and serialises through the same q()/hq()/num() helpers
+    // with honest total/shown caps.
+
+    // Smali disassembly of ONE method — the code_item at `addr` (a method's
+    // codeOff, exactly the value analyze() emits in dexMethods[].codeOff and the
+    // address a promoted DEX method carries in the function list). Decodes the
+    // Dalvik instructions with the format-driven decoder in DexSmali.h and
+    // resolves index operands (string@/type@/field@/meth@/proto@) through the
+    // dex pools; an opcode it does not know renders as "<unknown-op 0xNN>", never
+    // a guess. nCallers/nCallees come straight off the call graph
+    // buildDexFuncsAndCalls already built, so a method's smali view and its xref
+    // count agree. Returns:
+    //   {ok, addr, class, classShort, method, proto, name, registers, ins, outs,
+    //    tries, insnsUnits, insnBytes, total, shown, truncated,
+    //    smali:[{off, unit, bytes, mnem, ops, comment}],
+    //    nCallers, nCallees} or {ok:false,error}.
+    std::string dexSmali(const std::string& path, u64 addr);
+
+    // DEX string pool search — case-insensitive substring over the string_ids
+    // the loader read, paginated with an honest total, the same shape as every
+    // other list endpoint. Where list_strings/analyze carry the first 3000 that
+    // pass the printable floor, this reaches the whole (loader-capped) string_ids
+    // pool, which is the point: a DEX carries far more strings than the general
+    // string scan surfaces. `addr` on each row is the string's index in the
+    // pool, the same key the DEX strings use everywhere else. Returns:
+    //   {ok, query, total, matched, offset, shown,
+    //    strings:[{addr, value, truncated?, length?}], poolTotal, poolRead}
+    // where `matched` is the honest match count over the pool and `poolRead` <
+    // `poolTotal` says the loader capped the pool.
+    std::string dexStrings(const std::string& path, const std::string& query,
+                           u64 offset, u64 count);
+
+    // DEX method xrefs — who invokes the method at `addr` (callers) and who it
+    // invokes (callees). This does NOT scan: buildDexFuncsAndCalls already built
+    // the call graph by walking every method's invoke instructions, so this
+    // surfaces that existing data for one method, resolving each end to its
+    // Class.method name. `addr` is a method codeOff. Returns:
+    //   {ok, addr, name, callersTotal, callers:[{addr,name,site,sites}],
+    //    calleesTotal, callees:[{addr,name,site,sites}]} or {ok:false,error}.
+    std::string dexMethodXrefs(const std::string& path, u64 addr);
+
     // Binary diff — compare two LINKED binaries (typically two versions of the
     // same library) and classify every function identical / changed / added /
     // removed, with a similarity score for the changed ones. `pathA` is the

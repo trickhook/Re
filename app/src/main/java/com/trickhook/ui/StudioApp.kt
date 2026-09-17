@@ -77,6 +77,7 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Comment
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataObject
+import androidx.compose.material.icons.filled.Dataset
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DesktopWindows
@@ -948,6 +949,7 @@ private fun PanelHost(vm: StudioViewModel, popFlag: BooleanArray, modifier: Modi
             Tab.CALLGRAPH -> CallGraphPanel(vm)
             Tab.FUNCTIONS -> FunctionsPanel(vm)
             Tab.STRINGS -> StringsPanel(vm)
+            Tab.DEX -> DexPanel(vm)
             Tab.HEX -> HexPanel(vm)
             Tab.MAP -> MapPanel(vm)
             Tab.APK -> ApkPanel(vm)
@@ -2261,6 +2263,7 @@ private fun tabIcon(t: Tab): ImageVector = when (t) {
     Tab.CALLGRAPH -> Icons.Filled.Hub
     Tab.FUNCTIONS -> Icons.Filled.Functions
     Tab.STRINGS   -> Icons.Filled.TextFields
+    Tab.DEX       -> Icons.Filled.Dataset
     Tab.HEX       -> Icons.Filled.Grid4x4
     Tab.MAP       -> Icons.Filled.Layers
     Tab.APK       -> Icons.Filled.Android

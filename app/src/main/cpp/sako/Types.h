@@ -106,6 +106,22 @@ struct PeInfo {
 
 struct DexMethod { std::string clazz, name, proto; u64 codeOff = 0; };
 struct DexClass { std::string name, super; };
+
+// Raw DEX index-pool table offsets and sizes, taken straight from the header.
+// The resolved `strings`/`methods` vectors in DexInfo are CAPPED by the loader
+// for listing; a smali decoder cannot resolve string@/type@/proto@/field@/meth@
+// operands from a capped, partly-resolved list, so it reads these tables out of
+// the raw dex bytes instead. Carrying the offsets here means the header is
+// parsed once (in parseDex) and the decoder reuses it rather than re-walking it.
+// All are file offsets/counts; 0/0 means the section was absent.
+struct DexIndex {
+    u32 stringIdsOff = 0, stringIdsCount = 0;
+    u32 typeIdsOff = 0,   typeIdsCount = 0;
+    u32 protoIdsOff = 0,  protoIdsCount = 0;
+    u32 fieldIdsOff = 0,  fieldIdsCount = 0;
+    u32 methodIdsOff = 0, methodIdsCount = 0;
+};
+
 struct DexInfo {
     bool ok = false;
     std::string error;
@@ -118,6 +134,8 @@ struct DexInfo {
     u64 stringsFound = 0;
     u64 methodsFound = 0;
     u64 classesFound = 0;
+    // Raw pool offsets for operand resolution by the smali decoder (DexSmali.h).
+    DexIndex idx;
 };
 
 // ---- analysis types ----

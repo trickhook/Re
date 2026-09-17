@@ -38,6 +38,8 @@ import com.trickhook.model.DbgState
 import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
 import com.trickhook.model.DetectionResult
+import com.trickhook.model.DexStringsPage
+import com.trickhook.model.SmaliMethod
 import com.trickhook.model.ExportProgress
 import com.trickhook.model.ExportResult
 import com.trickhook.model.FuncInfo
@@ -62,6 +64,8 @@ import com.trickhook.model.idaPythonScript
 import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDetections
+import com.trickhook.model.parseDexStrings
+import com.trickhook.model.parseSmali
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
 import com.trickhook.model.parseDetail
@@ -124,6 +128,7 @@ enum class Tab(val title: String, val group: TabGroup) {
     CALLGRAPH("Call graph", TabGroup.CODE),
     FUNCTIONS("Functions", TabGroup.EXPLORE),
     STRINGS("Strings", TabGroup.EXPLORE),
+    DEX("DEX", TabGroup.EXPLORE),
     HEX("Hex", TabGroup.EXPLORE),
     MAP("Map", TabGroup.EXPLORE),
     APK("APK", TabGroup.ANALYZE),
@@ -300,6 +305,22 @@ class StudioViewModel : ViewModel() {
     var detections by mutableStateOf<DetectionResult?>(null); private set
     var detectionsBusy by mutableStateOf(false); private set
     var detectionsError by mutableStateOf<String?>(null); private set
+
+    // ---- DEX browser (classes -> methods -> smali, and DEX string search) ----
+    // The Dalvik half. [dexMode] toggles the class/method browser (0) and the
+    // DEX string search (1). [dexQuery] filters classes and methods; the smali
+    // of one method loads into [dexSmali] when [dexSmaliTarget] (a codeOff) is
+    // set, and null there is the browse view. [dexStrings] holds one page of a
+    // string-pool search over [dexStringQuery]. See loadDexSmali/loadDexStrings.
+    var dexMode by mutableStateOf(0)
+    var dexQuery by mutableStateOf("")
+    var dexStringQuery by mutableStateOf("")
+    var dexSmaliTarget by mutableStateOf<Long?>(null); private set
+    var dexSmali by mutableStateOf<SmaliMethod?>(null); private set
+    var dexSmaliBusy by mutableStateOf(false); private set
+    var dexStrings by mutableStateOf<DexStringsPage?>(null); private set
+    var dexStringsBusy by mutableStateOf(false); private set
+
     var tab by mutableStateOf(Tab.ASSEMBLY)
     var darkTheme by mutableStateOf(true)
 
@@ -804,8 +825,12 @@ class StudioViewModel : ViewModel() {
                 projectId = db?.upsertProject(file.absolutePath, name, m.format, m.arch) ?: -1L
                 syncProjectAnnotations()
                 callGraph = null
+                // A DEX opens on its browser (classes -> methods -> smali); any
+                // other format on Assembly. Either way the first method/function
+                // is selected so the code panels have content behind the tab.
+                if (m.format == "DEX") tab = Tab.DEX
                 if (m.functions.isNotEmpty()) selectFunction(m.functions[0].addr)
-                else if (m.format == "DEX") tab = Tab.STRINGS else tab = Tab.ASSEMBLY
+                else if (m.format != "DEX") tab = Tab.ASSEMBLY
             } else {
                 log("ERROR", m.error ?: "analysis failed")
             }
@@ -830,6 +855,11 @@ class StudioViewModel : ViewModel() {
         // so without this the new binary's spinner could stay stuck and its
         // auto-scan never start.
         detections = null; detectionsError = null; detectionsBusy = false
+        // The DEX browser is per-binary too: a new file must not open the last
+        // one's method or carry its search across.
+        dexMode = 0; dexQuery = ""; dexStringQuery = ""
+        dexSmaliTarget = null; dexSmali = null; dexSmaliBusy = false
+        dexStrings = null; dexStringsBusy = false
         clearHistory()
         lastPluginUndoable = false
         pluginUndo = null
@@ -1448,6 +1478,71 @@ class StudioViewModel : ViewModel() {
         val off = fileOffsetOf(stringAddr) ?: return
         requestHexGoto(off)
         navigateTo(tab = Tab.HEX)
+    }
+
+    // ---------------------------------------------------------- DEX / smali --
+    /**
+     * Open one DEX method's smali in the DEX browser's detail view. [addr] is a
+     * method codeOff — from the DEX method list or a promoted function. Sets
+     * [dexSmaliTarget] first so the detail opens on a spinner while the decode
+     * runs, and applies the answer only if the user has not reaimed or closed it
+     * in the meantime, the same guard [loadStringXrefs] uses. The engine pass is
+     * Engine::dexSmali; who invokes the method comes from the call graph, read
+     * off [callersOf].
+     */
+    fun openDexMethod(addr: Long) {
+        val path = currentPath ?: return
+        dexSmaliTarget = addr
+        dexSmali = null
+        viewModelScope.launch {
+            dexSmaliBusy = true
+            try {
+                val s = withContext(Dispatchers.IO) {
+                    parseSmali(NativeBridge.nativeDexSmali(path, addr))
+                }
+                if (dexSmaliTarget == addr) {
+                    if (s.ok) dexSmali = s
+                    else log("WARN", s.error ?: "smali decode failed")
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "smali error")
+            } finally {
+                dexSmaliBusy = false
+            }
+        }
+    }
+
+    /** Leave the smali detail and return to the class/method browser. */
+    fun closeDexMethod() {
+        dexSmaliTarget = null
+        dexSmali = null
+    }
+
+    /**
+     * Search the DEX string pool and hold one page for the DEX browser's strings
+     * mode. Unlike the Strings panel, which filters the first 3000 strings the
+     * general scan carries, this reaches the whole string_ids pool the loader
+     * read (Engine::dexStrings). Guarded by the open path and by the query, so a
+     * page that returns after the query has changed is dropped.
+     */
+    fun loadDexStrings(query: String, offset: Long = 0) {
+        val path = currentPath ?: return
+        viewModelScope.launch {
+            dexStringsBusy = true
+            try {
+                val p = withContext(Dispatchers.IO) {
+                    parseDexStrings(NativeBridge.nativeDexStrings(path, query, offset, 0))
+                }
+                if (dexStringQuery == query && currentPath == path) {
+                    if (p.ok) dexStrings = p
+                    else log("WARN", p.error ?: "dex string search failed")
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "dex strings error")
+            } finally {
+                if (dexStringQuery == query) dexStringsBusy = false
+            }
+        }
     }
 
     // ------------------------------------------------------------- projects --

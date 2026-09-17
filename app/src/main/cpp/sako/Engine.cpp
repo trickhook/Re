@@ -2,6 +2,7 @@
 #include "LibSig.h"
 #include "BinDiff.h"
 #include "Detections.h"
+#include "DexSmali.h"
 #include "GhidraArch.h"
 #include "GhidraEmu.h"
 #include "JniTypes.h"
@@ -83,6 +84,15 @@ static const size_t kDiffListCap = 500;
 // kind of safety valve xrefsTo's cap is, with `total` beside it and `counts`
 // carrying the honest per-category totals over the whole (uncapped) result.
 static const size_t kDetectionsCap = 1000;
+// DEX smali. A method's decoded instruction list is bounded the same way the
+// native asm listing is (kAsmInstrsInDetail): a method with more Dalvik
+// instructions than this is pathological, and `truncated` says the decode
+// stopped. One DEX string-search page, and its hard clamp, mirror the list
+// endpoints. DEX method-xref rows share xrefsTo's cap.
+static const size_t kDexSmaliLines = 8000;
+static const size_t kDexStringsPage = 200;
+static const size_t kDexStringsPageMax = 1000;
+static const size_t kDexXrefRows = 500;
 
 
 Engine& Engine::instance() {
@@ -1194,40 +1204,67 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     std::ostringstream out;
 
     if (c.fmt == Fmt::DEX) {
-        bool found = false;
-        for (auto& m : c.dex.methods) {
+        const DexMethod* m = nullptr;
+        for (auto& mm : c.dex.methods) {
             // codeOff 0 means "no code item": such a method is not in
             // meta.functions either, and reading a code header at file offset 0
             // returns the DEX magic dressed up as an instruction count.
-            if (!m.codeOff || m.codeOff != addr) continue;
-            found = true;
-            u32 sz = 0;
-            if (addr + 16 <= c.bin.data.size()) sz = 16 + rd32(c.bin.data.data() + addr + 12) * 2;
-            std::string nm = dexShortClass(m.clazz) + "." + m.name;
-            auto ce = c.cg.callees.find(addr);
-            auto cr = c.cg.callers.find(addr);
-            // hq() brings its own quotes — this line used to add a second
-            // pair, so every DEX method detail was malformed JSON and the
-            // Kotlin parser rejected all of them.
-            out << "{\"ok\":true,\"addr\":" << hq(addr) << ",\"size\":" << num(sz)
-                << ",\"name\":" << q(nm) << ",\"displayName\":" << q(nm)
-                << ",\"from\":\"dex\",\"backend\":\"dalvik\",\"arch\":\"DEX\""
-                << ",\"pseudoMode\":\"dex\""
-                // Same two numbers, from the same maps, as the functions list:
-                // a DEX method must not read "3 in" on one screen and "0" here.
-                << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
-                << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
-                << ",\"asmBytes\":0,\"asmTruncated\":false,\"asm\":[]"
-                << ",\"pseudo\":" << q(std::string("// Dalvik bytecode — DEX disassembler backend on the roadmap\n")
-                    + "// class: " + m.clazz + "\n// proto: " + m.proto
-                    + "\n// code: " + std::to_string(sz) + " bytes\n"
-                    + "// callees: " + std::to_string(ce == c.cg.callees.end() ? 0 : (int)ce->second.size())
-                    + " · callers: " + std::to_string(cr == c.cg.callers.end() ? 0 : (int)cr->second.size()) + "\n")
-                << ",\"blocksTotal\":0,\"blocks\":[],\"xrefsInTotal\":0,\"xrefsIn\":[]"
-                << ",\"xrefsOutTotal\":0,\"xrefsOut\":[]}";
-            break;
+            if (mm.codeOff && mm.codeOff == addr) { m = &mm; break; }
         }
-        if (!found) out << "{\"ok\":false,\"error\":\"No method at this code offset\"}";
+        if (!m) { out << "{\"ok\":false,\"error\":\"No method at this code offset\"}"; return out.str(); }
+
+        // Real smali now, not a placeholder: the same format-driven decode
+        // dexSmali() serves, rendered into the asm listing the Assembly panel
+        // already draws, so a DEX method opened from the function list shows its
+        // bytecode instead of an empty pane.
+        dexsmali::MethodCode mc = dexsmali::decodeMethod(
+            c.bin.data.data(), c.bin.data.size(), addr, c.dex.idx, kDexSmaliLines);
+        std::string classShort = dexShortClass(m->clazz);
+        std::string nm = classShort + "." + m->name;
+        u64 insnBytes = u64(mc.insnsUnits) * 2;
+        u64 sz = 16 + insnBytes;
+        auto ce = c.cg.callees.find(addr);
+        auto cr = c.cg.callers.find(addr);
+
+        // A compact header for the pseudo pane; the smali itself is the listing
+        // above. Type descriptors (which carry '/' and '[') live only in the
+        // string, never a comment.
+        std::ostringstream ps;
+        ps << "// " << m->clazz << "\n// " << nm << m->proto
+           << "\n// registers=" << mc.registersSize << " ins=" << mc.insSize
+           << " outs=" << mc.outsSize << " tries=" << mc.triesSize
+           << "\n// " << mc.lines.size() << " instructions, " << insnBytes << " bytes"
+           << (mc.truncated ? " (decode truncated)\n" : "\n");
+
+        out << "{\"ok\":true,\"addr\":" << hq(addr) << ",\"size\":" << num(sz)
+            << ",\"name\":" << q(nm) << ",\"displayName\":" << q(nm)
+            << ",\"from\":\"dex\",\"backend\":\"dalvik\",\"arch\":\"DEX\""
+            << ",\"pseudoMode\":\"dex\""
+            // Same two numbers, from the same maps, as the functions list:
+            // a DEX method must not read "3 in" on one screen and "0" here.
+            << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
+            << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
+            << ",\"asmBytes\":" << num(insnBytes)
+            << ",\"asmTruncated\":" << (mc.truncated ? "true" : "false")
+            << ",\"asm\":[";
+        for (size_t i = 0; i < mc.lines.size(); ++i) {
+            if (i) out << ",";
+            auto& l = mc.lines[i];
+            out << "{\"a\":" << hq(l.off) << ",\"b\":" << q(l.bytes)
+                << ",\"m\":" << q(l.mnem) << ",\"o\":" << q(l.ops)
+                << ",\"c\":" << q(l.comment) << "}";
+        }
+        out << "],\"pseudo\":" << q(ps.str())
+            << ",\"blocksTotal\":0,\"blocks\":[]"
+            // xrefsIn/xrefsOut are left empty ON PURPOSE: DEX methods are
+            // promoted to functions, so the app's and MCP's xref views already
+            // answer "who invokes this method" from the call graph
+            // buildDexFuncsAndCalls built (xrefInCount/xrefRows fall back to
+            // callersOf/calleesOf when these are empty), and that fallback
+            // carries the per-pair `sites` count this flat list would drop.
+            // dexMethodXrefs() serves the same data directly for a codeOff.
+            << ",\"xrefsInTotal\":0,\"xrefsIn\":[]"
+            << ",\"xrefsOutTotal\":0,\"xrefsOut\":[]}";
         return out.str();
     }
 
@@ -1613,6 +1650,212 @@ std::string Engine::detect(const std::string& path) {
 
     out << ",\"shown\":" << num(u64(shown))
         << ",\"detections\":[" << rows.str() << "]}";
+    return out.str();
+}
+
+// ------------------------------------------------------------- DEX / smali --
+// A DEX method's display name (Class.method) for a code offset, taken from the
+// method table; "sub_<off>" when no method owns that code item. The same shape
+// dexShortClass + name that buildDexFuncsAndCalls stamps on the function list,
+// so a name here matches the one in the call graph.
+static std::string dexNameForCode(const DexInfo& dex, u64 codeOff) {
+    for (auto& m : dex.methods)
+        if (m.codeOff && m.codeOff == codeOff)
+            return dexShortClass(m.clazz) + "." + m.name;
+    return "sub_" + hexAddr(codeOff).substr(2);
+}
+
+// Case-insensitive substring: is `needleLower` (already lowercased) in `hay`?
+static bool dexCiContains(const std::string& hay, const std::string& needleLower) {
+    if (needleLower.empty()) return true;
+    if (hay.size() < needleLower.size()) return false;
+    for (size_t i = 0; i + needleLower.size() <= hay.size(); ++i) {
+        bool ok = true;
+        for (size_t k = 0; k < needleLower.size(); ++k) {
+            char ch = hay[i + k];
+            if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+            if (ch != needleLower[k]) { ok = false; break; }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+std::string Engine::dexSmali(const std::string& path, u64 addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+    std::ostringstream out;
+    if (c.fmt != Fmt::DEX) {
+        out << "{\"ok\":false,\"error\":\"Not a DEX file\"}";
+        return out.str();
+    }
+    const DexMethod* m = nullptr;
+    for (auto& mm : c.dex.methods)
+        if (mm.codeOff && mm.codeOff == addr) { m = &mm; break; }
+    if (!m) {
+        out << "{\"ok\":false,\"error\":\"No method at this code offset\"}";
+        return out.str();
+    }
+
+    dexsmali::MethodCode mc = dexsmali::decodeMethod(
+        c.bin.data.data(), c.bin.data.size(), addr, c.dex.idx, kDexSmaliLines);
+    if (!mc.ok) {
+        out << "{\"ok\":false,\"error\":"
+            << q(mc.error.empty() ? std::string("could not decode method") : mc.error) << "}";
+        return out.str();
+    }
+
+    std::string classShort = dexShortClass(m->clazz);
+    std::string name = classShort + "." + m->name;
+    auto ce = c.cg.callees.find(addr);
+    auto cr = c.cg.callers.find(addr);
+    u64 insnBytes = u64(mc.insnsUnits) * 2;
+
+    out << "{\"ok\":true,\"addr\":" << hq(addr)
+        << ",\"class\":" << q(m->clazz) << ",\"classShort\":" << q(classShort)
+        << ",\"method\":" << q(m->name) << ",\"proto\":" << q(m->proto)
+        << ",\"name\":" << q(name)
+        << ",\"registers\":" << num(mc.registersSize)
+        << ",\"ins\":" << num(mc.insSize) << ",\"outs\":" << num(mc.outsSize)
+        << ",\"tries\":" << num(mc.triesSize)
+        << ",\"insnsUnits\":" << num(mc.insnsUnits) << ",\"insnBytes\":" << num(insnBytes)
+        // Same two degrees the function list and functionDetail report, from the
+        // same call graph, so a method's smali view cannot disagree with them.
+        << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
+        << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
+        // The decoder emits every line up to its cap; `truncated` is the honest
+        // signal that it stopped early (cap hit, or the code item ran short).
+        << ",\"total\":" << num(u64(mc.lines.size()))
+        << ",\"shown\":" << num(u64(mc.lines.size()))
+        << ",\"truncated\":" << (mc.truncated ? "true" : "false")
+        << ",\"smali\":[";
+    for (size_t i = 0; i < mc.lines.size(); ++i) {
+        if (i) out << ",";
+        auto& l = mc.lines[i];
+        out << "{\"off\":" << hq(l.off) << ",\"unit\":" << num(l.unit)
+            << ",\"bytes\":" << q(l.bytes) << ",\"mnem\":" << q(l.mnem)
+            << ",\"ops\":" << q(l.ops) << ",\"comment\":" << q(l.comment) << "}";
+    }
+    out << "]}";
+    return out.str();
+}
+
+std::string Engine::dexStrings(const std::string& path, const std::string& query,
+                               u64 offset, u64 count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+    std::ostringstream out;
+    if (c.fmt != Fmt::DEX) {
+        out << "{\"ok\":false,\"error\":\"Not a DEX file\"}";
+        return out.str();
+    }
+
+    std::string ql = query;
+    for (auto& ch : ql) if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+
+    // Match over the whole string_ids the loader read — far more than the 3000
+    // the general string scan carries — and page the matches with an honest
+    // total, the same shape as the other list endpoints.
+    std::vector<u32> matched;
+    for (u32 i = 0; i < c.dex.strings.size(); ++i)
+        if (dexCiContains(c.dex.strings[i], ql)) matched.push_back(i);
+
+    size_t total = matched.size();
+    size_t from = offset >= total ? total : size_t(offset);
+    size_t want = count == 0 ? kDexStringsPage
+                             : size_t(std::min<u64>(count, kDexStringsPageMax));
+    size_t to = std::min<size_t>(total, from + want);
+    u64 poolRead = c.dex.strings.size();
+    u64 poolTotal = std::max<u64>(c.dex.stringsFound, poolRead);
+
+    out << "{\"ok\":true,\"query\":" << q(query)
+        << ",\"total\":" << num(u64(total)) << ",\"matched\":" << num(u64(total))
+        << ",\"offset\":" << num(u64(from)) << ",\"shown\":" << num(u64(to - from))
+        << ",\"poolRead\":" << num(poolRead) << ",\"poolTotal\":" << num(poolTotal)
+        << ",\"strings\":[";
+    for (size_t i = from; i < to; ++i) {
+        if (i > from) out << ",";
+        u32 sIdx = matched[i];
+        const std::string& v = c.dex.strings[sIdx];
+        out << "{\"addr\":" << hq(sIdx) << ",\"value\":";
+        if (v.size() > 240) {
+            out << q(v.substr(0, 240)) << ",\"truncated\":true,\"length\":" << num(u64(v.size()));
+        } else {
+            out << q(v);
+        }
+        out << "}";
+    }
+    out << "]}";
+    return out.str();
+}
+
+std::string Engine::dexMethodXrefs(const std::string& path, u64 addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+    std::ostringstream out;
+    if (c.fmt != Fmt::DEX) {
+        out << "{\"ok\":false,\"error\":\"Not a DEX file\"}";
+        return out.str();
+    }
+
+    // No new scan: the call graph buildDexFuncsAndCalls already built by walking
+    // every method's invoke instructions IS the answer. This surfaces the edges
+    // that touch `addr`, resolving each end to its Class.method name — callers
+    // (who invokes this method) and callees (what it invokes).
+    size_t callersTotal = 0, calleesTotal = 0, cShown = 0, eShown = 0;
+    std::ostringstream callers, callees;
+    for (auto& e : c.cg.edges) {
+        if (e.to == addr) {
+            ++callersTotal;
+            if (cShown < kDexXrefRows) {
+                if (cShown) callers << ",";
+                std::string nm = e.fromName.empty() ? dexNameForCode(c.dex, e.from) : e.fromName;
+                callers << "{\"addr\":" << hq(e.from) << ",\"name\":" << q(nm)
+                        << ",\"site\":" << hq(e.site) << ",\"sites\":" << num(e.sites) << "}";
+                ++cShown;
+            }
+        }
+        if (e.from == addr) {
+            ++calleesTotal;
+            if (eShown < kDexXrefRows) {
+                if (eShown) callees << ",";
+                std::string nm = e.toName.empty() ? dexNameForCode(c.dex, e.to) : e.toName;
+                callees << "{\"addr\":" << hq(e.to) << ",\"name\":" << q(nm)
+                        << ",\"site\":" << hq(e.site) << ",\"sites\":" << num(e.sites) << "}";
+                ++eShown;
+            }
+        }
+    }
+
+    out << "{\"ok\":true,\"addr\":" << hq(addr)
+        << ",\"name\":" << q(dexNameForCode(c.dex, addr))
+        << ",\"callersTotal\":" << num(u64(callersTotal))
+        << ",\"callersShown\":" << num(u64(cShown))
+        << ",\"callers\":[" << callers.str() << "]"
+        << ",\"calleesTotal\":" << num(u64(calleesTotal))
+        << ",\"calleesShown\":" << num(u64(eShown))
+        << ",\"callees\":[" << callees.str() << "]}";
     return out.str();
 }
 

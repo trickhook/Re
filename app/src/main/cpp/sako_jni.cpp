@@ -96,6 +96,32 @@ Java_com_trickhook_engine_NativeBridge_nativeDiff(JNIEnv* env, jobject, jstring 
     return toJString(env, sako::Engine::instance().diff(a, b));
 }
 
+// DEX / smali. Three DEX-only calls, all READ-ONLY over the already-open
+// target, mirroring nativeXrefsTo/nativeDetect. nativeDexSmali decodes one
+// method's Dalvik bytecode to smali; nativeDexStrings searches the DEX string
+// pool; nativeDexMethodXrefs surfaces who invokes a method from the call graph.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDexSmali(JNIEnv* env, jobject, jstring jpath,
+                                                      jlong addr) {
+    std::string path = toStdString(env, jpath);
+    return toJString(env, sako::Engine::instance().dexSmali(path, u64(addr)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDexStrings(JNIEnv* env, jobject, jstring jpath,
+                                                        jstring jquery, jlong offset, jlong count) {
+    std::string path = toStdString(env, jpath);
+    std::string query = toStdString(env, jquery);
+    return toJString(env, sako::Engine::instance().dexStrings(path, query, u64(offset), u64(count)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDexMethodXrefs(JNIEnv* env, jobject, jstring jpath,
+                                                            jlong addr) {
+    std::string path = toStdString(env, jpath);
+    return toJString(env, sako::Engine::instance().dexMethodXrefs(path, u64(addr)));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeCallGraph(JNIEnv* env, jobject, jstring jpath,
                                                            jlong focus) {

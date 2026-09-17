@@ -158,6 +158,64 @@ object NativeBridge {
      * BACKGROUND THREAD: it takes the engine mutex.
      */
     external fun nativeDetect(path: String): String
+
+    /**
+     * Smali disassembly of ONE DEX method — the Dalvik half of the engine.
+     *
+     * [address] is a method's codeOff, exactly the value nativeAnalyze emits in
+     * each dexMethods row and the address a promoted DEX method carries in the
+     * function list. The engine decodes the code_item at that offset with a
+     * format-driven Dalvik opcode decoder and resolves the index operands
+     * (string, type, field, method and prototype references) to human names
+     * through the DEX pools; an opcode it does not know renders honestly as an
+     * unknown marker rather than a guessed encoding.
+     *
+     * Returns `{"ok":true,"addr":"0x…","class":"…","classShort":"…",
+     * "method":"…","proto":"…","name":"…","registers":N,"ins":N,"outs":N,
+     * "tries":N,"insnsUnits":N,"insnBytes":N,"nCallers":N,"nCallees":N,
+     * "total":N,"shown":N,"truncated":false,"smali":[{"off":"0x…","unit":N,
+     * "bytes":"…","mnem":"…","ops":"…","comment":"…"}]}` or
+     * `{"ok":false,"error":"…"}`. `nCallers`/`nCallees` are the same call-graph
+     * degrees the function list reports. Engine side: Engine::dexSmali.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeDexSmali(path: String, address: Long): String
+
+    /**
+     * Search the DEX string pool — a case-insensitive substring over the
+     * string_ids the loader read, paginated with an honest total. Where
+     * [nativeAnalyze] carries the first 3000 strings that pass the printable
+     * floor, this reaches the whole (loader-capped) pool, which is the point: a
+     * DEX holds far more strings than the general scan surfaces. Each row's
+     * `addr` is the string's index in the pool.
+     *
+     * [count] 0 asks for the default page. Returns `{"ok":true,"query":"…",
+     * "total":N,"matched":N,"offset":N,"shown":N,"poolRead":N,"poolTotal":N,
+     * "strings":[{"addr":"0x…","value":"…","truncated":true,"length":N}]}` or
+     * `{"ok":false,"error":"…"}`. `poolRead` < `poolTotal` means the loader
+     * capped the pool. Engine side: Engine::dexStrings.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeDexStrings(path: String, query: String, offset: Long, count: Long): String
+
+    /**
+     * DEX method xrefs — who invokes the method at [address] (callers) and who
+     * it invokes (callees). This runs NO new scan: the engine already built a
+     * DEX call graph at analysis time by walking every method's invoke
+     * instructions, and this surfaces the edges touching one method, resolving
+     * each end to its Class.method name.
+     *
+     * Returns `{"ok":true,"addr":"0x…","name":"…","callersTotal":N,
+     * "callersShown":N,"callers":[{"addr":"0x…","name":"…","site":"0x…",
+     * "sites":N}],"calleesTotal":N,"calleesShown":N,"callees":[…]}` or
+     * `{"ok":false,"error":"…"}`. Engine side: Engine::dexMethodXrefs.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeDexMethodXrefs(path: String, address: Long): String
+
     external fun nativeCallGraph(path: String, focus: Long): String
 
     /**

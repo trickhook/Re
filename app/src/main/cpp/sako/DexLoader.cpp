@@ -30,12 +30,24 @@ DexInfo parseDex(const Binary& b) {
     u32 methodCount = rd32(p + 88), methodOff = rd32(p + 92);
     u32 classCount = rd32(p + 96), classOff = rd32(p + 100);
 
+    u32 fieldCount = rd32(p + 80), fieldOff = rd32(p + 84);
+
     // What the file says it holds, kept before the caps below cut the three
     // tables down. The caps are defensible; throwing the counts away is not,
     // because then a capped table goes out as though it were the whole one.
     info.stringsFound = strCount;
     info.methodsFound = methodCount;
     info.classesFound = classCount;
+
+    // The raw pool offsets, for the smali decoder to resolve operand indices
+    // directly from the dex bytes (see DexIndex in Types.h). Uncapped on
+    // purpose: an operand can name any string/type/field/method in the file,
+    // not only the first N the lists below carry.
+    info.idx.stringIdsOff = strOff;    info.idx.stringIdsCount = strCount;
+    info.idx.typeIdsOff = typeOff;     info.idx.typeIdsCount = typeCount;
+    info.idx.protoIdsOff = protoOff;   info.idx.protoIdsCount = protoCount;
+    info.idx.fieldIdsOff = fieldOff;   info.idx.fieldIdsCount = fieldCount;
+    info.idx.methodIdsOff = methodOff; info.idx.methodIdsCount = methodCount;
 
     // ---- strings ----
     size_t sCap = std::min<u32>(strCount, 50000);
