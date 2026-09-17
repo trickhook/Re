@@ -45,6 +45,38 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      The Shizuku debugger backend (com.trickhook.shizuku).
+
+      moe.shizuku.manager.permission.API_V23 is Shizuku's own permission: it is
+      granted by the user inside Shizuku, not by Android, and without it every
+      call on the Shizuku class throws. The provider AAR merges this line in by
+      itself; it is written out here because a permission this app asks for
+      should be readable in this file rather than only in a merged manifest.
+
+      Nothing here is asked for at launch. The app never touches Shizuku until
+      someone opens the Debugger tab and chooses the Shizuku backend, and it
+      works exactly as before on a device that has never heard of it.
+    -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+    <!--
+      Package visibility, required since API 30.
+
+      The debugger tab has to tell "Shizuku is not installed" apart from
+      "Shizuku is installed but not running", because those are different
+      problems with different answers and a single "unavailable" helps nobody.
+      Telling them apart means asking the PackageManager about one package by
+      name, and targetSdk 30+ hides every package that is not declared here.
+
+      This is also what makes the "Open Shizuku" button able to find a launch
+      Intent. It grants no access to the package, only the ability to see that
+      it exists.
+    -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -100,6 +132,32 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/update_file_paths" />
         </provider>
+
+        <!--
+          Shizuku's binder delivery point.
+
+          This provider is not ours to design: Shizuku hands an app its binder
+          by calling into this ContentProvider, and rikka.shizuku.ShizukuProvider
+          throws from attachInfo unless exported is true and multiprocess is
+          false — so both are fixed, not chosen.
+
+          exported="true" with no permission would leave a call() surface open
+          to every app on the device. android.permission.INTERACT_ACROSS_USERS_FULL
+          is a signature|privileged permission that no third-party app can hold,
+          so in practice only the system and Shizuku itself can reach it. This is
+          the configuration Shizuku's own demo ships and the one its
+          documentation specifies.
+
+          onCreate here also initialises Sui, so a rooted device with the Sui
+          module works with no separate code path.
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <!--
           The MCP control port. Off until a person switches it on in the app:

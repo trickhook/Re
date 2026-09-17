@@ -182,8 +182,17 @@ android {
     buildFeatures {
         compose = true
         // AGP 8 generates BuildConfig only when this is on. The updater reads
-        // BuildConfig.VERSION_CODE and BuildConfig.VERSION_NAME.
+        // BuildConfig.VERSION_CODE and BuildConfig.VERSION_NAME, and
+        // ShizukuGate reads APPLICATION_ID and VERSION_CODE to name and version
+        // its user service.
         buildConfig = true
+        // AGP 8 stopped compiling src/main/aidl unless this is on, and it fails
+        // by simply not generating the interface: the Kotlin error is then
+        // "unresolved reference: INocturneService", which points at the wrong
+        // file entirely. One .aidl lives here —
+        // com/trickhook/shizuku/INocturneService.aidl — and it is the whole
+        // protocol between the app and the privileged debugger process.
+        aidl = true
     }
     packaging {
         resources {
@@ -203,5 +212,31 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
+
+    // ---- Shizuku -----------------------------------------------------------
+    // The first third-party dependency this project has taken on. The MCP
+    // server, the QR encoder, the updater and the release pipeline were all
+    // written against the platform instead, and that bar is deliberate — so
+    // this one is argued for in docs/SHIZUKU.md rather than just added.
+    //
+    // The short version: `api` is the client side of an interface owned by
+    // another app, and its wire format is that app's private business. It
+    // carries the AIDL for IShizukuService and IShizukuApplication, the v11 and
+    // v13 attach handshake, the permission protocol, and the UserService
+    // request/reply bundle keys — all of which are Shizuku's to change. Copying
+    // them in would mean re-deriving them on every Shizuku release, in a code
+    // path that talks to a process running as root. `provider` is the
+    // ContentProvider Shizuku calls to hand over the binder in the first place;
+    // there is no API to reimplement it, only a contract to match exactly.
+    //
+    // Both are MIT (github.com/RikkaApps/Shizuku-API/blob/master/LICENSE),
+    // which sits fine beside this app's own MIT licence and the Apache-2.0 and
+    // BSD-3 code already vendored under src/main/cpp. Together they are a few
+    // tens of KB of Java with one transitive dependency, androidx.annotation,
+    // which is already on the classpath. They pull in no Kotlin runtime, no
+    // coroutines, no networking and no reflection into the app's own code.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+
     debugImplementation(libs.androidx.ui.tooling)
 }

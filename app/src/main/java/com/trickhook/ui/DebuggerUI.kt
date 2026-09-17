@@ -64,6 +64,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -73,6 +74,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.trickhook.model.DbgBp
 import com.trickhook.model.DbgState
+import com.trickhook.shizuku.DbgBackend
+import com.trickhook.shizuku.ShizukuGate
+import com.trickhook.shizuku.ShizukuStage
 import com.trickhook.vm.DbgMode
 import com.trickhook.vm.StudioViewModel
 import kotlinx.coroutines.delay
@@ -165,6 +169,32 @@ fun DebuggerPanel(vm: StudioViewModel) {
     // program counter, which is what makes the dump appear without being asked.
     var memWatch by remember { mutableStateOf<Long?>(null) }
     val view = DbgView.of(vm.dbgState)
+    val ctx = LocalContext.current
+    val backend = vm.dbgBackend
+
+    // A privileged backend has a process behind it that has to exist before it
+    // can be told anything, so Spawn and Attach wait for it rather than sending
+    // a command into a null binder and reporting "command failed".
+    val backendLive = !backend.privileged || ShizukuGate.ready
+
+    // Registers the Shizuku listeners the first time this tab is opened and
+    // re-reads the world on every entry after that: a permission granted inside
+    // Shizuku's own app while Nocturne was on another tab is picked up here
+    // rather than needing a restart. Nothing is started by it.
+    LaunchedEffect(Unit) { ShizukuGate.attach(ctx) }
+
+    // Shizuku only says whether it is shell or root once its binder has
+    // answered, which can be after the backend chip was pressed. Without this,
+    // a root user would sit on a backend labelled "shell" with Attach greyed
+    // out for a capability they actually have. Re-labelling does not disturb a
+    // live session: it is the same process either way.
+    LaunchedEffect(ShizukuGate.serverUid, backend) {
+        val uid = ShizukuGate.serverUid
+        if (backend.privileged && uid >= 0) {
+            val real = DbgBackend.forUid(uid)
+            if (real != backend) vm.selectDbgBackend(real)
+        }
+    }
 
     // A spawn that fails leaves dbgMode on SESSION with no process behind it
     // and never answers, so the skeleton needs an end of its own — otherwise it
@@ -239,6 +269,8 @@ fun DebuggerPanel(vm: StudioViewModel) {
                 StateIndicator(view, vm.dbgMode)
             }
 
+            BackendRow(vm)
+
             // FlowRow, not Row: at a large font scale even two buttons and a
             // Kill will not fit one line on a 360dp phone.
             FlowRow(
@@ -252,11 +284,16 @@ fun DebuggerPanel(vm: StudioViewModel) {
                 // live session, which left every control here blinking between
                 // enabled and disabled. Only a launch in flight blocks a launch.
                 Button(
-                    onClick = { showSpawn = true }, enabled = !launching,
+                    onClick = { showSpawn = true }, enabled = !launching && backendLive,
                     contentPadding = DbgBtnPad
                 ) { Text("Spawn", fontSize = Type.label) }
+                // Disabled, not allowed to fail. PTRACE_ATTACH to a process the
+                // shell backend did not start is refused by the kernel and by
+                // SELinux every single time, so the control says so by being
+                // unavailable instead of by producing an error afterwards.
                 Button(
-                    onClick = { showAttach = true }, enabled = !launching,
+                    onClick = { showAttach = true },
+                    enabled = !launching && backendLive && backend.offersAttach,
                     contentPadding = DbgBtnPad
                 ) { Text("Attach", fontSize = Type.label) }
                 if (vm.dbgMode == DbgMode.SESSION) {
@@ -265,7 +302,20 @@ fun DebuggerPanel(vm: StudioViewModel) {
                     }
                 }
             }
+
+            // What this backend cannot do, beside the control it greys out.
+            val limit = backend.limit
+            if (limit != null) {
+                Text(
+                    limit,
+                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine,
+                    modifier = Modifier.padding(horizontal = Space.l, vertical = Space.xs)
+                )
+            }
         }
+
+        // The whole Shizuku state machine, in the one place it matters.
+        if (backend.privileged) ShizukuStrip(vm)
 
         // ---- the control stack. One panel surface for all of it: four
         // adjacent bands each drawing their own background would stack two
@@ -311,7 +361,15 @@ fun DebuggerPanel(vm: StudioViewModel) {
                     "Two debugger modes:\n" +
                         "  • Spawn/Attach — real ptrace session: breakpoints, registers, memory, stack, threads.\n" +
                         "  • (Old) syscall tracer — set program below and Run trace.",
-                    "ptrace needs root or a debuggable process, and SELinux can refuse it even then."
+                    if (backend.privileged) {
+                        "Through Shizuku the sample is staged into /data/local/tmp as uid " +
+                            (if (backend == DbgBackend.SHIZUKU_ROOT) "0" else "2000") +
+                            ", made executable, and traced as a child of that process."
+                    } else {
+                        "In-process ptrace needs root or a debuggable target, and SELinux can " +
+                            "refuse it even then. An imported sample cannot be run here at all — " +
+                            "switch to the Shizuku backend above."
+                    }
                 )
             }
         }
@@ -935,17 +993,265 @@ private fun TraceView(vm: StudioViewModel) {
     }
 }
 
+/**
+ * Which process the session runs in, and one line saying what that buys.
+ *
+ * Two chips, not three: the privileged one names the privilege the Shizuku
+ * server actually has rather than offering both and letting the user find out.
+ * [ShizukuGate.serverUid] is 0 for a root or Sui backend and 2000 for adb, so
+ * the label is read off the server, never guessed.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BackendRow(vm: StudioViewModel) {
+    val ide = LocalIde.current
+    val live = vm.dbgBackend
+    val privileged = DbgBackend.forUid(ShizukuGate.serverUid)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Space.l, vertical = Space.xs)
+    ) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Space.s),
+            verticalArrangement = Arrangement.spacedBy(Space.s)
+        ) {
+            BackendChip(DbgBackend.LOCAL, live == DbgBackend.LOCAL) {
+                vm.selectDbgBackend(DbgBackend.LOCAL)
+            }
+            BackendChip(privileged, live.privileged) {
+                vm.selectDbgBackend(privileged)
+            }
+        }
+        // The capability line follows the SELECTED backend, so it is always
+        // describing the thing that is about to run.
+        Text(
+            live.summary,
+            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine,
+            modifier = Modifier.padding(vertical = Space.xs)
+        )
+    }
+}
+
+@Composable
+private fun BackendChip(backend: DbgBackend, selected: Boolean, onPick: () -> Unit) {
+    val ide = LocalIde.current
+    val shape = RoundedCornerShape(Space.m)
+    val tint = if (selected) ide.accent else ide.dim2
+    Row(
+        TouchTarget
+            .surface2(shape)
+            .clickable(
+                onClickLabel = "Run the debugger in the " + backend.label + " backend",
+                role = Role.RadioButton,
+                onClick = onPick
+            )
+            .padding(horizontal = Space.m),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(Space.m)
+                .background(tint, CircleShape)
+        )
+        Spacer(Modifier.width(Space.s))
+        Text(backend.label, color = tint, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
+    }
+}
+
+/**
+ * Every state Shizuku can be in, and the one thing to do about each of them.
+ *
+ * Shizuku is not a boolean. It can be absent, present but not started, started
+ * but never asked, asked and refused, granted, starting, running, or it can die
+ * in the middle of a session — and each of those needs a different sentence and
+ * a different button. None of them dead-ends: "not installed" links to where
+ * Shizuku comes from instead of telling the user to go and find it.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ShizukuStrip(vm: StudioViewModel) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+    val stage = ShizukuGate.stage
+
+    val title = when (stage) {
+        ShizukuStage.NOT_INSTALLED -> "SHIZUKU NOT INSTALLED"
+        ShizukuStage.NOT_RUNNING -> "SHIZUKU NOT RUNNING"
+        ShizukuStage.UNSUPPORTED -> "SHIZUKU TOO OLD"
+        ShizukuStage.ASK -> "PERMISSION NEEDED"
+        ShizukuStage.DENIED -> "PERMISSION REFUSED"
+        ShizukuStage.GRANTED -> "READY TO CONNECT"
+        ShizukuStage.BINDING -> "STARTING"
+        ShizukuStage.BOUND -> "CONNECTED"
+        ShizukuStage.BIND_FAILED -> "COULD NOT START"
+        ShizukuStage.BINDER_DEAD -> "CONNECTION LOST"
+    }
+    val tint = when (stage) {
+        ShizukuStage.BOUND -> ide.entry
+        ShizukuStage.GRANTED -> ide.cyan
+        ShizukuStage.BIND_FAILED, ShizukuStage.BINDER_DEAD -> ide.red
+        else -> ide.amber
+    }
+    val actionLabel = when (stage) {
+        ShizukuStage.NOT_INSTALLED -> "Get Shizuku"
+        ShizukuStage.NOT_RUNNING, ShizukuStage.UNSUPPORTED, ShizukuStage.DENIED -> "Open Shizuku"
+        ShizukuStage.ASK -> "Grant permission"
+        ShizukuStage.GRANTED -> "Connect"
+        ShizukuStage.BIND_FAILED -> "Try again"
+        ShizukuStage.BINDER_DEAD -> "Reconnect"
+        ShizukuStage.BOUND -> "Disconnect"
+        ShizukuStage.BINDING -> ""
+    }
+    val onAction = {
+        when (stage) {
+            ShizukuStage.NOT_INSTALLED, ShizukuStage.NOT_RUNNING,
+            ShizukuStage.UNSUPPORTED, ShizukuStage.DENIED -> {
+                val intent = ShizukuGate.openIntent()
+                if (intent == null) {
+                    vm.log("WARN", "Nothing on this device can open " + ShizukuGate.DOWNLOAD_URL)
+                } else {
+                    try {
+                        ctx.startActivity(intent)
+                    } catch (t: Throwable) {
+                        vm.log("ERROR", "Could not open Shizuku: " + (t.message ?: "no activity"))
+                    }
+                }
+            }
+
+            ShizukuStage.ASK -> ShizukuGate.requestPermission()
+
+            ShizukuStage.BOUND -> {
+                // The privileged process owns the tracee, so stopping it kills
+                // the session. Ending the session first keeps the screen and
+                // the process telling the same story.
+                if (vm.dbgMode == DbgMode.SESSION) vm.dbgKill()
+                ShizukuGate.disconnect()
+            }
+
+            else -> ShizukuGate.connect()
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            // The strip is one line when it is connected and a paragraph plus
+            // two buttons when it is not, and it moves between those a lot
+            // while someone is setting Shizuku up.
+            .animateContentSize(tween(motionMs()))
+            .surface1(RectangleShape)
+            .padding(horizontal = Space.l, vertical = Space.m)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(Space.m)
+                    .background(tint, CircleShape)
+            )
+            Spacer(Modifier.width(Space.s))
+            Text(title, color = tint, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
+            Spacer(Modifier.weight(1f))
+            // Sui is a Magisk module, not the Shizuku app, and it is always
+            // root. Worth naming, because none of the "open Shizuku" advice
+            // applies to it.
+            if (ShizukuGate.sui) StatChip("SUI", ide.violet)
+        }
+
+        val line = ShizukuGate.serviceLine
+        if (stage == ShizukuStage.BOUND && line.isNotEmpty()) {
+            Text(
+                line,
+                color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 2,
+                modifier = Modifier.padding(vertical = Space.xs)
+            )
+        } else {
+            Text(
+                ShizukuGate.detail,
+                color = ide.dim, fontSize = Type.caption, lineHeight = Type.captionLine,
+                modifier = Modifier.padding(vertical = Space.xs)
+            )
+        }
+
+        // Where the sample is right now, so nobody has to wonder whether
+        // something was left in /data/local/tmp.
+        val staged = ShizukuGate.stagedPath
+        if (staged.isNotEmpty()) {
+            Text(
+                "staged " + staged,
+                color = ide.cyan, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 2
+            )
+        }
+        // One skeleton, not two: staging and starting are both "something is
+        // happening over there and it takes seconds".
+        if (vm.dbgStaging || stage == ShizukuStage.BINDING) SkeletonLines(lines = 2)
+
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = Space.s),
+            horizontalArrangement = Arrangement.spacedBy(Space.s),
+            verticalArrangement = Arrangement.spacedBy(Space.s)
+        ) {
+            if (actionLabel.isNotEmpty()) {
+                Button(onClick = onAction, contentPadding = DbgBtnPad) {
+                    Text(actionLabel, fontSize = Type.label)
+                }
+            }
+            // Granting happens in another app, and nothing tells us when the
+            // user comes back if the tab was never left. This is that.
+            TextButton(onClick = { ShizukuGate.attach(ctx) }, contentPadding = DbgBtnPad) {
+                Text("Re-check", color = ide.dim, fontSize = Type.label)
+            }
+        }
+    }
+}
+
 @Composable
 private fun SpawnDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: () -> Unit) {
     val ide = LocalIde.current
     var prog by remember { mutableStateOf("/system/bin/toybox") }
     var args by remember { mutableStateOf("sleep 30") }
+    val open = vm.currentPath
+    // The headline action, and the one the whole Shizuku backend exists for.
+    // Offered only where it can actually work: the in-process backend cannot
+    // execve anything out of app storage at any path, so showing it there would
+    // be a button that is always wrong.
+    val runnable = if (vm.dbgBackend.canStage) open else null
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = ide.panel,
         title = { Text("Spawn process", color = ide.accent, fontSize = Type.section) },
         text = {
-            Column {
+            // Scrolls: with the staged-run block on top, two fields and two
+            // captions, this body is taller than a dialog on a short phone.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (runnable != null) {
+                    Button(
+                        onClick = {
+                            vm.dbgSpawnStaged(args)
+                            onLaunch()
+                            onDismiss()
+                        },
+                        enabled = !vm.dbgStaging,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = DbgBtnPad
+                    ) {
+                        Text(
+                            "Run " + runnable.substringAfterLast('/'),
+                            fontSize = Type.label, maxLines = 1
+                        )
+                    }
+                    Spacer(Modifier.height(Space.s))
+                    Text(
+                        "Copies the open file into /data/local/tmp through the privileged " +
+                            "process, makes it executable there, and traces it as that process's " +
+                            "own child. It is deleted again when the session ends.",
+                        color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                    )
+                    Spacer(Modifier.height(Space.l))
+                }
                 OutlinedTextField(
                     value = prog, onValueChange = { prog = it },
                     label = { Text("Program path") }, singleLine = true,
@@ -992,7 +1298,12 @@ private fun AttachDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: (
                 )
                 Spacer(Modifier.height(Space.s))
                 Text(
-                    "Attach requires same-uid or root. Find PIDs via adb shell ps.",
+                    if (vm.dbgBackend == DbgBackend.SHIZUKU_ROOT) {
+                        "Running as uid 0: any pid on the device can be attached. Find one with " +
+                            "adb shell ps -A, or in the Threads list of a session you started."
+                    } else {
+                        "Attach requires same-uid or root. Find PIDs via adb shell ps."
+                    },
                     color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
                 )
             }

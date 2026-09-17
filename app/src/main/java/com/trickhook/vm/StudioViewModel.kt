@@ -49,6 +49,8 @@ import com.trickhook.model.parseHexAddr
 import com.trickhook.model.parseIdcAnnotations
 import com.trickhook.model.parseMeta
 import com.trickhook.model.parseScriptResult
+import com.trickhook.shizuku.DbgBackend
+import com.trickhook.shizuku.ShizukuGate
 import com.trickhook.update.UpdateException
 import com.trickhook.update.UpdateFailure
 import com.trickhook.update.UpdateState
@@ -289,6 +291,28 @@ class StudioViewModel : ViewModel() {
      * list again.
      */
     var dbgThreads by mutableStateOf<List<DbgThread>>(emptyList())
+
+    /**
+     * Which process the ptrace session runs in.
+     *
+     * [DbgBackend.LOCAL] is the default and is exactly what the debugger has
+     * always done — the engine in this process, which needs root or a
+     * debuggable target. The Shizuku backends put the same engine in a process
+     * running as shell or root, where an imported sample can actually be made
+     * executable and run. Read on the caller's thread before each command, so
+     * a backend switch mid-flight cannot send one command to two places.
+     */
+    var dbgBackend by mutableStateOf(DbgBackend.LOCAL); private set
+
+    /**
+     * True while a sample is being pushed into /data/local/tmp. WHERE it ended
+     * up is [com.trickhook.shizuku.ShizukuGate.stagedPath] and not a copy of it
+     * here: the gate is the only thing that learns the staged file is gone when
+     * the privileged process dies, and two fields that can disagree about
+     * whether an executable is sitting in a world-visible directory is exactly
+     * the wrong place for a second source of truth.
+     */
+    var dbgStaging by mutableStateOf(false); private set
 
     // v2: plugins
     var plugins by mutableStateOf<List<PluginDef>>(emptyList()); private set
@@ -1418,7 +1442,12 @@ class StudioViewModel : ViewModel() {
 
     fun debugStop() {
         NativeBridge.nativeDebugStop()
-        if (dbgMode == DbgMode.SESSION) dbgCmd("kill")
+        // Was dbgCmd("kill") — a bare word, not JSON. The engine's parser read
+        // it as an empty object, matched no op and answered nothing, so this
+        // branch has never stopped a session. It stayed invisible because the
+        // Stop button is only enabled during a legacy trace, where dbgMode is
+        // TRACE. Across a Binder it would not have stayed invisible.
+        if (dbgMode == DbgMode.SESSION) dbgKill()
     }
 
     /**
@@ -1461,12 +1490,63 @@ class StudioViewModel : ViewModel() {
         )
     }
 
+    /**
+     * One command to whichever backend is live.
+     *
+     * [DbgBackend.LOCAL] is the JNI call this has always been. The Shizuku
+     * backends put the identical JSON across a Binder into a process running as
+     * shell or root — same protocol, same parser, same event log. The transport
+     * never throws: a dead binder comes back as `{"ok":false,"error":...}` and
+     * is reported like any other failed command.
+     *
+     * Blocking; only [dbgCmd] calls it, and only from Dispatchers.IO.
+     */
+    private fun dbgSend(backend: DbgBackend, json: String): String =
+        if (backend == DbgBackend.LOCAL) NativeBridge.nativeDbgCmd(json) else ShizukuGate.cmd(json)
+
+    /**
+     * Point the debugger at a different process. Any live session is killed
+     * first: a session belongs to the backend that started it, and carrying the
+     * pid, registers and breakpoints of one over to the other would describe a
+     * process that the new backend cannot even see.
+     */
+    fun selectDbgBackend(backend: DbgBackend) {
+        if (backend == dbgBackend) return
+        // Shell and root are the SAME privileged process, relabelled once
+        // Shizuku says which uid it runs as. Killing a session for that would
+        // throw away a live tracee because a caption changed.
+        val sameProcess = backend.privileged && dbgBackend.privileged
+        if (!sameProcess) {
+            if (dbgMode == DbgMode.SESSION) dbgKill()
+            dbgClearStaged()
+        }
+        dbgBackend = backend
+        log("INFO", "Debugger backend: ${backend.label}")
+    }
+
     // v2: interactive session
     fun dbgCmd(json: String, onDone: ((DbgState) -> Unit)? = null) {
+        // Read on the caller's thread, not inside the coroutine: the 400 ms
+        // poll outlives a backend switch, and a command must go where it was
+        // aimed when it was issued.
+        val backend = dbgBackend
+        // A privileged backend whose process has gone answers EVERY command
+        // with an error, and the session poll sends four of them every 400 ms.
+        // Since a failed command is now a toast, that is a toast twice a second
+        // for as long as the tab is open — so the session ends here, once, with
+        // one line saying why, instead.
+        if (backend.privileged && !ShizukuGate.ready) {
+            if (dbgMode == DbgMode.SESSION) {
+                dbgMode = DbgMode.NONE
+                clearDbgSessionViews()
+                log("WARN", "The privileged debugger is not connected. Session ended.")
+            }
+            return
+        }
         viewModelScope.launch {
             dbgBusy = true
             try {
-                val s = withContext(Dispatchers.IO) { parseDbg(NativeBridge.nativeDbgCmd(json)) }
+                val s = withContext(Dispatchers.IO) { parseDbg(dbgSend(backend, json)) }
                 if (s.ok) {
                     dbgState = mergeDbg(dbgState, s)
                     if (s.events.isNotEmpty()) {
@@ -1495,6 +1575,7 @@ class StudioViewModel : ViewModel() {
     fun dbgSpawn(prog: String, args: String) {
         dbgMode = DbgMode.SESSION
         dbgEvents = emptyList()
+        dbgClearStaged()
         clearDbgSessionViews()
         log("INFO", "Spawning $prog")
         dbgCmd("""{"op":"spawn","prog":"$prog","args":"${args.replace("\"", "\\\"").replace("\n", "\\n")}"}""")
@@ -1503,9 +1584,76 @@ class StudioViewModel : ViewModel() {
     fun dbgAttach(pid: Long) {
         dbgMode = DbgMode.SESSION
         dbgEvents = emptyList()
+        dbgClearStaged()
         clearDbgSessionViews()
         log("INFO", "Attaching to pid $pid")
         dbgCmd("""{"op":"attach","pid":$pid}""")
+    }
+
+    /**
+     * Copy the open file into /data/local/tmp through the privileged process,
+     * make it executable, and spawn it under ptrace.
+     *
+     * This is the whole reason the Shizuku backend exists. The app cannot do
+     * any part of it: since Android 10 app_data_file carries no execute
+     * permission, so an imported sample cannot be execve'd by this process at
+     * all, at any path, however it was chmod'ed. The privileged process runs as
+     * shell, /data/local/tmp is shell_data_file, and shell may execute there
+     * and ptrace its own child. That is the gdbserver workflow.
+     *
+     * The bytes cross the Binder rather than being read from a path, because a
+     * shell-uid process cannot read this app's data directory.
+     */
+    fun dbgSpawnStaged(args: String) {
+        if (dbgStaging) return
+        val backend = dbgBackend
+        if (!backend.canStage) {
+            log("WARN", "The in-process backend cannot run a file from app storage.")
+            return
+        }
+        val path = currentPath
+        if (path == null) {
+            log("WARN", "No file is open to run.")
+            return
+        }
+        viewModelScope.launch {
+            dbgStaging = true
+            globalPhase = "Staging"
+            try {
+                val res = withContext(Dispatchers.IO) { ShizukuGate.stageSample(File(path)) }
+                if (!res.ok) {
+                    log("ERROR", "Staging failed: ${res.note}")
+                    return@launch
+                }
+                val arch = res.machine.ifEmpty { "unknown" }
+                log("OK", "Staged to ${res.path} ($arch)")
+                dbgMode = DbgMode.SESSION
+                dbgEvents = emptyList()
+                clearDbgSessionViews()
+                val escaped = args.replace("\"", "\\\"").replace("\n", "\\n")
+                dbgCmd("""{"op":"spawn","prog":"${res.path}","args":"$escaped"}""")
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "staging error")
+            } finally {
+                dbgStaging = false
+                globalPhase = ""
+            }
+        }
+    }
+
+    /**
+     * Delete the staged sample. Called whenever a session ends, so the tmp
+     * directory does not accumulate executables — the privileged service also
+     * sweeps on connect and on teardown, because a crash reaches neither of the
+     * tidy paths.
+     */
+    private fun dbgClearStaged() {
+        if (!dbgBackend.privileged) return
+        // Off the main thread: this is a Binder call into a process that may be
+        // sitting in waitpid. It is a no-op when nothing is staged.
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { ShizukuGate.unstage() }
+        }
     }
 
     /**
@@ -1557,6 +1705,10 @@ class StudioViewModel : ViewModel() {
         dbgCmd("""{"op":"kill"}""")
         dbgMode = DbgMode.NONE
         clearDbgSessionViews()
+        // The staged executable goes with the process it was staged for.
+        // Leaving one behind in a directory every shell process on the device
+        // can reach is untidy at best.
+        dbgClearStaged()
     }
 
     fun dbgBpAtSelectedFunction() {

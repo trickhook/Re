@@ -1,12 +1,81 @@
 package com.trickhook.engine
 
+import java.io.File
+
 /**
  * JNI bridge to the native C++ engine (libnocturne.so).
  * Engine side: app/src/main/cpp/
+ *
+ * This object is loaded in TWO processes now. In the app it behaves exactly as
+ * it always has: the library is loaded when the class is first touched, and if
+ * it were ever missing the app would be dead anyway. In the Shizuku user
+ * service (com.trickhook.shizuku.NocturneUserService) it is loaded by a class
+ * loader that LoadedApk built inside a process that is not an Android
+ * application at all, and whether that resolves libnocturne.so is the single
+ * riskiest assumption in that feature. So the load is catchable, retryable and
+ * reports a sentence — see [ensureEngine].
  */
 object NativeBridge {
+
+    /**
+     * Why libnocturne.so is not loaded in THIS process, or null when the engine
+     * is callable.
+     *
+     * Non-null means every `external fun` below will throw UnsatisfiedLinkError
+     * — which is an Error, not an Exception, so callers that catch Exception
+     * will not contain it. Check this first anywhere the answer matters.
+     */
+    @Volatile
+    var loadError: String? = null
+        private set
+
     init {
-        System.loadLibrary("nocturne")
+        loadError = tryLoad(null)
+    }
+
+    /**
+     * Make sure the engine is loaded, and say why if it is not. Returns null on
+     * success, so `ensureEngine(dir) ?: run { ... }` reads the right way round.
+     *
+     * [nativeLibraryDir] is ApplicationInfo.nativeLibraryDir, when the caller
+     * has it. The first attempt goes through the class loader, which is the
+     * documented mechanism and the one the official Shizuku demo relies on; the
+     * second opens the file by absolute path, which covers the case where the
+     * library is on disk but the class loader's search path was built without
+     * it. Both are inside the class loader's permitted namespace, so neither
+     * can be refused by the linker for being out of bounds.
+     */
+    @Synchronized
+    fun ensureEngine(nativeLibraryDir: String? = null): String? {
+        if (loadError == null) return null
+        loadError = tryLoad(nativeLibraryDir)
+        return loadError
+    }
+
+    private fun tryLoad(nativeLibraryDir: String?): String? {
+        try {
+            System.loadLibrary("nocturne")
+            return null
+        } catch (first: Throwable) {
+            if (nativeLibraryDir == null) return why(first, "System.loadLibrary(\"nocturne\")")
+            val f = File(nativeLibraryDir, "libnocturne.so")
+            if (!f.isFile) {
+                return why(first, "System.loadLibrary(\"nocturne\")") +
+                    " — and " + f.absolutePath + " does not exist, which is what an APK packaged " +
+                    "with extractNativeLibs=false looks like from here"
+            }
+            return try {
+                System.load(f.absolutePath)
+                null
+            } catch (second: Throwable) {
+                why(second, "System.load(" + f.absolutePath + ")")
+            }
+        }
+    }
+
+    private fun why(t: Throwable, attempt: String): String {
+        val m = t.message
+        return attempt + " failed: " + (if (m.isNullOrBlank()) t.javaClass.simpleName else m)
     }
 
     /**
