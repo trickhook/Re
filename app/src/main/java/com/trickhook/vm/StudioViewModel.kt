@@ -2306,6 +2306,57 @@ class StudioViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Copy this device's library-function signature database out of assets and
+     * point the engine at it, the same shape as [installSleigh].
+     *
+     * The database is a single per-ABI .nsig, generated at CI from the NDK's
+     * bionic and libc++ static libraries (the "Generate bionic library
+     * signatures" workflow step). With it installed, analysis names the library
+     * functions in a stripped binary that discovery could only call
+     * SUB_xxxxxxxx; the recovered rows carry from = "lib".
+     *
+     * A no-op the app can always survive. If no .nsig ships for any ABI this
+     * device supports -- and a locally built debug APK carries none, since the
+     * assets exist only after CI has generated them -- nothing is extracted,
+     * the engine is never pointed at a database, and its recognition pass stays
+     * disabled exactly as before phase 2. It never throws out of here.
+     */
+    fun installLibSig(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val names = context.assets.list("libsig")?.toList().orEmpty()
+                if (names.isEmpty()) return@launch   // nothing bundled -> no-op
+                // The first ABI this device supports, in preference order, that
+                // the build actually shipped a database for.
+                val abi = Build.SUPPORTED_ABIS.firstOrNull { "${it}.nsig" in names }
+                if (abi == null) {
+                    log("WARN", "Library signatures: none bundled for this device " +
+                        "(${Build.SUPPORTED_ABIS.joinToString()}); shipped ${names.joinToString()}")
+                    return@launch
+                }
+                val dir = File(context.filesDir, "libsig").apply { mkdirs() }
+                val dst = File(dir, "${abi}.nsig")
+                val stamp = try {
+                    context.packageManager.getPackageInfo(context.packageName, 0).let {
+                        "${it.versionName}-$abi"
+                    }
+                } catch (e: Exception) { "unknown-$abi" }
+                val marker = File(dir, ".installed")
+                if (marker.takeIf { it.exists() }?.readText() != stamp || !dst.exists()) {
+                    val bytes = context.assets.open("libsig/${abi}.nsig").use { ins ->
+                        dst.outputStream().use { ins.copyTo(it) }
+                    }
+                    marker.writeText(stamp)
+                    log("INFO", "Library signatures installed: $abi, ${bytes / 1024} KB")
+                }
+                NativeBridge.nativeSetLibSigDb(dst.absolutePath)
+            } catch (e: Exception) {
+                log("ERROR", "Library signatures install: ${e.message}")
+            }
+        }
+    }
+
     fun selectDecompiler(which: String) {
         decompiler = if (which == "ir") "ir" else "ghidra"
         NativeBridge.nativeSetDecompiler(decompiler)

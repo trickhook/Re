@@ -266,6 +266,7 @@ fun StudioApp(vm: StudioViewModel) {
         vm.refreshRecents(ctx)
         vm.loadPlugins(ctx)
         vm.installSleigh(ctx)
+        vm.installLibSig(ctx)
         // Reads one preference and deletes any stale download. It contacts
         // GitHub only if the user has switched the launch check on; by default
         // this touches nothing but the disk.

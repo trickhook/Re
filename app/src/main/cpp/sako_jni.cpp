@@ -24,6 +24,11 @@ Java_com_trickhook_engine_NativeBridge_nativeSetSleighDir(JNIEnv* env, jobject, 
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeSetLibSigDb(JNIEnv* env, jobject, jstring jpath) {
+    sako::Engine::instance().setLibSigDb(toStdString(env, jpath));
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeSetDecompiler(JNIEnv* env, jobject, jstring jwhich) {
     sako::Engine::instance().setDecompiler(toStdString(env, jwhich));
 }

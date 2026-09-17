@@ -21,3 +21,8 @@ agent-ctx/
 
 # CI APK staging
 dist/
+
+# Generated at CI from the NDK's bionic + libc++ static libs (phase 2). Never
+# committed: rebuilt from the NDK on every run by the "Generate bionic library
+# signatures" step in .github/workflows/build.yml, packaged as an app asset.
+app/src/main/assets/libsig/

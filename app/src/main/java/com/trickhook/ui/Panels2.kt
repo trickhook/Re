@@ -480,6 +480,12 @@ fun FunctionsPanel(vm: StudioViewModel) {
         mode == MODE_EXPORTS && meta.soName.isNotEmpty() -> "SONAME " + meta.soName
         else -> ""
     }
+    // The engine's own measured recognition result — "named N of M unknown
+    // functions" — surfaced honestly beside the list it describes, not just in
+    // the log. Its own text, so the count is the engine's, never re-derived
+    // from the page (a lib name can sit past the first loaded page). Empty
+    // unless a signature database actually named something.
+    val libNote = meta?.notes?.firstOrNull { it.startsWith("Library signatures: named") } ?: ""
 
     Column(Modifier.fillMaxSize()) {
         // Search, toggle and context line are one block. The context line
@@ -555,6 +561,19 @@ fun FunctionsPanel(vm: StudioViewModel) {
                 Text(
                     note,
                     color = ide.dim2, fontSize = Type.monoSmall, lineHeight = Type.monoSmallLine,
+                    fontFamily = Mono, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = Space.l, end = Space.l, bottom = Space.m)
+                )
+            }
+            // Shown only in the functions list, the one place the recovered
+            // names live. Tinted like the per-row "lib" chip so the summary and
+            // the rows it counts read as one feature.
+            if (funcsMode && libNote.isNotEmpty()) {
+                Text(
+                    libNote,
+                    color = ide.violet, fontSize = Type.monoSmall, lineHeight = Type.monoSmallLine,
                     fontFamily = Mono, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -808,12 +827,23 @@ private fun FunctionRow(vm: StudioViewModel, f: FuncInfo, modifier: Modifier = M
             contentDescription = if (renamed != null) "renamed" else null
         )
         Column(Modifier.weight(1f)) {
-            Text(
-                renamed ?: f.name,
-                color = if (f.addr == vm.selectedFunc) ide.accent else ide.text,
-                fontSize = Type.mono, fontFamily = Mono,
-                maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    renamed ?: f.name,
+                    color = if (f.addr == vm.selectedFunc) ide.accent else ide.text,
+                    fontSize = Type.mono, fontFamily = Mono,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                // A quiet mark that this name was RECOVERED by the library
+                // matcher (from = "lib"), not read from a symbol table or typed
+                // by the user. Hidden once the user renames the row, since the
+                // name shown is then theirs, not the recovered one.
+                if (renamed == null && f.from == "lib") {
+                    Spacer(Modifier.width(Space.s))
+                    StatChip("lib", ide.violet)
+                }
+            }
             Text(
                 "${f.from} · ${f.size} bytes · " +
                     "${floorCount(outN, floors)} out / ${floorCount(inN, floors)} in",

@@ -85,6 +85,16 @@ object NativeBridge {
      */
     external fun nativeSetSleighDir(dir: String)
 
+    /**
+     * Path to a library-function signature database (a .nsig, one per ABI,
+     * extracted from assets on first run). Until this is set the recognition
+     * pass is a no-op and every unnamed function stays SUB_xxxxxxxx; once set
+     * and loaded, analysis of a matching-architecture binary names the library
+     * functions it recognises (from = "lib"). An empty string disables it.
+     * Mirrors [nativeSetSleighDir]. Engine side: Engine::setLibSigDb.
+     */
+    external fun nativeSetLibSigDb(path: String)
+
     /** "ghidra" or "ir". Unknown values are treated as "ghidra". */
     external fun nativeSetDecompiler(which: String)
 

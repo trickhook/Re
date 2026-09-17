@@ -68,6 +68,129 @@ jobs:
             "ndk;${NDK_VERSION}" \
             "cmake;${CMAKE_VERSION}"
 
+      # Library-function signatures (phase 2). Turn a stripped Android binary's
+      # SUB_0001a4c0 back into memcpy by shipping a signature database built
+      # from the NDK's own bionic + libc++ STATIC archives, one .nsig per ABI.
+      #
+      # Why a workflow step and not a Gradle task: it MUST NOT be able to break
+      # `./gradlew assembleDebug`. Nothing here touches the Gradle graph. The
+      # generator (tools/siggen.cpp) is HOST C++ — it runs on this runner, reads
+      # the .o members inside each .a and masks the relocated bytes — so it is
+      # compiled with the runner's g++, never the NDK. The output is written as
+      # a plain asset under app/src/main/assets/libsig/ (gitignored, rebuilt
+      # from the NDK every run, never committed), and AGP then packages it like
+      # any other asset. If this step is removed or the archives are absent, the
+      # assets simply are not there, the engine matcher stays a no-op, and the
+      # app is byte-for-byte its phase-1 self.
+      #
+      # Fails LOUDLY: an ABI whose generation yields zero records errors the
+      # build. A shipped-but-empty database would silently name nothing, which
+      # is the failure that would reach a device — so it stops the build here.
+      - name: Generate bionic library signatures
+        run: |
+          set -euo pipefail
+
+          # The generator is host C++, not NDK code: build it with the runner's
+          # compiler. tools/verify_roundtrip.sh builds it the same way.
+          g++ -std=c++17 -O2 tools/siggen.cpp -o "$RUNNER_TEMP/siggen"
+
+          # Locate the NDK we installed above. Prefer the pinned-version path,
+          # then whatever the setup action exported.
+          ndk=''
+          for cand in \
+            "${ANDROID_HOME:-}/ndk/${NDK_VERSION}" \
+            "${ANDROID_SDK_ROOT:-}/ndk/${NDK_VERSION}" \
+            "${ANDROID_NDK_HOME:-}" \
+            "${ANDROID_NDK_ROOT:-}" \
+            "${ANDROID_NDK_LATEST_HOME:-}"; do
+            if [ -n "$cand" ] && [ -d "$cand" ]; then ndk="$cand"; break; fi
+          done
+          if [ -z "$ndk" ]; then
+            echo "::error::Could not locate NDK ${NDK_VERSION}. Looked under \$ANDROID_HOME/ndk, \$ANDROID_SDK_ROOT/ndk, \$ANDROID_NDK_HOME and \$ANDROID_NDK_ROOT."
+            exit 1
+          fi
+          sysroot=$(echo "$ndk"/toolchains/llvm/prebuilt/*/sysroot)
+          if [ ! -d "$sysroot" ]; then
+            echo "::error::NDK sysroot not found at $ndk/toolchains/llvm/prebuilt/*/sysroot."
+            exit 1
+          fi
+          echo "NDK:     $ndk"
+          echo "sysroot: $sysroot"
+
+          # Resolve one static archive for a triple. libc++_static.a and
+          # libc++abi.a live at the triple root; libc.a/libm.a/libdl.a live
+          # there or under a per-API-level subdir (highest API wins — the
+          # archive is only a matching corpus and bionic's code is stable across
+          # API levels). Prints the path, or nothing when it is not present.
+          resolve() {
+            local triple="$1" name="$2" base="$sysroot/usr/lib/$1"
+            local best='' best_api=0 d api
+            if [ -f "$base/$name" ]; then echo "$base/$name"; return 0; fi
+            for d in "$base"/[0-9]*; do
+              [ -d "$d" ] || continue
+              api=$(basename "$d")
+              case "$api" in (*[!0-9]*) continue ;; esac
+              if [ -f "$d/$name" ] && { [ -z "$best" ] || [ "$api" -gt "$best_api" ]; }; then
+                best="$d/$name"; best_api="$api"
+              fi
+            done
+            [ -n "$best" ] && echo "$best"
+            return 0
+          }
+
+          mkdir -p app/src/main/assets/libsig
+          echo "### Library-function signatures" >> "$GITHUB_STEP_SUMMARY"
+
+          # One comprehensive database per ABI: every static archive present for
+          # that triple, fed to siggen in a SINGLE run so cross-library
+          # collisions are detected and ambiguous wrappers are left unnamed (the
+          # phase-1 collision proof — a thin corpus mislabels wrappers). Ordered
+          # arm64-v8a -> aarch64, x86_64 -> x86_64, the two ABIs the app ships.
+          gen() {
+            local abi="$1" triple="$2"
+            local wanted="libc.a libm.a libdl.a libc++_static.a libc++abi.a"
+            local inputs=() present='' missing='' n path
+            for n in $wanted; do
+              path=$(resolve "$triple" "$n")
+              if [ -n "$path" ]; then inputs+=("$path"); present="$present $n"; else missing="$missing $n"; fi
+            done
+            echo "=== $abi ($triple) ==="
+            echo "  present:${present:- none}"
+            echo "  missing:${missing:- none}"
+            if [ ${#inputs[@]} -eq 0 ]; then
+              echo "::error::No bionic/libc++ static archives found for $abi under $sysroot/usr/lib/$triple. Expected some of: $wanted. The NDK layout may have changed."
+              exit 1
+            fi
+            local out="app/src/main/assets/libsig/$abi.nsig"
+            "$RUNNER_TEMP/siggen" "$out" "${inputs[@]}"
+
+            # Fail loudly on an empty database: read the record count straight
+            # from the .nsig header (magic[8] "NOCTSIG1", u32 version, u32 count).
+            local records
+            records=$(python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(16); sys.stdout.write(str(struct.unpack("<I",d[12:16])[0]) if len(d)>=16 and d[:8]==b"NOCTSIG1" else "BADMAGIC")' "$out")
+            if [ "$records" = "BADMAGIC" ]; then
+              echo "::error::$out is not a valid .nsig (wrong magic). siggen wrote a file it cannot read back."
+              exit 1
+            fi
+            if [ "${records:-0}" -le 0 ]; then
+              echo "::error::siggen produced ZERO records for $abi from$present. A shipped-but-empty database would silently name nothing on every device — refusing to continue. Check the archives above are real ar(1) archives of ELF .o for $triple."
+              exit 1
+            fi
+            echo "  $out: $records records, $(stat -c%s "$out") bytes"
+            {
+              echo "- \`$abi\` ($triple): **$records** records from$present"
+              [ -n "$missing" ] && echo "  - shared-only / not in sysroot:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Deterministic success status: without this the function's exit
+            # status is that of the last command above — the [ -n "$missing" ]
+            # test, which is FALSE (1) whenever every archive was present, the
+            # healthy case — and `set -e` would abort the build on it.
+            return 0
+          }
+
+          gen arm64-v8a aarch64-linux-android
+          gen x86_64    x86_64-linux-android
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
