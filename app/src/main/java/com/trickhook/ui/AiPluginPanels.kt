@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
@@ -169,6 +170,8 @@ fun PluginsPanel(vm: StudioViewModel) {
     val ctx = LocalContext.current
     var showLog by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<PluginDef?>(null) }
+    var showHub by remember { mutableStateOf(false) }
+    var showEditor by remember { mutableStateOf(false) }
 
     // Keyed on identity: the log is one immutable String per run, and a value
     // key re-compares every byte of it on every recomposition of the panel.
@@ -194,6 +197,8 @@ fun PluginsPanel(vm: StudioViewModel) {
                 "${vm.plugins.size} installed",
                 color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
             )
+            Spacer(Modifier.weight(1f))
+            HubBarButton("Hub", Icons.Filled.Hub) { showHub = true }
         }
         if (vm.plugins.isEmpty()) {
             Box(
@@ -411,6 +416,17 @@ fun PluginsPanel(vm: StudioViewModel) {
     }
 
     if (showLog) PluginLogSheet(vm) { showLog = false }
+
+    if (showHub) {
+        PluginHubSheet(
+            vm = vm,
+            onNewPlugin = { showHub = false; showEditor = true },
+            onDismiss = { showHub = false }
+        )
+    }
+    if (showEditor) {
+        PluginEditorSheet(vm = vm, onDismiss = { showEditor = false })
+    }
 }
 
 /** The visible, non-transient counterpart to the snackbar's Undo action. */

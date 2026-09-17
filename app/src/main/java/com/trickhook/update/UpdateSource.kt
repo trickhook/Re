@@ -385,3 +385,72 @@ private fun demandOk(c: HttpsURLConnection, repo: String, releaseLookup: Boolean
         else -> throw UpdateException(failGithub(code, c.responseMessage.orEmpty()))
     }
 }
+
+// -------------------------------------------------------------- hub reuse --
+
+/**
+ * A plain HTTPS GET for the Plugin Hub, built on this file's own redirect-checked,
+ * HTTPS-only [connectFollowing] so the hub opens no second network stack and
+ * inherits the same guarantees: HTTPS on every hop, redirects resolved and
+ * re-checked by hand, the platform trust store, the shared User-Agent.
+ *
+ * Returns the raw response bytes, or null when the server answers 404 — which
+ * the registry reads as "not seeded yet" and shows as a calm empty state rather
+ * than a failure. Any other non-OK status, or a transport failure, throws
+ * [UpdateException] carrying a message already written for a human. Nothing here
+ * trusts the bytes: the caller hashes them and verifies the signature.
+ */
+suspend fun httpGetBytes(
+    url: String,
+    accept: String,
+    userAgent: String,
+    maxBytes: Long
+): ByteArray? = withContext(Dispatchers.IO) {
+    val host = hostOf(url)
+    val c = try {
+        connectFollowing(url, accept, userAgent)
+    } catch (e: UpdateException) {
+        throw e
+    } catch (e: UnknownHostException) {
+        throw UpdateException(failOffline(host))
+    } catch (e: SocketTimeoutException) {
+        throw UpdateException(failTimeout(host))
+    } catch (e: SSLException) {
+        throw UpdateException(failNetwork("The secure connection to $host could not be established."))
+    } catch (e: IOException) {
+        throw UpdateException(failNetwork("The connection to $host failed."))
+    }
+    try {
+        val code = c.responseCode
+        if (code == HttpURLConnection.HTTP_NOT_FOUND) return@withContext null
+        if (code != HttpURLConnection.HTTP_OK) {
+            throw UpdateException(failGithub(code, c.responseMessage.orEmpty()))
+        }
+        val out = ByteArrayOutputStream()
+        c.inputStream.use { input ->
+            val buf = ByteArray(16 * 1024)
+            var total = 0L
+            while (true) {
+                ensureActive()
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > maxBytes) {
+                    throw UpdateException(
+                        failNetwork("The file from $host is larger than the hub allows.")
+                    )
+                }
+                out.write(buf, 0, n)
+            }
+        }
+        out.toByteArray()
+    } catch (e: UpdateException) {
+        throw e
+    } catch (e: SocketTimeoutException) {
+        throw UpdateException(failTimeout(host))
+    } catch (e: IOException) {
+        throw UpdateException(failNetwork("The transfer from $host failed."))
+    } finally {
+        c.disconnect()
+    }
+}
