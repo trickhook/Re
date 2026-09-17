@@ -465,6 +465,22 @@ fun StudioApp(vm: StudioViewModel) {
                                 onClick = { showOverflow = false; openFile() }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("Open from installed app…", color = ide.text, fontSize = Type.body)
+                                        Text(
+                                            "a native lib out of an app's own APK splits — no root, no reinstall",
+                                            color = ide.dim, fontSize = Type.caption
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Android, null, tint = ide.dim,
+                                        modifier = Modifier.size(18.dp))
+                                },
+                                onClick = { showOverflow = false; showInstalledApps = true }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Bookmarks & notes", color = ide.text, fontSize = Type.body) },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Star, null, tint = ide.dim,
@@ -688,6 +704,8 @@ fun StudioApp(vm: StudioViewModel) {
     }
 
     CommandPaletteOverlay(vm, openFile, importIda = { importIdaLauncher.launch(arrayOf("*/*")) })
+
+    InstalledAppsSheet(vm)
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
     if (showAnnotations) AnnotationsSheet(vm, onDismiss = { showAnnotations = false })
@@ -1182,6 +1200,30 @@ private fun EmptyState(vm: StudioViewModel, onOpen: () -> Unit, onMoreRecents: (
                     )
                     Text(
                         "a crackme to analyse · running it needs a Shizuku backend",
+                        color = ide.dim2, fontSize = Type.caption
+                    )
+                }
+
+                // Straight into an installed app's own native libraries, without
+                // hunting down and pulling the right split APK by hand. Reads
+                // world-readable bytes only — no root, no reinstall.
+                Spacer(Modifier.height(Space.s))
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = !vm.busy, role = Role.Button) {
+                            showInstalledApps = true
+                        }
+                        .padding(horizontal = Space.m, vertical = Space.s),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "Open from an installed app",
+                        color = ide.accent, fontSize = Type.label,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "find a native lib across an app's split APKs · no root, no reinstall",
                         color = ide.dim2, fontSize = Type.caption
                     )
                 }

@@ -23,6 +23,10 @@ import com.trickhook.mcp.McpRuntime
 import com.trickhook.model.ApkEntry
 import com.trickhook.model.ApkResourceEntry
 import com.trickhook.model.AnalysisMeta
+import com.trickhook.model.AppLibScan
+import com.trickhook.model.AppNativeLib
+import com.trickhook.model.InstalledApp
+import com.trickhook.model.InstalledApps
 import com.trickhook.model.CallEdge
 import com.trickhook.model.CallGraphData
 import com.trickhook.model.ConsoleLine
@@ -249,6 +253,13 @@ class StudioViewModel : ViewModel() {
     var hexData by mutableStateOf<ByteArray?>(null); private set
     var apkEntries by mutableStateOf<List<ApkEntry>>(emptyList()); private set
     var apkResources by mutableStateOf<List<ApkResourceEntry>>(emptyList()); private set
+    // The "open from an installed app" picker's two lists: the installed apps,
+    // and the native-library scan of whichever one the user tapped. Distinct
+    // from the APK tab above, which is about a package Nocturne itself opened.
+    var installedApps by mutableStateOf<List<InstalledApp>>(emptyList()); private set
+    var installedAppsLoading by mutableStateOf(false); private set
+    var installedLibs by mutableStateOf<AppLibScan?>(null); private set
+    var installedLibsLoading by mutableStateOf(false); private set
     var selectedFunc by mutableStateOf<Long?>(null); private set
     var detail by mutableStateOf<FunctionDetail?>(null); private set
     var tab by mutableStateOf(Tab.ASSEMBLY)
@@ -3018,6 +3029,137 @@ class StudioViewModel : ViewModel() {
     /** NonCancellable so a rejected or cancelled APK is still removed. */
     private suspend fun discardUpdate(app: Context) {
         withContext(NonCancellable + Dispatchers.IO) { deleteUpdateApk(app) }
+    }
+
+    // ----------------------------------------------- installed-app libraries --
+    /**
+     * Enumerate installed apps for the "open from an installed app" picker.
+     * Reads only labels and package ids through PackageManager — the same
+     * visibility the debugger's attach picker uses — off the main thread, since
+     * a device-wide package query touches disk. No root, no reinstall: this
+     * reads apps' own shipped APKs, which are world-readable.
+     */
+    fun listInstalledApps(context: Context) {
+        val app = context.applicationContext
+        installedAppsLoading = true
+        viewModelScope.launch {
+            try {
+                val apps = withContext(Dispatchers.IO) { InstalledApps.list(app.packageManager) }
+                installedApps = apps
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "could not list installed apps")
+                installedApps = emptyList()
+            } finally {
+                installedAppsLoading = false
+            }
+        }
+    }
+
+    /** Drop the picker's lists, e.g. when the sheet closes. */
+    fun clearInstalledApps() {
+        installedApps = emptyList()
+        installedLibs = null
+        installedLibsLoading = false
+        installedLibsReq = null
+    }
+
+    /**
+     * The package the most recent [scanInstalledLibs] was asked for. A scan
+     * runs off the main thread and is not cancelled when the user backs out and
+     * picks another app, so its result is applied only while this still names
+     * the app in front of them — otherwise a slow scan of a large app could
+     * land on top of a fast scan of the next one. Read and written on the main
+     * thread only.
+     */
+    private var installedLibsReq: String? = null
+
+    /**
+     * Scan one chosen app's base + split APKs for native libraries and hold the
+     * result for the picker's second step. The result carries the package it is
+     * for, so the sheet can ignore a scan that lands after the user has moved
+     * on. Honest about an empty result — see [AppLibScan.note].
+     */
+    fun scanInstalledLibs(context: Context, pkg: String) {
+        val app = context.applicationContext
+        val abis = Build.SUPPORTED_ABIS.toList()
+        installedLibsReq = pkg
+        installedLibs = null
+        installedLibsLoading = true
+        viewModelScope.launch {
+            val scan = try {
+                withContext(Dispatchers.IO) {
+                    InstalledApps.scanNativeLibs(app.packageManager, pkg, abis)
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "could not read this app's libraries")
+                AppLibScan(
+                    pkg = pkg, ok = false, primaryAbi = abis.firstOrNull() ?: "",
+                    apkCount = 0, readableApkCount = 0, libs = emptyList(),
+                    note = e.message ?: "The app's APKs could not be read."
+                )
+            }
+            // Apply only if this is still the app the user is looking at.
+            if (installedLibsReq == pkg) {
+                installedLibs = scan
+                installedLibsLoading = false
+            }
+        }
+    }
+
+    /**
+     * Open one native library chosen from an installed app. Mirrors
+     * [openApkEntry]: it extracts the single .so entry out of its split APK and
+     * routes it through the same [loadFile] analyse path, so disassembly,
+     * decompilation, strings, xrefs and library-name recognition all light up.
+     */
+    fun openInstalledLib(context: Context, lib: AppNativeLib, appLabel: String) = viewModelScope.launch {
+        val app = context.applicationContext
+        busy = true
+        globalPhase = "Opening ${lib.libName} from $appLabel"
+        try {
+            withContext(Dispatchers.IO) { extractInstalledLib(app, lib, appLabel) }
+            refreshRecents(app)
+        } catch (e: Exception) {
+            log("ERROR", e.message ?: "could not open ${lib.libName}")
+        } finally {
+            busy = false
+            globalPhase = ""
+        }
+    }
+
+    /**
+     * The difference from [extractApkEntry] is the source and the destination.
+     * The source is the app's own split under /data/app, not a copy Nocturne
+     * made, so the extracted bytes are written into cacheDir — that split's own
+     * directory is not writable — under a per-package, per-ABI path, so two apps
+     * shipping the same libName never clobber each other or a recent's cache.
+     */
+    private fun extractInstalledLib(context: Context, lib: AppNativeLib, appLabel: String) {
+        val src = File(lib.splitPath)
+        if (!src.canRead()) {
+            log("ERROR", "Cannot read ${src.absolutePath} — this device may restrict access to that app's APK.")
+            return
+        }
+        ZipFile(src).use { zf ->
+            val zentry = zf.getEntry(lib.entryName) ?: run {
+                log("ERROR", "Entry not found in ${lib.splitName}: ${lib.entryName}")
+                return
+            }
+            val safePkg = lib.pkg.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val safeAbi = lib.abi.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val dir = File(context.cacheDir, "installed/$safePkg/$safeAbi").apply { mkdirs() }
+            val dst = File(dir, lib.libName)
+            zf.getInputStream(zentry).use { ins -> dst.outputStream().use { ins.copyTo(it) } }
+            log(
+                "OK",
+                "Extracted ${lib.libName} from $appLabel [${lib.pkg}] · " +
+                    "${lib.splitName} (${lib.abi}) · ${humanSize(dst.length())}"
+            )
+            // fromApk = false: no package is open in the APK tab here, so its
+            // stale manifest and entry list are cleared rather than left
+            // standing beside a library that came from somewhere else.
+            loadFile(dst, "${lib.libName} — $appLabel", fromApk = false)
+        }
     }
 
     // -------------------------------------------------------------- helpers --

@@ -147,6 +147,10 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                     buildList {
                         add(Command("Open file (APK/ELF/EXE/DEX)", "pick a binary to analyse", "Ctrl+O", openFile))
                         add(Command(
+                            "Open native lib from installed app",
+                            "reads an installed app's own split APKs — no root, no reinstall", ""
+                        ) { showInstalledApps = true })
+                        add(Command(
                             "Load bundled test target",
                             "a crackme to analyse and defeat · running it needs a Shizuku backend",
                             ""
