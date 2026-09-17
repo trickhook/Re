@@ -631,9 +631,16 @@ class McpTools(allowWrites: Boolean) {
             else "file offsets — this format is read as a flat file, so an address is an offset"
         )
 
+        // Two numbers per capped list, never one. `functions` is what this app
+        // holds and can answer questions about; `functionsFound` is what the
+        // engine discovered. They differ by a factor of eight on a large
+        // library, and a model handed only the first has been told a floor is
+        // a count -- which is exactly the failure this pair exists to stop.
         val counts = JSONObject()
         counts.put("functions", m.functions.size)
+        counts.put("functionsFound", maxOf(m.functionsTotal, m.functions.size))
         counts.put("strings", m.strings.size)
+        counts.put("stringsFound", maxOf(m.stringsTotal, m.strings.size))
         counts.put("imports", m.imports.size)
         counts.put("exports", m.exports.size)
         counts.put("sections", m.sections.size)
@@ -641,8 +648,28 @@ class McpTools(allowWrites: Boolean) {
         counts.put("callEdges", m.callEdges.size)
         counts.put("callEdgesFound", maxOf(m.callEdgesTotal, m.callEdges.size))
         counts.put("callSites", m.callSitesTotal)
-        if (m.dexClasses.isNotEmpty()) counts.put("dexClasses", m.dexClasses.size)
-        if (m.dexMethods.isNotEmpty()) counts.put("dexMethods", m.dexMethods.size)
+        // The reference map caps at 200,000 and held 200,000 of 1,323,435 on a
+        // real library. Above that every `callers`/`callees` this server emits
+        // is a floor, and this pair is where a reader finds that out.
+        counts.put("xrefsStored", m.xrefsStored)
+        counts.put("xrefsFound", maxOf(m.xrefsTotal, m.xrefsStored))
+        if (m.demangleFailed > 0) counts.put("demangleFailed", m.demangleFailed)
+        if (m.dexClasses.isNotEmpty()) {
+            counts.put("dexClasses", m.dexClasses.size)
+            counts.put("dexClassesFound", maxOf(m.dexClassesTotal, m.dexClasses.size))
+        }
+        if (m.dexMethods.isNotEmpty()) {
+            counts.put("dexMethods", m.dexMethods.size)
+            counts.put("dexMethodsFound", maxOf(m.dexMethodsTotal, m.dexMethods.size))
+        }
+        if (m.xrefsAreFloors) {
+            out.put(
+                "referenceCountsAreFloors",
+                "The engine's cross-reference map holds ${m.xrefsStored} of the " +
+                    "${m.xrefsTotal} references it found, so every callers/callees " +
+                    "count in this server's answers is a lower bound, not a total."
+            )
+        }
         out.put("counts", counts)
 
         val sections = JSONArray()
@@ -698,9 +725,12 @@ class McpTools(allowWrites: Boolean) {
         }
         if (m.notes.isNotEmpty()) out.put("engineNotes", JSONArray(m.notes))
 
+        val fnFound = maxOf(m.functionsTotal, m.functions.size)
         return Outcome(
             out,
-            "${m.name} · ${m.format} ${m.arch} · ${m.functions.size} functions"
+            "${m.name} · ${m.format} ${m.arch} · " +
+                (if (fnFound > m.functions.size) "${m.functions.size} of $fnFound functions"
+                else "${m.functions.size} functions")
         )
     }
 
@@ -746,6 +776,20 @@ class McpTools(allowWrites: Boolean) {
         val out = JSONObject().put("functions", arr)
         paginate(out, rows.size, w, page.size)
         if (q.isNotEmpty()) out.put("query", q)
+        // `total` above counts the rows this app HOLDS. When the engine found
+        // more than have been loaded, a query that returns nothing does not
+        // mean the binary has nothing -- say so rather than let the absence
+        // read as an answer.
+        val found = maxOf(m.functionsTotal, m.functions.size)
+        if (found > m.functions.size) {
+            out.put("functionsLoaded", m.functions.size)
+            out.put("functionsFound", found)
+            out.put(
+                "coverage",
+                "Searched the ${m.functions.size} functions loaded; the engine found $found. " +
+                    "Load the rest in the app's Functions tab before concluding a name is absent."
+            )
+        }
         val note = if (q.isEmpty()) "" else " matching \"$q\""
         return Outcome(out, "${page.size} of ${rows.size}" + note)
     }
@@ -773,6 +817,16 @@ class McpTools(allowWrites: Boolean) {
         val out = JSONObject().put("strings", arr)
         paginate(out, rows.size, w, page.size)
         if (q.isNotEmpty()) out.put("query", q)
+        val found = maxOf(m.stringsTotal, m.strings.size)
+        if (found > m.strings.size) {
+            out.put("stringsLoaded", m.strings.size)
+            out.put("stringsFound", found)
+            out.put(
+                "coverage",
+                "Searched the ${m.strings.size} strings this analysis carries; " +
+                    "the engine found $found."
+            )
+        }
         val note = if (q.isEmpty()) "" else " matching \"$q\""
         return Outcome(out, "${page.size} of ${rows.size}" + note)
     }
@@ -818,9 +872,23 @@ class McpTools(allowWrites: Boolean) {
             .put("size", fn.size)
             .put("arch", d.arch)
             .put("blocks", d.blocks.size)
+            .put("blocksFound", maxOf(d.blocksTotal, d.blocks.size))
             .put("instructions", arr)
         if (asked != fn.addr) {
             out.put("note", "${hx(asked)} is inside this function, which starts at ${hx(fn.addr)}.")
+        }
+        // `total` from paginate() is the number of instructions this listing
+        // HAS, and the listing is a window: a body larger than the engine's asm
+        // window stops early. Without this a caller reads the last instruction
+        // it was given as the last instruction of the function.
+        if (d.asmTruncated) {
+            out.put("listingTruncated", true)
+            out.put("bytesDisassembled", d.asmBytes)
+            out.put(
+                "coverage",
+                "The disassembler covered ${d.asmBytes} of this function's ${d.size} bytes; " +
+                    "the instructions here stop before the end of it."
+            )
         }
         paginate(out, d.asm.size, w, page.size)
         return Outcome(out, "${effectiveName(fn.addr)} · ${page.size} of ${d.asm.size} instructions")
@@ -840,6 +908,7 @@ class McpTools(allowWrites: Boolean) {
             .put("arch", d.arch)
             .put("pseudoMode", d.pseudoMode)
             .put("blocks", d.blocks.size)
+            .put("blocksFound", maxOf(d.blocksTotal, d.blocks.size))
             .put("callers", maxOf(d.nCallers, d.xrefsInTotal))
             .put("callees", maxOf(d.nCallees, d.xrefsOutTotal))
         d.irStats?.let {
@@ -928,16 +997,29 @@ class McpTools(allowWrites: Boolean) {
                         .put("size", f.size)
                 )
             }
+            // "busiest" is ranked over the functions this app HOLDS, and the
+            // ranking key is a degree taken from a capped reference map. Both
+            // caveats belong in the answer: the real busiest function of a
+            // 98,022-function binary may well be in a page nobody loaded.
+            val fnFound = maxOf(m.functionsTotal, m.functions.size)
             val out = JSONObject()
                 .put("scope", "whole binary")
-                .put("functionsTotal", m.functions.size)
+                .put("functionsRanked", m.functions.size)
+                .put("functionsTotal", fnFound)
                 .put("callEdgesFound", maxOf(m.callEdgesTotal, m.callEdges.size))
                 .put("callSitesTotal", m.callSitesTotal)
                 .put("busiestFunctions", arr)
                 .put(
                     "note",
                     "The whole graph is too large to return. Pass `address` to walk a " +
-                        "neighbourhood of one function."
+                        "neighbourhood of one function." +
+                        (if (fnFound > m.functions.size)
+                            " Ranked over the ${m.functions.size} functions loaded, of $fnFound found."
+                        else "") +
+                        (if (m.xrefsAreFloors)
+                            " Caller and callee counts are floors: the reference map holds " +
+                                "${m.xrefsStored} of ${m.xrefsTotal}."
+                        else "")
                 )
             return Outcome(out, "whole binary · ${hubs.size} busiest of ${m.functions.size}")
         }
@@ -1095,9 +1177,12 @@ class McpTools(allowWrites: Boolean) {
             throw Failure("The emulator answered with something that is not JSON: ${raw.take(300)}")
         }
         val out = JSONObject()
+        // useropsDropped rides along with the rest: the emulator's name table
+        // holds 64 distinct p-code operations and silently discarded the 65th,
+        // so `userops` below was itself a floor. It counts them now.
         for (k in listOf(
             "ok", "stop", "detail", "approximate", "instructions", "ms", "backend",
-            "retReg", "ret", "dirtyBytes", "memoryTruncated", "callsTotal"
+            "retReg", "ret", "dirtyBytes", "memoryTruncated", "callsTotal", "useropsDropped"
         )) {
             if (parsed.has(k)) out.put(k, parsed.get(k))
         }

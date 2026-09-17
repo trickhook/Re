@@ -28,6 +28,8 @@ import com.trickhook.model.ConsoleLine
 import com.trickhook.model.DbgState
 import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
+import com.trickhook.model.ExportProgress
+import com.trickhook.model.ExportResult
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
 import com.trickhook.model.IdaAnnotations
@@ -45,6 +47,9 @@ import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
 import com.trickhook.model.parseDetail
+import com.trickhook.model.parseExportProgress
+import com.trickhook.model.parseExportResult
+import com.trickhook.model.parseFunctionPage
 import com.trickhook.model.parseHexAddr
 import com.trickhook.model.parseIdcAnnotations
 import com.trickhook.model.parseMeta
@@ -72,6 +77,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -149,6 +155,76 @@ private fun edgeCount(m: AnalysisMeta): String =
     if (m.callEdgesTotal > m.callEdges.size)
         "${m.callEdges.size} of ${m.callEdgesTotal} call edges"
     else "${m.callEdges.size} call edges"
+
+/**
+ * The same shape for the other three, which until now printed a floor as a
+ * count. `functions` is one page of `functionsTotal`, `strings` stops at the
+ * engine's cap, and both used to render as `list.size` with nothing beside it —
+ * which is precisely the bug: 12,000 read as "this binary has 12,000
+ * functions" when it has 98,022.
+ */
+private fun functionCount(m: AnalysisMeta): String =
+    if (m.functionsTotal > m.functions.size)
+        "${m.functions.size} of ${m.functionsTotal} functions"
+    else "${m.functions.size} functions"
+
+private fun stringCount(m: AnalysisMeta): String =
+    if (m.stringsTotal > m.strings.size)
+        "${m.strings.size} of ${m.stringsTotal} strings"
+    else "${m.strings.size} strings"
+
+/**
+ * How many functions one [StudioViewModel.loadMoreFunctions] press asks for.
+ * The engine clamps anything above 20000 and reports what it really sent, so
+ * this is the largest page that is never silently cut.
+ */
+private const val FUNCTION_PAGE = 20_000L
+
+/**
+ * A guard on the "load the rest" walk, not a cap on the answer: it bounds a
+ * loop whose termination depends on the engine answering `count:0`, so a bug
+ * or a future engine that keeps answering cannot spin forever. At 20,000 a
+ * page this allows 4,000,000 functions, which no real binary approaches.
+ */
+private const val FUNCTION_PAGE_LIMIT = 200
+
+/**
+ * How often the export progress is read. The export runs for minutes and the
+ * numbers it moves are whole functions, so four reads a second is already more
+ * than the eye needs and far less than one JNI call is worth worrying about.
+ */
+private const val EXPORT_POLL_MS = 250L
+
+/** What the user was asked for, in the words the sheet and the console share. */
+fun exportScopeNoun(kind: String): String = when (kind) {
+    "c-one" -> "function"
+    "h-all" -> "header stub"
+    "asm-all" -> "assembly listing"
+    else -> "decompiled source"
+}
+
+/**
+ * One sentence for a finished export.
+ *
+ * Failures are not an error state and the wording must not imply they are: a
+ * function the decompiler refuses is given its banner and a marker in the file
+ * where a reader will see it, and the run carries on. 5,299 written with 64
+ * marked is a run that SUCCEEDED — before the engine change, one refusal ended
+ * the whole export.
+ *
+ * A cancelled run is the same: the file is valid, it says in its own trailer
+ * where it stops, and nothing already written was lost.
+ */
+fun exportSummary(kind: String, r: ExportResult): String {
+    val what = exportScopeNoun(kind)
+    val head =
+        if (r.cancelled) "Stopped after ${r.functions} of ${r.total} functions — the file is complete up to there and says so"
+        else "Exported $what · ${r.functions} functions"
+    val marked =
+        if (r.failed > 0) " · ${r.failed} could not be decompiled and are marked in the file" else ""
+    val size = if (r.bytes > 0) " · ${humanBytes(r.bytes)}" else ""
+    return head + marked + size
+}
 
 class StudioViewModel : ViewModel() {
 
@@ -566,8 +642,9 @@ class StudioViewModel : ViewModel() {
                 reindex()
                 log(
                     "OK",
-                    "${m.format} · ${m.arch.ifEmpty { "-" }} · ${m.functions.size} functions · " +
-                        edgeCount(m) + " · ${m.strings.size} strings · backend: ${m.backend.ifEmpty { "-" }}"
+                    "${m.format} · ${m.arch.ifEmpty { "-" }} · " + functionCount(m) + " · " +
+                        edgeCount(m) + " · " + stringCount(m) +
+                        " · backend: ${m.backend.ifEmpty { "-" }}"
                 )
                 m.notes.forEach { log("INFO", it) }
                 selectedFunc = null
@@ -878,6 +955,22 @@ class StudioViewModel : ViewModel() {
         else calleesOf(d.addr).size
 
     /**
+     * True when EVERY reference count in the app is a floor rather than a
+     * count.
+     *
+     * The engine's xref map stops at 200,000 references, and on a real library
+     * it held 200,000 of 1,323,435 — 85% dropped. Storing them all was measured
+     * and costs 737 MB against 294 MB, so the cap stays; what changes is that
+     * it now says so, and every screen that prints a number taken from that map
+     * has to say so too. [xrefInCount], [xrefOutCount], `nCallers`, `nCallees`
+     * and the call-graph index all come off it.
+     *
+     * The UI reads it through `floorCount`, which is what turns 561 into
+     * "561+", and `xrefFloorNote`, which is the one sentence that says why.
+     */
+    val xrefsAreFloors: Boolean get() = meta?.xrefsAreFloors == true
+
+    /**
      * Virtual address to offset in the file on disk. The hex view highlighted
      * the wrong bytes for every binary with a non-zero load address because it
      * used the VA directly.
@@ -894,6 +987,118 @@ class StudioViewModel : ViewModel() {
         return renames[key]
             ?: functionAt(addr)?.name
             ?: "sub_" + key.removePrefix("0x").lowercase()
+    }
+
+    // ------------------------------------------------------- function paging --
+    /**
+     * `analyze` hands back the first 12,000 functions and says how many there
+     * are; these two walk the rest. One page at a time or all of them, because
+     * "the rest" of a 200,000-function binary is a minute of engine time and
+     * the user should be the one who decides to spend it.
+     */
+    var funcPageBusy by mutableStateOf(false); private set
+
+    /** Rows loaded while [funcPageBusy], for the footer's own progress line. */
+    var funcPageLoaded by mutableStateOf(0); private set
+
+    /**
+     * Append the next page of functions, or every remaining page when [all].
+     *
+     * The loop advances by the RETURNED count, never by what was asked for: the
+     * engine clamps a request above 20,000 and says what it really sent, so
+     * advancing by the request would step straight over rows. A page that comes
+     * back empty is the end of the walk and not a failure.
+     *
+     * Appending only ever adds to the END of a list that is already in
+     * ascending address order, so nothing on screen moves and no scroll
+     * position is invalidated.
+     */
+    fun loadMoreFunctions(all: Boolean = false) {
+        val path = currentPath ?: return
+        val m0 = meta ?: return
+        if (funcPageBusy) return
+        if (m0.functionsPending == 0) return
+        // A page takes the engine mutex, and the export holds it for minutes.
+        // Queuing behind it would look exactly like a hang, and the user has
+        // no way to tell which of the two they are waiting on.
+        if (exportBusy) {
+            log("WARN", "An export has the engine. Load the rest once it has finished.")
+            return
+        }
+        funcPageBusy = true
+        funcPageLoaded = 0
+        globalPhase = if (all) "Loading all functions" else "Loading functions"
+        viewModelScope.launch {
+            var added = 0
+            var failure: String? = null
+            try {
+                // The whole walk runs off the main thread, append and reindex
+                // included: reindex() sorts the list it is handed, and at
+                // 98,022 functions that is not a main-thread sort. Snapshot
+                // state is safe to write from here — loadFile already assigns
+                // `meta` and reindexes from this same dispatcher.
+                withContext(Dispatchers.IO) {
+                    var pages = 0
+                    while (true) {
+                        // Re-read inside the loop: `meta` is what the append
+                        // writes to, so the offset has to come from the object
+                        // that is actually there now rather than from a
+                        // snapshot taken before the previous page landed.
+                        val m = meta ?: break
+                        if (m.functions.size >= m.functionsTotal) break
+                        val offset = m.functions.size.toLong()
+                        val page = parseFunctionPage(
+                            NativeBridge.nativeFunctionPage(path, offset, FUNCTION_PAGE)
+                        )
+                        if (!page.ok) { failure = page.error ?: "function page failed"; break }
+                        // An empty page is how the engine says "past the end".
+                        if (page.count == 0 || page.functions.isEmpty()) break
+                        // Between the request and the answer the user may have
+                        // opened another binary. Dropping the page is the only
+                        // correct move: these rows belong to a file that is no
+                        // longer open.
+                        val cur = meta
+                        if (cur == null || currentPath != path) break
+                        meta = cur.copy(
+                            functions = cur.functions + page.functions,
+                            functionsTotal = maxOf(cur.functionsTotal, page.functionsTotal),
+                            functionsCount = cur.functionsCount + page.count,
+                            demangleFailed = cur.demangleFailed + page.demangleFailed
+                        )
+                        reindex()
+                        added += page.count
+                        funcPageLoaded = added
+                        pages++
+                        if (!all) break
+                        if (pages >= FUNCTION_PAGE_LIMIT) {
+                            failure = "stopped after $pages pages — the engine kept answering"
+                            break
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                failure = e.message ?: "function page error"
+            } finally {
+                funcPageBusy = false
+                funcPageLoaded = 0
+                globalPhase = ""
+            }
+            val m = meta
+            // Copied into a val first: `failure` is a local captured and
+            // written by the closure above, and Kotlin will not smart-cast one
+            // of those to String no matter how the null check is spelled.
+            val err = failure
+            when {
+                err != null -> log("ERROR", err)
+                added == 0 -> log("INFO", "No more functions — the list is complete")
+                m != null -> log(
+                    "OK",
+                    "Loaded $added more · " + functionCount(m) +
+                        (if (m.functionsPending == 0) " · complete" else "")
+                )
+                else -> log("OK", "Loaded $added more functions")
+            }
+        }
     }
 
     // --------------------------------------------------------- function view --
@@ -996,6 +1201,105 @@ class StudioViewModel : ViewModel() {
 
     var exportBusy by mutableStateOf(false); private set
 
+    /**
+     * What the running export is doing, polled off `nativeExportProgress`.
+     *
+     * Held apart from [exportBusy] because it ticks several times a second for
+     * minutes, and because the export is the one operation in the app that
+     * blocks every other native call for its whole run: without a number
+     * moving on screen the app is indistinguishable from a hang.
+     *
+     * Non-null from the moment an export starts until the sheet is dismissed,
+     * so the final figures survive the run and can be read afterwards.
+     */
+    var exportProgress by mutableStateOf<ExportProgress?>(null); private set
+
+    /** What the finished run produced, or null while one is still in flight. */
+    var exportResult by mutableStateOf<ExportResult?>(null); private set
+
+    /** Which of c-one / c-all / h-all / asm-all is running. "" when none is. */
+    var exportKindRunning by mutableStateOf(""); private set
+
+    /** Wall clock for the run, so a long export can show its own elapsed time. */
+    var exportStartMs by mutableLongStateOf(0L); private set
+
+    /** True once [stopExport] has been called and before the run notices. */
+    var exportStopping by mutableStateOf(false); private set
+
+    /** The poll timer. Cancelled when the run ends, never outlives it. */
+    private var exportPollJob: Job? = null
+
+    /**
+     * Ask the export to stop.
+     *
+     * `nativeExportStop` is lock-free, which is the only reason this can be
+     * called at all: the export holds the engine mutex for its whole run, so
+     * anything that took the mutex would answer after the export was over.
+     *
+     * Cancellation is checked between functions, so the run does not end on
+     * this line — it ends at the next function boundary, and what it has
+     * already written stays written.
+     */
+    fun stopExport() {
+        if (!exportBusy || exportStopping) return
+        exportStopping = true
+        try {
+            NativeBridge.nativeExportStop()
+            log("INFO", "Stopping the export — it finishes the function it is on")
+        } catch (e: Throwable) {
+            log("ERROR", "Could not stop the export: ${e.message}")
+        }
+    }
+
+    /**
+     * Put the progress panel away. The run, if one is still going, is NOT
+     * affected: this only clears what is on screen.
+     */
+    fun dismissExportProgress() {
+        if (exportBusy) return
+        exportProgress = null
+        exportResult = null
+        exportKindRunning = ""
+        exportStartMs = 0L
+    }
+
+    /**
+     * Poll `nativeExportProgress` on a timer for as long as the run lasts.
+     *
+     * Main thread on purpose: the call is lock-free and cheap, and hopping to
+     * IO for it would put it behind the export on the very dispatcher the
+     * export is occupying.
+     */
+    private fun startExportPoll() {
+        exportPollJob?.cancel()
+        exportPollJob = viewModelScope.launch {
+            while (exportBusy) {
+                val tick = try {
+                    parseExportProgress(NativeBridge.nativeExportProgress())
+                } catch (e: Throwable) {
+                    // A progress read that throws is not worth ending the
+                    // export over; the run reports itself when it finishes.
+                    null
+                }
+                if (tick == null) break
+                // The engine raises its own running flag a moment after
+                // exportBusy goes up here, and until it does the counters still
+                // hold the PREVIOUS run's final figures. Showing those would be
+                // a progress bar counting somebody else's work.
+                if (tick.running) exportProgress = tick
+                delay(EXPORT_POLL_MS)
+            }
+            // One last read after the flag drops: the engine leaves the final
+            // figures in place with running:false, so this is the result rather
+            // than a stale tick from halfway through.
+            try {
+                exportProgress = parseExportProgress(NativeBridge.nativeExportProgress())
+            } catch (e: Throwable) {
+                // Keep whatever the last successful poll saw.
+            }
+        }
+    }
+
     /** Default filename offered to the file picker for each export kind. */
     fun suggestedExportName(kind: String): String {
         val stem = (meta?.name ?: "binary").substringBeforeLast('.')
@@ -1042,6 +1346,13 @@ class StudioViewModel : ViewModel() {
             return
         }
         exportBusy = true
+        exportStopping = false
+        exportResult = null
+        exportKindRunning = kind
+        exportStartMs = System.currentTimeMillis()
+        // Seeded rather than left null, so the sheet opens with a line of text
+        // instead of a blank while the first poll is still 250 ms away.
+        exportProgress = ExportProgress(running = true, done = 0, total = 0, failed = 0, cancelling = false)
         val backend = if (decompiler == "ghidra" && sleighReady) "Ghidra" else "IR lifter"
         val scope = when (kind) {
             "c-one" -> "function"; "h-all" -> "header stub"; "asm-all" -> "assembly listing"
@@ -1051,16 +1362,21 @@ class StudioViewModel : ViewModel() {
         globalPhase = "Exporting"
         decompileTargetName = meta?.name ?: ""
         decompileStartMs = System.currentTimeMillis()
+        startExportPoll()
         viewModelScope.launch(Dispatchers.IO) {
             val tmp = File(context.cacheDir, "export.tmp")
             try {
                 val addr = selectedFunc ?: 0L
-                val status = NativeBridge.nativeExportSource(path, kind, addr, tmp.absolutePath)
-                val ok = Regex("\"ok\"\\s*:\\s*true").containsMatchIn(status)
-                if (!ok) {
-                    val err = Regex("\"error\"\\s*:\\s*\"([^\"]*)\"")
-                        .find(status)?.groupValues?.get(1) ?: "export failed"
-                    log("ERROR", err)
+                // Blocking, for minutes on a large binary, and holding the
+                // engine mutex the whole time. Nothing else native can answer
+                // until it returns except the progress and stop calls, which
+                // are lock-free precisely so that they can.
+                val res = parseExportResult(
+                    NativeBridge.nativeExportSource(path, kind, addr, tmp.absolutePath)
+                )
+                exportResult = res
+                if (!res.ok) {
+                    log("ERROR", res.error ?: "export failed")
                     return@launch
                 }
                 val produced = tmp.length()
@@ -1080,23 +1396,14 @@ class StudioViewModel : ViewModel() {
                     log("ERROR", "Short write: $copied of $produced bytes reached the file")
                     return@launch
                 }
-                val fns = Regex("\"functions\"\\s*:\\s*(\\d+)").find(status)?.groupValues?.get(1)
-                val bytes = Regex("\"bytes\"\\s*:\\s*(\\d+)").find(status)?.groupValues?.get(1)?.toLongOrNull()
-                val what = when (kind) {
-                    "c-one" -> "function"
-                    "h-all" -> "header"
-                    "asm-all" -> "assembly listing"
-                    else -> "source"
-                }
-                log("OK", "Exported $what" +
-                        (fns?.let { " · $it functions" } ?: "") +
-                        (bytes?.let { " · ${humanBytes(it)}" } ?: ""))
+                log(if (res.cancelled) "WARN" else "OK", exportSummary(kind, res))
             } catch (e: Exception) {
                 log("ERROR", "export failed: ${e.message}")
             } finally {
                 tmp.delete()
                 exportBusy = false
                 withContext(Dispatchers.Main) {
+                    exportStopping = false
                     decompilePhase = ""
                     decompileTargetName = ""
                     decompileStartMs = 0L
@@ -1549,6 +1856,15 @@ class StudioViewModel : ViewModel() {
                 val s = withContext(Dispatchers.IO) { parseDbg(dbgSend(backend, json)) }
                 if (s.ok) {
                     dbgState = mergeDbg(dbgState, s)
+                    // The event ring drops 500 at a time at 2000 and used to
+                    // say nothing, so a session that ate 500 stops showed one
+                    // that never happened beside one it ate. The gap goes in
+                    // the log IN ORDER, before the events that survived it,
+                    // because that is where the missing ones were.
+                    if (s.eventsDropped > 0) {
+                        dbgEvents = dbgEvents +
+                            Pair(now(), "— ${s.eventsDropped} earlier events dropped, the ring was full —")
+                    }
                     if (s.events.isNotEmpty()) {
                         val lines = s.events.map { ev ->
                             when (ev.type) {

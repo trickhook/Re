@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -32,12 +33,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Functions
 import androidx.compose.material.icons.filled.Grid4x4
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -181,6 +184,10 @@ private fun panelJumpToHex(vm: StudioViewModel, fileOffset: Long) {
 fun StringsPanel(vm: StudioViewModel) {
     val ide = LocalIde.current
     val all = vm.meta?.strings ?: emptyList()
+    // What the engine HOLDS, which is not what it sent: the array stops at
+    // 3,000 and the total comes back beside it. `all.size` alone printed a cap
+    // in the voice of a measurement.
+    val total = (vm.meta?.stringsTotal ?: 0).coerceAtLeast(all.size)
     val query = vm.stringQuery
     // Keyed on identity and size, never on the list itself: AnalysisMeta and
     // every list it holds are data classes, so `remember(all, query)` deep-
@@ -196,39 +203,57 @@ fun StringsPanel(vm: StudioViewModel) {
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(
+        // A Column around the search row, the shape the Functions header
+        // already has, so the truncation line below sits inside the same
+        // surface instead of under its border as a second block.
+        Column(
             Modifier
                 .fillMaxWidth()
                 .surface2(RectangleShape)
-                .padding(horizontal = Space.m, vertical = Space.s),
-            verticalAlignment = Alignment.CenterVertically
+                .animateContentSize(tween(motionMs()))
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { vm.stringQuery = it },
-                label = { Text("Search strings") },
-                singleLine = true,
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { vm.stringQuery = "" }) {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = "Clear the search",
-                                tint = ide.dim
-                            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Space.m, vertical = Space.s),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { vm.stringQuery = it },
+                    label = { Text("Search strings") },
+                    singleLine = true,
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { vm.stringQuery = "" }) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Clear the search",
+                                    tint = ide.dim
+                                )
+                            }
                         }
-                    }
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .semantics { contentDescription = "Search strings" },
-                textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
-            )
-            Spacer(Modifier.width(Space.m))
-            Text(
-                if (query.isBlank()) "${all.size}" else "${hits.size}/${all.size}",
-                color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
-            )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "Search strings" },
+                    textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
+                )
+                Spacer(Modifier.width(Space.m))
+                Text(
+                    if (query.isBlank()) ofTotal(all.size, total) else "${hits.size}/${all.size}",
+                    color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
+                )
+            }
+            if (total > all.size) {
+                TruncationNote(
+                    "Showing ${all.size} of $total strings the engine found" +
+                        (if (query.isNotBlank()) " — the search covers those ${all.size}." else "."),
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = Space.l, end = Space.l, bottom = Space.m)
+                )
+            }
         }
         when {
             // Still reading the file. Ghost rows in the shape of the list say
@@ -247,7 +272,9 @@ fun StringsPanel(vm: StudioViewModel) {
             ) {
                 EmptyPanel(
                     "No string matches \"$query\"",
-                    "${all.size} strings in this binary, none containing that text."
+                    if (total > all.size)
+                        "None of the ${all.size} strings loaded contains that text; the engine found $total."
+                    else "${all.size} strings in this binary, none containing that text."
                 )
                 TextButton(onClick = { vm.stringQuery = "" }) {
                     Text("Clear search", color = ide.accent, fontSize = Type.label)
@@ -342,6 +369,14 @@ private const val MODE_IMPORTS = "imports"
 private const val MODE_EXPORTS = "exports"
 
 /**
+ * Rows one "load more" press asks for. It matches the engine's own page
+ * maximum, so the button's label and what arrives are the same number — the
+ * engine clamps anything larger and the walk would then advance by a smaller
+ * count than the label promised.
+ */
+private const val FUNCTION_PAGE_ROWS = 20_000
+
+/**
  * The three symbol tables of a binary — functions, imports, exports — behind
  * one toggle.
  *
@@ -376,15 +411,25 @@ fun FunctionsPanel(vm: StudioViewModel) {
         else -> emptyList()
     }
     val total = if (funcsMode) funcs.size else symbols.size
+    // What the engine DISCOVERED, against what has been handed over so far.
+    // `analyze` carries the first 12,000 and says how many there are; the rest
+    // arrive a page at a time through the footer below. Before this the panel
+    // showed the page size as if it were the count.
+    val funcsTotal = (meta?.functionsTotal ?: 0).coerceAtLeast(funcs.size)
+    val funcsPending = funcsTotal - funcs.size
 
     // Deliberately NOT memoized: the match reads `renames`, and a rename that
     // leaves the map the same size would leave a remembered list stale while
     // the name on the row had already changed. The predicate is the palette's,
     // character for character, so that "Show all 412" and the list it opens
     // cannot disagree about 412.
+    //
+    // An empty query builds no list at all. `funcs.indices.toList()` boxed one
+    // Integer per function on every recomposition, which was 4,000 before the
+    // cap came off and is 98,022 after it; the unfiltered branch of the list
+    // below indexes `funcs` directly instead.
     val funcHits: List<Int> = when {
-        !funcsMode || funcs.isEmpty() -> emptyList()
-        query.isBlank() -> funcs.indices.toList()
+        !funcsMode || funcs.isEmpty() || query.isBlank() -> emptyList()
         else -> funcs.indices.filter {
             funcs[it].name.contains(query, ignoreCase = true) ||
                 vm.effectiveFuncName(funcs[it].addr).contains(query, ignoreCase = true)
@@ -406,7 +451,11 @@ fun FunctionsPanel(vm: StudioViewModel) {
             }
         }
     }
-    val shown = if (funcsMode) funcHits.size else symHits.size
+    val shown = when {
+        !funcsMode -> symHits.size
+        query.isBlank() -> funcs.size
+        else -> funcHits.size
+    }
 
     val noun = when (mode) {
         MODE_IMPORTS -> "import"
@@ -417,6 +466,15 @@ fun FunctionsPanel(vm: StudioViewModel) {
     // nowhere; each belongs to the mode that explains what it is.
     val note = when {
         meta == null -> ""
+        // Functions mode leads with the load state, because a list that is one
+        // page of 98,022 changes what every other number on this screen means
+        // — including the search, which can only match what is loaded.
+        funcsMode && funcsPending > 0 ->
+            "$funcsPending more functions found and not loaded yet" +
+                (if (query.isNotBlank()) " — this search covers the ${funcs.size} loaded" else "") +
+                (if (meta.demangleFailed > 0) " · ${meta.demangleFailed} names would not demangle" else "")
+        funcsMode && meta.demangleFailed > 0 ->
+            "${meta.demangleFailed} of ${funcs.size} names could not be demangled and are shown raw"
         mode == MODE_IMPORTS && meta.needed.isNotEmpty() ->
             "resolved at load time from " + meta.needed.joinToString(" · ")
         mode == MODE_EXPORTS && meta.soName.isNotEmpty() -> "SONAME " + meta.soName
@@ -462,7 +520,11 @@ fun FunctionsPanel(vm: StudioViewModel) {
                 )
                 Spacer(Modifier.width(Space.m))
                 Text(
-                    if (query.isBlank()) "$total" else "$shown/$total",
+                    when {
+                        !query.isBlank() -> "$shown/$total"
+                        funcsMode -> ofTotal(funcs.size, funcsTotal)
+                        else -> "$total"
+                    },
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
                 )
             }
@@ -474,7 +536,10 @@ fun FunctionsPanel(vm: StudioViewModel) {
                     .selectableGroup(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ModeChip("Functions", funcs.size, funcsMode, ide.accent) {
+                // The chip carries the TOTAL, not the page: it is a label for
+                // the whole table, and the header count beside the search box
+                // is where "12000 of 98022" belongs.
+                ModeChip("Functions", funcsTotal, funcsMode, ide.accent) {
                     vm.symbolsMode = MODE_FUNCTIONS
                 }
                 Spacer(Modifier.width(Space.s))
@@ -516,14 +581,106 @@ fun FunctionsPanel(vm: StudioViewModel) {
             shown == 0 -> SymbolsNoMatch(vm, query, mode, funcsMode, noun, total, funcs, imports, exports)
 
             funcsMode -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
-                items(funcHits.size, key = { funcHits[it] }) { i ->
-                    FunctionRow(vm, funcs[funcHits[i]], rowMotion())
+                // Two branches over one key space — the index into `funcs` —
+                // so a row keeps its identity when a search is cleared, and an
+                // appended page extends the list at the end without disturbing
+                // a single key above it. That is what keeps the scroll position
+                // where the user left it across a page load.
+                if (query.isBlank()) {
+                    items(funcs.size, key = { it }) { i ->
+                        FunctionRow(vm, funcs[i], rowMotion())
+                    }
+                } else {
+                    items(funcHits.size, key = { funcHits[it] }) { i ->
+                        FunctionRow(vm, funcs[funcHits[i]], rowMotion())
+                    }
+                }
+                if (funcsPending > 0 || vm.funcPageBusy) {
+                    item(key = "morefns") { FunctionsPageFooter(vm, funcs.size, funcsTotal) }
                 }
             }
 
             else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
                 items(symHits.size, key = { symHits[it] }) { i ->
                     SymbolRow(vm, symbols[symHits[i]], mode == MODE_EXPORTS, rowMotion())
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The last row of the function list, and the answer to the question the list
+ * can no longer avoid: there are more functions than are on screen.
+ *
+ * Why an explicit control rather than infinite scroll. A page costs the engine
+ * mutex, which is the same lock the decompiler and every other native call
+ * take, so a load is not free and should not be triggered by a flick. And the
+ * list is searchable: auto-loading while someone types would change the corpus
+ * under their query mid-keystroke. The row states the truth whether or not it
+ * is ever tapped, which is the part that actually fixes the bug — a footer
+ * reading "12000 of 98022 loaded" cannot be misread as "this binary has 12,000
+ * functions" the way a bare list of 12,000 rows could.
+ *
+ * Both actions exist because they answer different questions. One page is
+ * "show me a bit more"; the rest is "I want to search the whole binary", which
+ * is the only way a search over this list can be trusted to be complete.
+ */
+@Composable
+private fun FunctionsPageFooter(vm: StudioViewModel, loaded: Int, total: Int) {
+    val ide = LocalIde.current
+    val busy = vm.funcPageBusy
+    // A page takes the engine mutex and an export holds it for minutes, so
+    // during one these buttons cannot work. Saying so beats a tap that does
+    // nothing visible for four minutes.
+    val blocked = vm.exportBusy
+    val pending = (total - loaded).coerceAtLeast(0)
+    val next = minOf(pending, FUNCTION_PAGE_ROWS)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(ide.panel)
+            .animateContentSize(tween(motionMs()))
+            .padding(horizontal = Space.l, vertical = Space.l)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RowIcon(Icons.Filled.ExpandMore, if (busy) ide.dim2 else ide.accent, 15.dp)
+            Text(
+                "$loaded of $total functions loaded",
+                color = ide.text, fontSize = Type.label, lineHeight = Type.labelLine,
+                fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                // weight, so a large system font scale ellipsises the line
+                // instead of pushing it off the right edge of the row.
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(Space.xs))
+        Text(
+            when {
+                busy -> "Loading… ${vm.funcPageLoaded} so far"
+                blocked -> "$pending more were found. The running export has the engine until it finishes."
+                else -> "$pending more were found by the engine and are one call away."
+            },
+            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine,
+            maxLines = 2, overflow = TextOverflow.Ellipsis
+        )
+        if (busy) {
+            Spacer(Modifier.height(Space.m))
+            LinearProgressIndicator(
+                progress = { if (total > 0) loaded.toFloat() / total.toFloat() else 0f },
+                modifier = Modifier.fillMaxWidth().height(3.dp),
+                color = ide.accent,
+                trackColor = ide.borderStrong
+            )
+        } else if (!blocked) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { vm.loadMoreFunctions(all = false) }) {
+                    Text("Load $next more", color = ide.accent, fontSize = Type.label)
+                }
+                if (pending > next) {
+                    TextButton(onClick = { vm.loadMoreFunctions(all = true) }) {
+                        Text("Load all $pending", color = ide.cyan, fontSize = Type.label)
+                    }
                 }
             }
         }
@@ -565,12 +722,39 @@ private fun SymbolsNoMatch(
             if (n > 0) add(Triple(MODE_EXPORTS, "Exports", n))
         }
     }
+    // A function search that finds nothing has a second possible reason now,
+    // and it is the one that would send someone away believing the binary does
+    // not contain what they looked for: the name may be in a page that has not
+    // been loaded. Say so, and offer the load, before the "try another table"
+    // suggestions.
+    val funcsTotal = (vm.meta?.functionsTotal ?: 0).coerceAtLeast(funcs.size)
+    val unloaded = if (funcsMode) funcsTotal - funcs.size else 0
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         EmptyPanel(
             "No $noun matches \"$query\"",
-            if (funcsMode) "$total functions in this binary, by name or by the name you gave it."
-            else "$total ${noun}s in this binary, none whose name contains that text."
+            when {
+                funcsMode && unloaded > 0 ->
+                    "Searched the $total functions loaded. $unloaded more were found and are not loaded yet."
+                funcsMode -> "$total functions in this binary, by name or by the name you gave it."
+                else -> "$total ${noun}s in this binary, none whose name contains that text."
+            }
         )
+        if (unloaded > 0) {
+            val waiting = vm.funcPageBusy || vm.exportBusy
+            TextButton(
+                onClick = { vm.loadMoreFunctions(all = true) },
+                enabled = !waiting
+            ) {
+                Text(
+                    when {
+                        vm.funcPageBusy -> "Loading…"
+                        vm.exportBusy -> "The running export has the engine"
+                        else -> "Load the remaining $unloaded and search again"
+                    },
+                    color = if (waiting) ide.dim2 else ide.accent, fontSize = Type.label
+                )
+            }
+        }
         // One offer per line rather than a row of them: three labels at this
         // size overflow a 360dp screen, and an empty state has vertical space
         // to spare.
@@ -599,6 +783,9 @@ private fun FunctionRow(vm: StudioViewModel, f: FuncInfo, modifier: Modifier = M
     val d = vm.detail?.takeIf { it.ok && it.addr == f.addr }
     val outN = if (d != null) vm.xrefOutCount(d) else vm.calleesOf(f.addr).size
     val inN = if (d != null) vm.xrefInCount(d) else vm.callersOf(f.addr).size
+    // Every path to those two numbers ends in the engine's reference map, and
+    // the map keeps 200,000 of what it finds. Above that they are floors.
+    val floors = vm.xrefsAreFloors
     Row(
         modifier
             .fillMaxWidth()
@@ -628,7 +815,8 @@ private fun FunctionRow(vm: StudioViewModel, f: FuncInfo, modifier: Modifier = M
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             Text(
-                "${f.from} · ${f.size} bytes · $outN out / $inN in",
+                "${f.from} · ${f.size} bytes · " +
+                    "${floorCount(outN, floors)} out / ${floorCount(inN, floors)} in",
                 color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )

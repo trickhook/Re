@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.ContentCopy
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Subject
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,6 +52,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -71,7 +74,9 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.trickhook.update.humanBytes
 import com.trickhook.vm.StudioViewModel
+import com.trickhook.vm.exportScopeNoun
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -353,8 +358,9 @@ fun DecompilePanel(vm: StudioViewModel) {
                 // One counting rule for the whole app, and it lives in the
                 // ViewModel. This strip and the Assembly strip each used to
                 // carry their own and read different numbers for one function.
-                PseudoXrefChip("refs in", vm.xrefInCount(d), ide.cyan) { xrefIncoming = true }
-                PseudoXrefChip("calls out", vm.xrefOutCount(d), ide.accent) { xrefIncoming = false }
+                val floors = vm.xrefsAreFloors
+                PseudoXrefChip("refs in", vm.xrefInCount(d), ide.cyan, floors) { xrefIncoming = true }
+                PseudoXrefChip("calls out", vm.xrefOutCount(d), ide.accent, floors) { xrefIncoming = false }
                 StatChip(primaryLabel, primaryTint)
                 val stats = d.irStats
                 if (stats != null && mode == "IR") {
@@ -539,7 +545,13 @@ private fun PseudoCompareToggle(vm: StudioViewModel) {
  * is chips on their own rather than chips inside a 60dp header block.
  */
 @Composable
-private fun PseudoXrefChip(label: String, count: Int, tint: Color, onClick: () -> Unit) {
+private fun PseudoXrefChip(
+    label: String,
+    count: Int,
+    tint: Color,
+    floored: Boolean,
+    onClick: () -> Unit
+) {
     val ide = LocalIde.current
     val base = Modifier
         .sizeIn(minHeight = Touch)
@@ -548,7 +560,9 @@ private fun PseudoXrefChip(label: String, count: Int, tint: Color, onClick: () -
         if (count > 0) base.clickable(role = Role.Button, onClick = onClick) else base,
         contentAlignment = Alignment.Center
     ) {
-        StatChip(label, count.toString(), if (count > 0) tint else ide.dim2)
+        // floorCount, not toString: above the engine's reference cap this
+        // number is a floor, and the sheet it opens says by how much.
+        StatChip(label, floorCount(count, floored), if (count > 0) tint else ide.dim2)
     }
 }
 
@@ -767,21 +781,33 @@ private fun ExportBar(vm: StudioViewModel) {
             // the bottom of the screen; only the touchable row is inset.
             .windowInsetsPadding(WindowInsets.navigationBars)
             .animateContentSize(tween(motionMs()))
-            .clickable(enabled = !vm.exportBusy, role = Role.Button) { showExportSheet = true }
+            // While a run is up this reopens the progress panel rather than
+            // going dead. A minutes-long export that can only be watched from
+            // the screen it was started on is a run you cannot cancel from
+            // anywhere else, which is worse than no cancel at all.
+            .clickable(role = Role.Button) {
+                if (vm.exportBusy) showExportProgress = true else showExportSheet = true
+            }
             .sizeIn(minHeight = Touch)
             .padding(horizontal = Space.l, vertical = Space.l),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             Icons.Filled.FileDownload, contentDescription = null,
-            tint = if (vm.exportBusy) ide.dim else ide.accent,
+            tint = ide.accent,
             modifier = Modifier.size(18.dp)
         )
         Spacer(Modifier.width(Space.m))
+        val p = vm.exportProgress
         Text(
-            if (vm.exportBusy) "Exporting…" else "Export as source",
-            color = if (vm.exportBusy) ide.dim else ide.text,
-            fontSize = Type.body, lineHeight = Type.bodyLine, fontWeight = FontWeight.Medium
+            when {
+                !vm.exportBusy -> "Export as source"
+                p != null && p.total > 0 -> "Exporting ${p.done} of ${p.total} — tap to watch or stop"
+                else -> "Exporting… tap to watch or stop"
+            },
+            color = ide.text,
+            fontSize = Type.body, lineHeight = Type.bodyLine, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -838,9 +864,17 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
     val authoredLine =
         if (authored == 0) "nothing named or commented yet"
         else "${vm.renames.size} names · ${vm.comments.size} comments · ${vm.bookmarks.size} bookmarks"
+    // The engine decompiles every non-import function it DISCOVERED, not the
+    // page of them this app happens to be holding, so the row says what the
+    // run will really cost. It read `functions.size` before, which on a large
+    // library promised 12,000 and delivered 98,022.
+    val m = vm.meta
+    val exportFns = maxOf(m?.functionsTotal ?: 0, m?.functions?.size ?: 0)
     val kinds = listOf(
         ExportKind("c-all", Icons.Filled.Code, "Whole binary",
-            "${vm.meta?.functions?.size ?: 0} functions decompiled to pseudo-C", SRC_GROUP),
+            "$exportFns functions decompiled to pseudo-C" +
+                (if (exportFns > 2000) " · minutes, and it blocks the engine" else ""),
+            SRC_GROUP),
         ExportKind("c-one", Icons.Filled.Description, "This function",
             vm.detail?.name?.ifEmpty { "the selected function" } ?: "no function selected", SRC_GROUP),
         ExportKind("h-all", Icons.Filled.Subject, "Header stub",
@@ -874,11 +908,29 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
                     "A listing to read, or your own work as a script for IDA Pro.",
                     color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine
                 )
+                // Said once, here, rather than discovered when the app appears
+                // to hang: a whole-binary run holds the engine mutex for its
+                // whole length, and nothing else native answers until it ends.
+                // Progress and stop are the two exceptions, and they are what
+                // the panel this opens is made of.
+                Spacer(Modifier.height(Space.xs))
+                TruncationNote(
+                    if (vm.exportBusy)
+                        "An export is already running. Tap the export bar or use the command " +
+                            "palette to watch it or stop it."
+                    else
+                        "A whole-binary listing runs for minutes and holds the engine for all of " +
+                            "it. You can watch it and stop it; a stopped run leaves a finished file."
+                )
             }
             Spacer(Modifier.height(Space.m))
             kinds.forEachIndexed { i, k ->
                 if (i == 0 || kinds[i - 1].group != k.group) ExportGroupLabel(k.group)
-                val enabled = when (k.id) {
+                // Nothing starts while a run is up. `exportSource` refuses a
+                // second one anyway, but the refusal happens AFTER the system
+                // file picker has already created an empty document — so the
+                // gate belongs here, where the picker has not been opened yet.
+                val enabled = !vm.exportBusy && when (k.id) {
                     "c-one" -> vm.detail != null
                     "ida-py", "ida-idc" -> authored > 0
                     else -> true
@@ -982,6 +1034,205 @@ private fun DecompileProgress(vm: StudioViewModel, bar: Boolean) {
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
             )
+        }
+    }
+}
+
+/**
+ * What a "produce file" run is doing, while it does it.
+ *
+ * This panel exists because the export is unlike every other call in the app:
+ * it holds the engine mutex for its whole run, which is minutes on a large
+ * binary, and while it does, nothing else native can answer. Without a number
+ * moving on screen that is indistinguishable from a hang — so the two calls
+ * that ARE lock-free, progress and stop, are what this is built out of.
+ *
+ * Three things it is careful about:
+ *
+ *  - Failures are not an error state. A function the decompiler refuses gets
+ *    its banner and a marker in the file where a reader will see it, and the
+ *    run carries on. 64 of 5,363 is a run that succeeded, and the wording says
+ *    so rather than painting it red.
+ *  - A stopped run is not lost work. Cancellation is checked between functions
+ *    and leaves a valid file whose trailer says where it stops.
+ *  - Dismissing this does not stop anything. The export bar and the header
+ *    phase line keep reporting, and a tap on the bar brings it back.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExportProgressSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
+    val ide = LocalIde.current
+    val p = vm.exportProgress
+    val result = vm.exportResult
+    val running = vm.exportBusy
+    val kind = vm.exportKindRunning
+    val startMs = vm.exportStartMs
+
+    // The clock is the one thing that keeps moving when `total` is still 0 —
+    // the engine counts its targets before it reports any of them, and a panel
+    // with nothing changing on it reads as frozen.
+    var elapsed by remember(startMs) { mutableStateOf(0L) }
+    LaunchedEffect(startMs, running) {
+        while (isActive && running && startMs > 0L) {
+            elapsed = System.currentTimeMillis() - startMs
+            delay(200)
+        }
+    }
+
+    val done = p?.done ?: 0
+    val total = p?.total ?: 0
+    val failed = p?.failed ?: 0
+    // Two sources, deliberately. `exportStopping` is this app's own intent and
+    // lands the instant Stop is pressed; `cancelling` is the engine saying it
+    // has the flag. Either one means the run is on its way down, and waiting
+    // only for the second would leave the button looking unpressed.
+    val stopping = vm.exportStopping || (p?.cancelling == true)
+    val fraction = if (total > 0) (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = ide.panel
+    ) {
+        Column(Modifier.padding(start = Space.xl, top = Space.s, end = Space.xl, bottom = Space.xl)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when {
+                        running && stopping -> "Stopping"
+                        running -> "Producing " + exportScopeNoun(kind)
+                        result != null && result.cancelled -> "Export stopped"
+                        result != null && result.ok -> "Export finished"
+                        result != null -> "Export failed"
+                        else -> "Export finished"
+                    },
+                    color = ide.text, fontSize = Type.title, lineHeight = Type.titleLine,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)
+                )
+                if (running && startMs > 0L) {
+                    Text(
+                        "%d:%02d".format(elapsed / 60000, (elapsed / 1000) % 60),
+                        color = ide.amber, fontSize = Type.mono, lineHeight = Type.monoLine,
+                        fontFamily = Mono
+                    )
+                }
+            }
+            Spacer(Modifier.height(Space.m))
+
+            // The bar goes indeterminate only for the first moment, while the
+            // engine is still counting what it is about to write. After that it
+            // is a real fraction of a real total.
+            if (running) {
+                if (total > 0) {
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = ide.accent,
+                        trackColor = ide.borderStrong
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = ide.accent,
+                        trackColor = ide.borderStrong
+                    )
+                }
+                Spacer(Modifier.height(Space.m))
+                Text(
+                    if (total > 0) "$done of $total functions" else "Counting what to write…",
+                    color = ide.text, fontSize = Type.body, lineHeight = Type.bodyLine,
+                    fontFamily = Mono
+                )
+                Spacer(Modifier.height(Space.xs))
+                Text(
+                    when {
+                        stopping ->
+                            "Finishing the function it is on. What is already written stays written."
+                        failed > 0 ->
+                            "$failed could not be decompiled — each one is marked in the file and the run carries on."
+                        else ->
+                            "Every other engine call waits until this finishes."
+                    },
+                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                )
+            } else {
+                val icon = if (result != null && !result.ok) Icons.Filled.Stop
+                else Icons.Filled.CheckCircleOutline
+                val tint = when {
+                    result == null -> ide.dim
+                    !result.ok -> ide.red
+                    result.cancelled -> ide.amber
+                    else -> ide.entry
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RowIcon(icon, tint, 16.dp)
+                    Text(
+                        when {
+                            result == null -> "Nothing is running."
+                            !result.ok -> result.error ?: "The export failed."
+                            result.cancelled ->
+                                "${result.functions} of ${result.total} functions written before you stopped it."
+                            else -> "${result.functions} functions written."
+                        },
+                        color = ide.text, fontSize = Type.body, lineHeight = Type.bodyLine,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (result != null && result.ok) {
+                    Spacer(Modifier.height(Space.m))
+                    // Two separate reassurances, and both are needed. A marked
+                    // failure is a normal outcome, and a stopped run produced a
+                    // file that is complete as far as it goes — neither is the
+                    // user losing their work.
+                    Text(
+                        buildString {
+                            if (result.failed > 0) {
+                                append(result.failed)
+                                append(
+                                    if (result.failed == 1) " function could not be decompiled; it is"
+                                    else " functions could not be decompiled; each one is"
+                                )
+                                append(" marked in the file where you will see it. ")
+                            }
+                            if (result.cancelled) {
+                                append("The file is valid and its trailer says where it stops. ")
+                            }
+                            if (result.bytes > 0) append(humanBytes(result.bytes))
+                            append(" saved to the file you picked.")
+                        }.trim(),
+                        color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(Space.l))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (running) {
+                    TextButton(
+                        onClick = { vm.stopExport() },
+                        enabled = !stopping
+                    ) {
+                        Text(
+                            if (stopping) "Stopping…" else "Stop",
+                            color = if (stopping) ide.dim2 else ide.accent,
+                            fontSize = Type.label
+                        )
+                    }
+                    Spacer(Modifier.width(Space.m))
+                    TextButton(onClick = onDismiss) {
+                        Text("Keep it running", color = ide.dim, fontSize = Type.label)
+                    }
+                } else {
+                    TextButton(onClick = onDismiss) {
+                        Text("Done", color = ide.accent, fontSize = Type.label)
+                    }
+                }
+            }
         }
     }
 }

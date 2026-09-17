@@ -477,7 +477,10 @@ fun StudioApp(vm: StudioViewModel) {
                                     Icon(Icons.Filled.FileDownload, null, tint = ide.dim,
                                         modifier = Modifier.size(18.dp))
                                 },
-                                enabled = vm.meta != null,
+                                // Not while one is running: the sheet would
+                                // open the file picker for an export that
+                                // exportSource is going to refuse.
+                                enabled = vm.meta != null && !vm.exportBusy,
                                 onClick = { showOverflow = false; showExportSheet = true }
                             )
                             DropdownMenuItem(
@@ -741,6 +744,27 @@ fun StudioApp(vm: StudioViewModel) {
                 }
             },
             onDismiss = { showExportSheet = false }
+        )
+    }
+
+    // The progress panel raises itself the moment a run starts, from wherever
+    // the export was launched — and it has to, because the run begins when the
+    // system file picker returns, which is a screen this app does not own. A
+    // minutes-long operation that blocks every other engine call cannot be
+    // allowed to start with no visible sign that it has.
+    LaunchedEffect(vm.exportBusy) {
+        if (vm.exportBusy) showExportProgress = true
+    }
+    if (showExportProgress) {
+        ExportProgressSheet(
+            vm,
+            // Dismissing is not cancelling. While a run is up this only hides
+            // the panel — dismissExportProgress refuses to clear anything until
+            // the run has ended — and the export bar brings it back.
+            onDismiss = {
+                showExportProgress = false
+                vm.dismissExportProgress()
+            }
         )
     }
 }
@@ -1664,7 +1688,11 @@ private fun ProjectDrawer(
         // FUNCTIONS with icons
         if (meta != null && meta.functions.isNotEmpty()) {
             val shown = minOf(meta.functions.size, 150)
-            item { SectionTitle(countLabel("Functions", shown, meta.functions.size)) }
+            // Against the engine's DISCOVERY total, not against the page that
+            // has been loaded: the drawer's job here is to say how big the
+            // binary is, and `functions.size` is a page size.
+            val funcsTotal = meta.functionsTotal.coerceAtLeast(meta.functions.size)
+            item { SectionTitle(countLabel("Functions", shown, funcsTotal)) }
             items(shown) { i ->
                 val f = meta.functions[i]
                 val display = vm.renames["0x%08X".format(f.addr)] ?: f.name
@@ -1695,9 +1723,9 @@ private fun ProjectDrawer(
                     Text(hexFmt(f.addr), color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono)
                 }
             }
-            if (meta.functions.size > shown) {
+            if (funcsTotal > shown) {
                 item {
-                    MoreRow("${meta.functions.size - shown} more · search them in Functions") {
+                    MoreRow("${funcsTotal - shown} more · search them in Functions") {
                         vm.symbolsMode = "functions"
                         vm.navigateTo(Tab.FUNCTIONS)
                         onClose()

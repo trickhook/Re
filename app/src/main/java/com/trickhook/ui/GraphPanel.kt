@@ -479,7 +479,10 @@ fun GraphPanel(vm: StudioViewModel) {
                 }
                 val counts = remember(nodes0) { nodes0.groupingBy { it.kind }.eachCount() }
                 val selDesc = selected?.let { id -> byId[id]?.let { ", selected: " + blockDesc(it) } } ?: ""
-                val graphDesc = "Control-flow graph, ${nodes0.size} blocks, " +
+                val graphDesc = "Control-flow graph, " +
+                    (if (d.blocksTotal > d.blocks.size)
+                        "${nodes0.size} of ${d.blocksTotal} blocks"
+                    else "${nodes0.size} blocks") + ", " +
                     "${nodes0.sumOf { it.block.succ.size }} edges. " +
                     BLOCK_KINDS.filter { (counts[it] ?: 0) > 0 }
                         .joinToString(", ") { "${counts[it]} ${kindLabel(it)}" } +
@@ -636,7 +639,7 @@ fun GraphPanel(vm: StudioViewModel) {
                 }
             }
 
-            GraphLegend(ide, d.blocks.size, d.asm.size)
+            GraphLegend(ide, d.blocks.size, maxOf(d.blocksTotal, d.blocks.size), d.asm.size)
         }
     }
 }
@@ -647,7 +650,7 @@ fun GraphPanel(vm: StudioViewModel) {
  * screen — which is what "green=entry" did for as long as entry was pink.
  */
 @Composable
-private fun GraphLegend(ide: IdeColors, blocks: Int, instrs: Int) {
+private fun GraphLegend(ide: IdeColors, blocks: Int, blocksTotal: Int, instrs: Int) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -663,7 +666,9 @@ private fun GraphLegend(ide: IdeColors, blocks: Int, instrs: Int) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            "$blocks blocks · $instrs instr",
+            // The CFG pass keeps the first 512 blocks and counts the rest, so
+            // a diagram of 512 nodes is not a 512-block function.
+            "${ofTotal(blocks, blocksTotal)} blocks · $instrs instr",
             color = ide.dim2, fontSize = Type.caption, fontFamily = Mono, maxLines = 1
         )
         BLOCK_KINDS.forEach { k ->

@@ -42,8 +42,44 @@ data class AnalysisMeta(
     /** Edges the engine FOUND. `callEdges` itself is capped at 12000 by Engine.cpp. */
     val callEdgesTotal: Int = 0,
     /** Raw call sites behind those edges, before the per-pair merge. */
-    val callSitesTotal: Int = 0
-)
+    val callSitesTotal: Int = 0,
+    /**
+     * Functions the engine DISCOVERED. [functions] holds the first page of
+     * them -- 12000 -- and the rest arrive through
+     * [com.trickhook.engine.NativeBridge.nativeFunctionPage]. Never assume
+     * `functions.size` is the answer to "how many functions".
+     */
+    val functionsTotal: Int = 0,
+    /** Where [functions] starts. Always 0 from `analyze`; a page says its own. */
+    val functionsOffset: Int = 0,
+    /** How many rows [functions] arrived with. Grows as pages are appended. */
+    val functionsCount: Int = 0,
+    /** Rows whose name looked mangled and that the demangler could not read. */
+    val demangleFailed: Int = 0,
+    /** Strings the engine holds; [strings] is the first 3000 of them. */
+    val stringsTotal: Int = 0,
+    /**
+     * References the xref map KEPT, and the number the scan SAW. When these
+     * differ -- 200,000 of 1,323,435 on a large library -- every nCallers,
+     * every nCallees and every xref count derived from the map is a floor
+     * rather than a count. [xrefsAreFloors] is the one place that is decided.
+     */
+    val xrefsStored: Int = 0,
+    val xrefsTotal: Int = 0,
+    /** DEX class and method counts out of the header, exact. */
+    val dexClassesTotal: Int = 0,
+    val dexMethodsTotal: Int = 0
+) {
+    /** Functions the engine found but this object has not been handed yet. */
+    val functionsPending: Int get() = (functionsTotal - functions.size).coerceAtLeast(0)
+
+    /**
+     * True when the reference map dropped what it could not hold, which makes
+     * every count taken from it a floor. Read it before printing a bare
+     * nCallers/nCallees anywhere.
+     */
+    val xrefsAreFloors: Boolean get() = xrefsStored in 1 until xrefsTotal
+}
 
 /**
  * One caller-callee pair.
@@ -100,7 +136,17 @@ data class FunctionDetail(
      * them a hot function with 561 callers renders as a flat 64.
      */
     val xrefsInTotal: Int = 0,
-    val xrefsOutTotal: Int = 0
+    val xrefsOutTotal: Int = 0,
+    /** Bytes the engine actually disassembled into [asm]. */
+    val asmBytes: Int = 0,
+    /**
+     * The listing stops before the end of the function -- the engine's asm
+     * window filled, or the body runs past the end of the file. What is on
+     * screen is not the whole function, and the panel has to say so.
+     */
+    val asmTruncated: Boolean = false,
+    /** Basic blocks the CFG pass found; [blocks] is the first 512 of them. */
+    val blocksTotal: Int = 0
 )
 
 data class DebugEvent(
@@ -119,6 +165,17 @@ private fun hx(s: String?): Long {
     if (s == null) return 0
     return if (s.startsWith("0x")) s.substring(2).toLongOrNull(16) ?: 0L else s.toLongOrNull(16) ?: 0L
 }
+
+/**
+ * One `functions` element. `analyze`'s first page and `functions(offset,count)`
+ * come out of the same emitter in Engine.cpp, so they are read here by the same
+ * code -- a paged row cannot drift from a first-page row in either direction.
+ */
+private fun funcRow(s: JSONObject): FuncInfo = FuncInfo(
+    hx(s.optString("addr")), s.optLong("size"), s.optString("name"), s.optString("from"),
+    s.optString("demangled").ifEmpty { null },
+    s.optInt("nCallees"), s.optInt("nCallers")
+)
 
 /** One `callEdges` / `edges` element. Both parsers read the same shape. */
 private fun callEdge(e: JSONObject): CallEdge = CallEdge(
@@ -156,14 +213,7 @@ fun parseMeta(json: String): AnalysisMeta {
         }
     } ?: emptyList()
     val functions = o.optJSONArray("functions")?.let { arr ->
-        (0 until arr.length()).map { i ->
-            val s = arr.getJSONObject(i)
-            FuncInfo(
-                hx(s.optString("addr")), s.optLong("size"), s.optString("name"), s.optString("from"),
-                s.optString("demangled").ifEmpty { null },
-                s.optInt("nCallees"), s.optInt("nCallers")
-            )
-        }
+        (0 until arr.length()).map { i -> funcRow(arr.getJSONObject(i)) }
     } ?: emptyList()
     val strings = o.optJSONArray("strings")?.let { arr ->
         (0 until arr.length()).map { i ->
@@ -217,7 +267,63 @@ fun parseMeta(json: String): AnalysisMeta {
         } ?: emptyList(),
         notes = notes,
         callEdgesTotal = o.optInt("callEdgesTotal"),
-        callSitesTotal = o.optInt("callSitesTotal")
+        callSitesTotal = o.optInt("callSitesTotal"),
+        // maxOf against the array length throughout: an engine built before
+        // these fields sends none of them, and a zero total beside a non-empty
+        // list would read as "nothing found" for every one of these panels.
+        functionsTotal = maxOf(o.optInt("functionsTotal"), functions.size),
+        functionsOffset = o.optInt("functionsOffset"),
+        functionsCount = maxOf(o.optInt("functionsCount"), functions.size),
+        demangleFailed = o.optInt("demangleFailed"),
+        stringsTotal = maxOf(o.optInt("stringsTotal"), strings.size),
+        xrefsStored = o.optInt("xrefsStored"),
+        xrefsTotal = o.optInt("xrefsTotal"),
+        dexClassesTotal = maxOf(o.optInt("dexClassesTotal"), dexClasses.size),
+        dexMethodsTotal = maxOf(o.optInt("dexMethodsTotal"), dexMethods.size)
+    )
+}
+
+/**
+ * One page of the function list, from
+ * [com.trickhook.engine.NativeBridge.nativeFunctionPage].
+ *
+ * [count] is what the engine really sent after its own clamp, NOT what was
+ * asked for: a walk advances by this, or it skips rows. [count] of 0 with
+ * [ok] true is the end of the walk and not a failure.
+ */
+data class FunctionPage(
+    val ok: Boolean,
+    val error: String?,
+    val functionsTotal: Int,
+    val offset: Int,
+    val count: Int,
+    val functions: List<FuncInfo>,
+    val demangleFailed: Int
+)
+
+/**
+ * Rows here are emitted by the engine's one function-row emitter, the same one
+ * `analyze` uses, so a paged row cannot drift from a first-page row -- and
+ * this reads them with the same code for the same reason.
+ */
+fun parseFunctionPage(json: String): FunctionPage {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return FunctionPage(false, o.optString("error", "function page failed"), 0, 0, 0, emptyList(), 0)
+    }
+    val functions = o.optJSONArray("functions")?.let { arr ->
+        (0 until arr.length()).map { i -> funcRow(arr.getJSONObject(i)) }
+    } ?: emptyList()
+    return FunctionPage(
+        ok = true, error = null,
+        functionsTotal = maxOf(o.optInt("functionsTotal"), functions.size),
+        offset = o.optInt("offset"),
+        // The array is the ground truth for what arrived; `count` is the
+        // engine saying the same thing. Trusting a count larger than the array
+        // would walk a loop straight past rows it never received.
+        count = minOf(o.optInt("count"), functions.size),
+        functions = functions,
+        demangleFailed = o.optInt("demangleFailed")
     )
 }
 
@@ -264,7 +370,10 @@ fun parseDetail(json: String): FunctionDetail {
         irStats = irStats, asm = asm, pseudo = o.optString("pseudo"),
         blocks = blocks, xrefsIn = xin, xrefsOut = xout,
         nCallees = o.optInt("nCallees"), nCallers = o.optInt("nCallers"),
-        xrefsInTotal = o.optInt("xrefsInTotal"), xrefsOutTotal = o.optInt("xrefsOutTotal")
+        xrefsInTotal = o.optInt("xrefsInTotal"), xrefsOutTotal = o.optInt("xrefsOutTotal"),
+        asmBytes = o.optInt("asmBytes"),
+        asmTruncated = o.optBoolean("asmTruncated"),
+        blocksTotal = maxOf(o.optInt("blocksTotal"), blocks.size)
     )
 }
 
@@ -303,7 +412,11 @@ data class CallGraphData(
     val focus: Long = 0L,
     /** Edges that passed the focus filter. `edges` is capped at 4000 for the canvas. */
     val edgesTotal: Int = 0,
-    /** Functions in the binary. `funcs` is the same list capped at 4000. */
+    /**
+     * Functions the engine DISCOVERED in the binary, which is no longer the
+     * length of a capped list: it used to be both, so a 12,631-function
+     * library printed "4000 of 4000". `funcs` is the first 4000 of them.
+     */
     val funcsTotal: Int = 0
 )
 
@@ -350,7 +463,13 @@ data class DbgState(
      * after the last breakpoint is deleted -- so an empty list is not the same
      * answer as no answer, and the merge needs to tell them apart.
      */
-    val hasBps: Boolean = false
+    val hasBps: Boolean = false,
+    /**
+     * Events the session's ring buffer threw away since the last poll. It
+     * drops 500 at a time at 2000 and used to say nothing, so a session that
+     * ate 500 stops showed one that never happened beside one it ate.
+     */
+    val eventsDropped: Int = 0
 )
 
 fun parseDbg(json: String): DbgState {
@@ -397,7 +516,73 @@ fun parseDbg(json: String): DbgState {
         memData = o.optString("data", ""),
         memAddr = hx(o.optString("addr", "0x0")),
         memLen = o.optLong("len"),
-        events = events
+        events = events,
+        eventsDropped = o.optInt("eventsDropped")
+    )
+}
+
+// ------------------------------------------------------ produce-file export --
+
+/**
+ * How far the running export has got, from `nativeExportProgress`. Lock-free
+ * on the engine side, so it answers WHILE `nativeExportSource` holds the
+ * engine mutex -- which is the only time it means anything.
+ *
+ * After a run ends the numbers stay at their final values with [running]
+ * false, so one last poll sees the result rather than zeroes.
+ */
+data class ExportProgress(
+    val running: Boolean,
+    val done: Int,
+    val total: Int,
+    val failed: Int,
+    val cancelling: Boolean
+)
+
+fun parseExportProgress(json: String): ExportProgress {
+    val o = JSONObject(json)
+    return ExportProgress(
+        running = o.optBoolean("running"),
+        done = o.optInt("done"),
+        total = o.optInt("total"),
+        failed = o.optInt("failed"),
+        cancelling = o.optBoolean("cancelling")
+    )
+}
+
+/**
+ * What one `nativeExportSource` run produced.
+ *
+ * [failed] is not an error state. A function the decompiler refuses gets its
+ * banner and a marker in the file where a reader will see it and the run
+ * carries on, so 64 failures out of 5,363 is a run that SUCCEEDED -- before
+ * this, one refusal ended the export.
+ *
+ * [cancelled] means the user stopped it. The file on disk is valid and says
+ * in its own trailer where it stops.
+ */
+data class ExportResult(
+    val ok: Boolean,
+    val error: String?,
+    val functions: Int,
+    val failed: Int,
+    val total: Int,
+    val cancelled: Boolean,
+    val bytes: Long
+)
+
+fun parseExportResult(json: String): ExportResult {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return ExportResult(false, o.optString("error", "export failed"), 0, 0, 0, false, 0L)
+    }
+    return ExportResult(
+        ok = true, error = null,
+        functions = o.optInt("functions"),
+        failed = o.optInt("failed"),
+        total = o.optInt("total"),
+        cancelled = o.optBoolean("cancelled"),
+        bytes = o.optLong("bytes")
     )
 }
 

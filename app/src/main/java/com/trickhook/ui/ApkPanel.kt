@@ -513,7 +513,13 @@ private fun DexSection(vm: StudioViewModel) {
                 item {
                     EmptyPanel(
                         "No class matches \"$query\"",
-                        "${meta.dexClasses.size} classes in this DEX."
+                        // dexClassesTotal is class_defs_size out of the DEX
+                        // header and therefore exact; the list stops at the
+                        // engine's cap. Saying only the list's length would
+                        // send someone away sure a class is not there.
+                        if (meta.dexClassesTotal > meta.dexClasses.size)
+                            "Searched the ${meta.dexClasses.size} classes loaded; this DEX declares ${meta.dexClassesTotal}."
+                        else "${meta.dexClasses.size} classes in this DEX."
                     )
                     TextButton(
                         onClick = { query = "" },
@@ -549,7 +555,9 @@ private fun DexSection(vm: StudioViewModel) {
                     val dexName = vm.apkEntries.firstOrNull { it.name.endsWith(".dex") }?.name ?: "file"
                     Text(
                         if (query.isBlank())
-                            "${meta.dexClasses.size} classes · ${meta.dexMethods.size} methods · extracted from $dexName"
+                            "${ofTotal(meta.dexClasses.size, meta.dexClassesTotal)} classes · " +
+                                "${ofTotal(meta.dexMethods.size, meta.dexMethodsTotal)} methods · " +
+                                "extracted from $dexName"
                         else
                             "${classes.size} of ${meta.dexClasses.size} classes match \"$query\"",
                         color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,

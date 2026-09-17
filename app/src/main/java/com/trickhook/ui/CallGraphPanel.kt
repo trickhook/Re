@@ -252,6 +252,9 @@ private fun FocusView(
     val detail = vm.detail?.takeIf { it.addr == addr }
     val outCount = detail?.let { vm.xrefOutCount(it) } ?: callees.size
     val inCount = detail?.let { vm.xrefInCount(it) } ?: callers.size
+    // Both numbers, and every edge under them, come off a reference map that
+    // drops what it cannot hold. Above its cap they are floors.
+    val floors = vm.xrefsAreFloors
 
     LazyColumn(
         Modifier
@@ -270,10 +273,16 @@ private fun FocusView(
                     hexFmt(addr),
                     color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
                 )
+                // Once, at the top, rather than beside each `+`.
+                val floorNote = xrefFloorNote(vm)
+                if (floorNote != null) {
+                    Spacer(Modifier.height(Space.xs))
+                    TruncationNote(floorNote)
+                }
             }
         }
         item(key = "sec_out") {
-            SectionLabel(rowMotion(), ide, Icons.Filled.CallMade, "calls", outCount)
+            SectionLabel(rowMotion(), ide, Icons.Filled.CallMade, "calls", outCount, floors)
         }
         // Only when both agree there is nothing: "calls nothing" under a heading
         // that says 7 is the kind of contradiction this pass exists to remove.
@@ -285,20 +294,26 @@ private fun FocusView(
         // questions. Two call instructions to the same target are two sites and
         // one edge, so rather than hide one number the panel names both.
         if (callees.size != outCount) item(key = "gap_out") {
-            NoneRow(rowMotion(), ide, "$outCount call sites · ${callees.size} distinct targets")
+            NoneRow(
+                rowMotion(), ide,
+                "${floorCount(outCount, floors)} call sites · ${callees.size} distinct targets"
+            )
         }
         items(callees.size, key = { i -> "o_" + callees[i].to + "_" + i }) { i ->
             val e = callees[i]
             CallRow(vm, ide, rowMotion(), e.to, e.kind, e.toName, open)
         }
         item(key = "sec_in") {
-            SectionLabel(rowMotion(), ide, Icons.Filled.CallReceived, "called by", inCount)
+            SectionLabel(rowMotion(), ide, Icons.Filled.CallReceived, "called by", inCount, floors)
         }
         if (callers.isEmpty() && inCount == 0) item(key = "none_in") {
             NoneRow(rowMotion(), ide, "Nothing in this binary calls it.")
         }
         if (callers.size != inCount) item(key = "gap_in") {
-            NoneRow(rowMotion(), ide, "$inCount reference sites · ${callers.size} distinct callers")
+            NoneRow(
+                rowMotion(), ide,
+                "${floorCount(inCount, floors)} reference sites · ${callers.size} distinct callers"
+            )
         }
         items(callers.size, key = { i -> "i_" + callers[i].from + "_" + i }) { i ->
             val e = callers[i]
@@ -380,7 +395,8 @@ private fun SectionLabel(
     ide: IdeColors,
     icon: ImageVector,
     label: String,
-    n: Int
+    n: Int,
+    floored: Boolean = false
 ) {
     Row(
         modifier
@@ -389,7 +405,13 @@ private fun SectionLabel(
         verticalAlignment = Alignment.CenterVertically
     ) {
         RowIcon(icon, ide.dim, 14.dp, null)
-        Text("$label ($n)", color = ide.dim, fontSize = Type.label, fontFamily = Mono)
+        // "calls (7)" above seven rows is a count; "calls (7+)" above seven
+        // rows says the engine's reference map stopped counting, which is a
+        // different claim and the only honest one above its cap.
+        Text(
+            "$label (${floorCount(n, floored)})",
+            color = ide.dim, fontSize = Type.label, fontFamily = Mono
+        )
     }
 }
 

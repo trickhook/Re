@@ -62,6 +62,16 @@ var showShortcutsHelp by mutableStateOf(false)
 /** Raised from the Pseudo-C bar, the overflow menu and the command palette. */
 var showExportSheet by mutableStateOf(false)
 
+/**
+ * The progress panel for a running "produce file" export.
+ *
+ * Raised automatically when an export starts, and again by tapping the export
+ * bar while one is running. Dismissing it does NOT stop the export — the
+ * header's phase line and the bar both keep saying the run is alive, and this
+ * comes back on a tap.
+ */
+var showExportProgress by mutableStateOf(false)
+
 /** Raised from the overflow menu and the command palette. */
 var showUpdateSheet by mutableStateOf(false)
 
@@ -127,7 +137,12 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                 // comparison row says what it will do next, not what is on.
                 val commands = remember(
                     vm.plugins.size, vm.tab, vm.meta != null, vm.decompiler, vm.canGoBack,
-                    vm.compareBackends
+                    vm.compareBackends,
+                    // Both of these change a row's PRESENCE and its wording:
+                    // "load the remaining 86,022" is a different row from
+                    // "load the remaining 66,022", and the stop row exists only
+                    // while an export is actually running.
+                    vm.exportBusy, vm.meta?.functionsPending ?: 0
                 ) {
                     buildList {
                         add(Command("Open file (APK/ELF/EXE/DEX)", "pick a binary to analyse", "Ctrl+O", openFile))
@@ -241,8 +256,36 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                             showUpdateSheet = true
                             vm.openUpdates(ctx)
                         })
-                        if (vm.meta != null) {
+                        // The export holds the engine mutex for minutes, so the
+                        // one control that still works during it has to be
+                        // reachable from the place that is always reachable.
+                        if (vm.exportBusy) {
                             add(Command(
+                                "Stop the running export",
+                                "it finishes the function it is on and leaves a valid file", ""
+                            ) {
+                                showExportProgress = true
+                                vm.stopExport()
+                            })
+                            add(Command(
+                                "Watch the running export",
+                                "progress, failures and the stop control", ""
+                            ) { showExportProgress = true })
+                        }
+                        val pending = vm.meta?.functionsPending ?: 0
+                        if (pending > 0 && !vm.exportBusy) {
+                            add(Command(
+                                "Load the remaining $pending functions",
+                                "the analysis carries one page; this walks the rest", ""
+                            ) {
+                                vm.navigateTo(tab = Tab.FUNCTIONS)
+                                vm.loadMoreFunctions(all = true)
+                            })
+                        }
+                        if (vm.meta != null) {
+                            // Not while one is running: the sheet opens a file
+                            // picker for an export exportSource would refuse.
+                            if (!vm.exportBusy) add(Command(
                                 "Export source or an IDA script",
                                 "pseudo-C, header, listing — or your names as .py / .idc", ""
                             ) { showExportSheet = true })
@@ -845,16 +888,26 @@ fun GlobalSearchDialog(vm: StudioViewModel, onDismiss: () -> Unit) {
     )
 }
 
-/** What the empty state is allowed to claim it looked through. */
+/**
+ * What the empty state is allowed to claim it looked through.
+ *
+ * Emphasis on ALLOWED. The palette searches the lists this app holds, and
+ * three of those lists are pages of something larger — functions above all,
+ * which arrive 12,000 at a time out of as many as 98,022. "searched 12000
+ * functions" under a query that found nothing is a claim about the binary that
+ * the app has not earned; "searched 12000 of 98022 functions" is the one it
+ * has.
+ */
 private fun searchedSummary(vm: StudioViewModel): String {
     val m = vm.meta ?: return "nothing"
     val parts = ArrayList<String>()
-    if (m.functions.isNotEmpty()) parts.add("${m.functions.size} functions")
-    if (m.strings.isNotEmpty()) parts.add("${m.strings.size} strings")
+    if (m.functions.isNotEmpty()) parts.add("${ofTotal(m.functions.size, m.functionsTotal)} functions")
+    if (m.strings.isNotEmpty()) parts.add("${ofTotal(m.strings.size, m.stringsTotal)} strings")
     if (m.imports.isNotEmpty()) parts.add("${m.imports.size} imports")
     if (m.exports.isNotEmpty()) parts.add("${m.exports.size} exports")
     if (m.sections.isNotEmpty()) parts.add("${m.sections.size} sections")
-    if (m.dexClasses.isNotEmpty()) parts.add("${m.dexClasses.size} DEX classes")
+    if (m.dexClasses.isNotEmpty())
+        parts.add("${ofTotal(m.dexClasses.size, m.dexClassesTotal)} DEX classes")
     return if (parts.isEmpty()) "an empty analysis" else parts.joinToString(", ")
 }
 

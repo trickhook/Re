@@ -445,6 +445,63 @@ fun parseAddr(s: String): Long? {
     return t.toLongOrNull(16) ?: t.toULongOrNull(16)?.toLong()
 }
 
+// ================================================================= counts ==
+
+/**
+ * A number the engine could only put a floor under, written so it cannot be
+ * read as the answer: `561+`, not `561`.
+ *
+ * The engine's cross-reference map stops at 200,000 references and on a real
+ * library it held 200,000 of 1,323,435 — 85% dropped in silence. Every
+ * nCallers, every nCallees and every xref count is taken from that map, so
+ * above the cap all of them are floors. The trailing `+` is the whole
+ * convention: no colour, no icon, no warning. [TruncationNote] is where the
+ * sentence that explains it goes, once per screen rather than once per number.
+ *
+ * [floored] false returns the plain number, so a call site never needs a
+ * branch of its own.
+ */
+fun floorCount(n: Int, floored: Boolean): String = if (floored) "$n+" else "$n"
+
+/**
+ * "12000 of 98022", or plain "98022" once the two agree.
+ *
+ * The rule the whole app follows: a list that is a page of something larger
+ * names both numbers, and a list that is everything names one. Same shape as
+ * `edgeCount` in the ViewModel, which is where it started.
+ */
+fun ofTotal(shown: Int, total: Int): String =
+    // `shown` when the two agree, and when `total` is behind — an engine built
+    // before these fields sends no total at all, and printing a 0 there would
+    // be a worse lie than the one this replaces.
+    if (total > shown) "$shown of $total" else "$shown"
+
+/**
+ * The quiet line under a header that says what a number on this screen does
+ * not cover. A status, not an alarm: `dim2`, caption size, no icon, no rule —
+ * it reads as a footnote because that is what it is.
+ */
+@Composable
+fun TruncationNote(text: String, modifier: Modifier = Modifier) {
+    val ide = LocalIde.current
+    Text(
+        text, color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine,
+        maxLines = 2, overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+    )
+}
+
+/**
+ * The one sentence that explains every `+` on the screen, or null when the
+ * engine kept every reference it found and there is nothing to explain.
+ */
+fun xrefFloorNote(vm: StudioViewModel): String? {
+    val m = vm.meta ?: return null
+    if (!m.xrefsAreFloors) return null
+    return "Reference counts are floors: the engine's map holds ${m.xrefsStored} " +
+        "of the ${m.xrefsTotal} references it found."
+}
+
 // ================================================================== xrefs ==
 
 /**
@@ -580,12 +637,24 @@ fun XrefSheet(
                 // count separately, so the chip that opened this sheet can read
                 // 561 while the list holds 64. Name both instead of letting the
                 // header and the list quietly disagree.
-                val shown = if (rows.size < count) "${rows.size} of $count" else "$count"
+                //
+                // And 561 is itself a floor whenever the reference map dropped
+                // what it could not hold, so the total carries the same `+` the
+                // chip does and the note below says why, once.
+                val floors = vm.xrefsAreFloors
+                val shown =
+                    if (rows.size < count) "${rows.size} of ${floorCount(count, floors)}"
+                    else floorCount(count, floors)
                 Text(
                     "$shown · ${vm.effectiveFuncName(d.addr)} @ ${hexFmt(d.addr)}",
                     color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine,
                     fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
+                val floorNote = xrefFloorNote(vm)
+                if (floorNote != null) {
+                    Spacer(Modifier.height(Space.xs))
+                    TruncationNote(floorNote)
+                }
             }
             Spacer(Modifier.height(Space.m))
             if (rows.isEmpty()) {

@@ -283,7 +283,8 @@ fun AssemblyPanel(vm: StudioViewModel) {
                     FunctionPicker(vm, title)
                     Text(
                         if (d == null)
-                            "${meta.arch.ifEmpty { "-" }} · ${meta.backend.ifEmpty { "-" }} · ${meta.functions.size} functions"
+                            "${meta.arch.ifEmpty { "-" }} · ${meta.backend.ifEmpty { "-" }} · " +
+                                "${ofTotal(meta.functions.size, meta.functionsTotal)} functions"
                         else
                             "${hexFmt(d.addr)} · ${d.size} bytes · ${d.from} · ${d.backend}",
                         color = ide.dim2, fontSize = Type.caption, fontFamily = Mono,
@@ -317,6 +318,10 @@ fun AssemblyPanel(vm: StudioViewModel) {
                 // the Functions tab because four call sites each had their own.
                 val nIn = vm.xrefInCount(d)
                 val nOut = vm.xrefOutCount(d)
+                // Both of those come off the engine's reference map, and above
+                // its cap the map holds a fraction of what it saw. A bare
+                // number would be read as the answer; "561+" cannot be.
+                val floors = vm.xrefsAreFloors
                 Spacer(Modifier.height(Space.s))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // sizeIn, not the chip's own padding: the visible chip stays
@@ -331,7 +336,7 @@ fun AssemblyPanel(vm: StudioViewModel) {
                             .clip(RoundedCornerShape(ChipCorner))
                             .clickable(enabled = nIn > 0, role = Role.Button) { xrefIncoming = true },
                         contentAlignment = Alignment.Center
-                    ) { StatChip("refs in", nIn.toString(), ide.cyan) }
+                    ) { StatChip("refs in", floorCount(nIn, floors), ide.cyan) }
                     Spacer(Modifier.width(Space.s))
                     Box(
                         Modifier
@@ -339,7 +344,7 @@ fun AssemblyPanel(vm: StudioViewModel) {
                             .clip(RoundedCornerShape(ChipCorner))
                             .clickable(enabled = nOut > 0, role = Role.Button) { xrefIncoming = false },
                         contentAlignment = Alignment.Center
-                    ) { StatChip("calls out", nOut.toString(), ide.accent) }
+                    ) { StatChip("calls out", floorCount(nOut, floors), ide.accent) }
                     Spacer(Modifier.width(Space.s))
                     // Clamped, because traceStep is an index into a listing that
                     // can be replaced under it: unclamped it printed "201/40".
@@ -363,6 +368,26 @@ fun AssemblyPanel(vm: StudioViewModel) {
                         )
                     }
                 }
+                // The listing below is not always the whole function: the
+                // engine disassembles a window, and a body larger than it — or
+                // one that runs past the end of the file — stops early. It
+                // reported nothing about that until now, so a 40 KB function
+                // read as a 64 KB one that simply ended.
+                if (d.asmTruncated) {
+                    Spacer(Modifier.height(Space.xs))
+                    TruncationNote(
+                        if (d.size > d.asmBytes)
+                            "Listing covers ${d.asmBytes} of ${d.size} bytes — this is not the whole function."
+                        else
+                            "Listing stops before the end of this function."
+                    )
+                }
+                // The block cap belongs to the Graph tab's legend and the
+                // reference cap to the sheet the chips open, and both are one
+                // tap away. Three footnotes stacked under a 60dp header is a
+                // panel apologising, not a panel reporting; this one says the
+                // thing that is true of the listing directly below it and
+                // stops there.
                 if (selectedLine < 0) {
                     // Discoverability used to live in the Hint that renders only
                     // when NO function is selected — i.e. never while the

@@ -103,7 +103,20 @@ object NativeBridge {
      * returning the text, so a whole-binary listing is never held in memory as
      * a String. Returns a small JSON status.
      *
+     * [outPath] is a FILESYSTEM path, not a content:// URI — the engine opens
+     * it with std::ofstream. Write into the app's own storage and hand the
+     * finished file to the user from there.
+     *
      * kind: "c-one" (function at [addr]) | "c-all" | "h-all" | "asm-all"
+     *
+     * Returns `{"ok":true,"functions":5299,"failed":64,"total":5363,
+     * "cancelled":false,"bytes":2886843}`. `failed` is not an error: a function
+     * the decompiler refuses is marked in the file and the run continues.
+     *
+     * BACKGROUND THREAD, and this one is not a formality: it holds the engine
+     * mutex for its whole run, which is minutes on a large binary, so every
+     * other native call blocks behind it. [nativeExportProgress] and
+     * [nativeExportStop] are the only two that still answer during it.
      */
     external fun nativeExportSource(path: String, kind: String, addr: Long, outPath: String): String
 
@@ -176,4 +189,56 @@ object NativeBridge {
     external fun nativeScriptRun(source: String, path: String): String
     external fun nativeDebugRun(argvLines: String, maxEvents: Int): String
     external fun nativeDebugStop()
+
+    /**
+     * One page of the function list.
+     *
+     * [nativeAnalyze]'s `functions` array is the FIRST page of these same rows
+     * and carries `functionsTotal`; this serves any other page, so a binary
+     * with 200,000 functions can be walked without any single answer being a
+     * 40 MB jstring.
+     *
+     * [offset] is 0-based. [count] 0 means the engine's default page of 12000,
+     * and anything over 20000 is clamped — so the ANSWER's own `count` is what
+     * a walk advances by, never what was asked for:
+     *
+     *     var off = meta.functionsCount.toLong()
+     *     while (true) {
+     *         val p = parseFunctionPage(nativeFunctionPage(path, off, 20000))
+     *         if (!p.ok || p.count == 0) break
+     *         append(p.functions)
+     *         off += p.count
+     *     }
+     *
+     * An offset past the end answers `count:0` with an empty array. That is the
+     * loop's termination condition, not an error.
+     *
+     * Returns `{"ok":true,"functionsTotal":…,"offset":…,"count":…,"functions":
+     * […],"demangleFailed":…}` or `{"ok":false,"error":"…"}`.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeFunctionPage(path: String, offset: Long, count: Long): String
+
+    /**
+     * How far the export started by [nativeExportSource] has got:
+     * `{"running":true,"done":12431,"total":98022,"failed":17,"cancelling":false}`.
+     *
+     * Lock-free, so it is the only kind of call that ANSWERS while the export
+     * holds the engine mutex — anything that took the mutex would reply once
+     * the export was already over. Safe from the main thread; poll it on a
+     * timer. After the run ends the numbers stay at their final values with
+     * `running:false`, so one last poll reads the result rather than zeroes.
+     */
+    external fun nativeExportProgress(): String
+
+    /**
+     * Ask the running export to stop. Lock-free and safe from the main thread,
+     * for the same reason as [nativeExportProgress].
+     *
+     * Cancellation is checked between functions, so it is not instant, and it
+     * leaves a VALID file that says in its own trailer where it stops. Nothing
+     * already written is lost.
+     */
+    external fun nativeExportStop()
 }
