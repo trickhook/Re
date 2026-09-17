@@ -10,7 +10,7 @@ package com.trickhook.shizuku
  *
  *  - [LOCAL] is the app's own process, uid 10xxx, SELinux domain
  *    untrusted_app. From Android 10 on, app_data_file carries no execute
- *    permission, so the only things it can spawn are /system/bin/* and files
+ *    permission, so the only things it can spawn are those under /system/bin and files
  *    in its own nativeLibraryDir. A sample imported through the file picker
  *    lands in app storage and therefore cannot be run at all. This is exactly
  *    today's behaviour and it is not changed by anything in this package.

@@ -203,6 +203,49 @@ for dp, _, fns in os.walk(ROOT):
                 bad.append('%s:%d `%s` does not exist here — %s'
                            % (p, t[:m.start()].count('\n') + 1, fqn, why))
 
+        # 9. Kotlin nests block comments; C and Java do not. A `/*` appearing
+        #    inside an already-open comment opens a second one, so the next
+        #    `*/` closes only the inner and the rest of the file stays
+        #    commented out. The compiler then says "Unclosed comment" at EOF
+        #    and reports every declaration in the file as unresolved *from the
+        #    files that use it*, so the errors point everywhere except the
+        #    cause. A path or a glob in a KDoc is enough: `/system/bin/*` in a
+        #    sentence cost a CI cycle exactly this way.
+        i, n, depth, opened = 0, len(t), 0, []
+        while i < n:
+            if depth:
+                if t.startswith('/*', i):
+                    opened.append(i); depth += 1; i += 2
+                elif t.startswith('*/', i):
+                    depth -= 1; i += 2
+                else:
+                    i += 1
+            elif t.startswith('//', i):
+                j = t.find('\n', i); i = n if j < 0 else j
+            elif t.startswith('/*', i):
+                depth = 1; i += 2
+            elif t.startswith('"""', i):
+                j = t.find('"""', i + 3); i = n if j < 0 else j + 3
+            elif t[i] == '"':
+                i += 1
+                while i < n and t[i] not in '"\n':
+                    i += 2 if t[i] == '\\' else 1
+                i += 1
+            elif t[i] == "'":
+                i += 1
+                while i < n and t[i] not in "'\n":
+                    i += 2 if t[i] == '\\' else 1
+                i += 1
+            else:
+                i += 1
+        for off in opened:
+            bad.append('%s:%d `/*` inside an open block comment — Kotlin nests '
+                       'them, so this one needs its own `*/` or it swallows the '
+                       'rest of the file' % (p, t[:off].count('\n') + 1))
+        if depth:
+            bad.append('%s ends inside a block comment (depth %d)' % (p, depth))
+
+
 for b in bad:
     print(b)
 print('KOTLIN AUDIT:', 'FAIL (%d)' % len(bad) if bad else 'clean')
