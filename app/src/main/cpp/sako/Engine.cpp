@@ -1199,8 +1199,9 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     // mapping table has nothing to say.
     if (c.dis.armDualMode()) c.dis.setDefaultThumb(fn->thumb);
 
+    bool asmGaveUp = false;
     auto lines = c.dis.disassemble(c.bin.data.data() + off, size_t(size), fn->addr,
-                                   kAsmInstrsInDetail);
+                                   kAsmInstrsInDetail, &asmGaveUp);
     // Read before the padding trim below shortens the list: a budget that
     // filled up is the truncation, and the trim would hide that it had.
     const bool asmCapHit = lines.size() >= kAsmInstrsInDetail;
@@ -1263,10 +1264,14 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         // is the window the disassembler was given: smaller than the function
         // when kAsmWindowBytes or the end of the file clipped it. asmTruncated
         // also covers the instruction budget, which can stop the decode inside
-        // a window that was not clipped at all. Without these two a listing
-        // that stops at 4096 rows reads exactly like a function that ends.
+        // a window that was not clipped at all, and the third case -- the
+        // decoder hitting bytes it cannot decode and abandoning the rest of the
+        // range, which used to be invisible because the listing simply ended.
+        // Without these a listing that stops at 4096 rows, or at the first
+        // literal pool, reads exactly like a function that ends.
         << ",\"asmBytes\":" << num(size)
-        << ",\"asmTruncated\":" << ((asmCapHit || size < fn->size) ? "true" : "false")
+        << ",\"asmTruncated\":"
+        << ((asmCapHit || asmGaveUp || size < fn->size) ? "true" : "false")
         << ",\"asm\":[";
     for (size_t i = 0; i < lines.size(); ++i) {
         if (i) out << ",";

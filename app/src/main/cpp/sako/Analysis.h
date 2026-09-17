@@ -47,7 +47,15 @@ public:
         return *this;
     }
 
-    std::vector<AsmLine> disassemble(const u8* code, size_t size, u64 vaddr, size_t maxInstr = 4096);
+    // `gaveUp`, when given, is set true when the decode stopped before the end
+    // of the range for a reason that is NOT the instruction budget: sixteen
+    // consecutive bytes Capstone cannot decode make the run bail out, and the
+    // listing then simply ends. The caller cannot tell that from a function
+    // that ends, which is how a third of a function came to be shown as the
+    // whole of it. Reaching maxInstr does not set it -- the caller can see that
+    // in the row count -- so the flag means one thing.
+    std::vector<AsmLine> disassemble(const u8* code, size_t size, u64 vaddr, size_t maxInstr = 4096,
+                                     bool* gaveUp = nullptr);
 
 private:
     void moveFrom(Disasm& o) {

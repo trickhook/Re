@@ -195,8 +195,10 @@ size_t runRange(csh h, std::vector<AsmLine>& out, const u8* code, size_t pos, si
 } // namespace
 #endif
 
-std::vector<AsmLine> Disasm::disassemble(const u8* code, size_t size, u64 vaddr, size_t maxInstr) {
+std::vector<AsmLine> Disasm::disassemble(const u8* code, size_t size, u64 vaddr, size_t maxInstr,
+                                         bool* gaveUp) {
     std::vector<AsmLine> out;
+    if (gaveUp) *gaveUp = false;
     if (!ready() || !code || !size) return out;
 
 #ifdef SAKO_HAVE_CAPSTONE
@@ -233,14 +235,24 @@ std::vector<AsmLine> Disasm::disassemble(const u8* code, size_t size, u64 vaddr,
                 if (adv <= pos) break;   // no progress: stop rather than spin
                 pos = adv;
             }
+            // Short of the end with budget to spare means a run gave up, or a
+            // region made no progress at all.
+            if (gaveUp && pos < size && out.size() < maxInstr) *gaveUp = true;
             return out;
         }
 
-        runRange(csh(csh_), out, code, 0, size, vaddr, maxInstr, step_);
+        size_t got = runRange(csh(csh_), out, code, 0, size, vaddr, maxInstr, step_);
+        if (gaveUp && got < size && out.size() < maxInstr) *gaveUp = true;
         return out;
     }
 #endif
-    return mini::disassemble(arch_, code, size, vaddr, maxInstr);
+    auto lines = mini::disassemble(arch_, code, size, vaddr, maxInstr);
+    // The fallback decoder walks a fixed stride and never bails mid-range, so
+    // the only way it comes up short is an architecture it does not cover --
+    // and an empty listing for a non-empty range is exactly the thing this flag
+    // exists to say out loud.
+    if (gaveUp && lines.empty()) *gaveUp = true;
+    return lines;
 }
 
 } // namespace sako
