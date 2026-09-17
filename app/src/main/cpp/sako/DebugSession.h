@@ -78,6 +78,10 @@ private:
     std::string mode_;
     std::map<u64, Bp> bps_;
     std::vector<std::string> events_;
+    // Events the ring dropped since the last poll drained it. A debugger that
+    // quietly eats 500 stops shows one that never happened next to one it ate,
+    // so the count goes out with the window that replaced them.
+    size_t eventsDropped_ = 0;
     std::string lastStopRegs_;
 
     // worker

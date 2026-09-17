@@ -39,6 +39,18 @@ Java_com_trickhook_engine_NativeBridge_nativeAnalyze(JNIEnv* env, jobject, jstri
     return toJString(env, sako::Engine::instance().analyze(path));
 }
 
+// One page of the function list. nativeAnalyze's `functions` array is the
+// first page of the same rows; this serves any other page, so a caller can
+// walk a binary with 200000 functions without any one answer being 40 MB.
+// offset is 0-based; count 0 means "the default page"; the answer's own
+// `count` says what came back after the engine's clamp.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeFunctionPage(JNIEnv* env, jobject, jstring jpath,
+                                                          jlong offset, jlong count) {
+    std::string path = toStdString(env, jpath);
+    return toJString(env, sako::Engine::instance().functions(path, u64(offset), u64(count)));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeFunction(JNIEnv* env, jobject, jstring jpath,
                                                           jlong addr) {
@@ -61,6 +73,20 @@ Java_com_trickhook_engine_NativeBridge_nativeExportSource(JNIEnv* env, jobject, 
     std::string kind = toStdString(env, jkind);
     std::string out  = toStdString(env, jout);
     return toJString(env, sako::Engine::instance().exportSource(path, kind, u64(addr), out));
+}
+
+// Both of these are lock-free and answer while nativeExportSource is running
+// on another thread -- which is the only time either of them means anything.
+// Call nativeExportSource on a background thread: it holds the engine mutex
+// for its whole run.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeExportProgress(JNIEnv* env, jobject) {
+    return toJString(env, sako::Engine::instance().exportProgress());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeExportStop(JNIEnv*, jobject) {
+    sako::Engine::instance().exportStop();
 }
 
 extern "C" JNIEXPORT jstring JNICALL

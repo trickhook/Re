@@ -242,7 +242,13 @@ static void dbgSetPc(pid_t pid, u64 pc) {
 void DebugSession::pushEvent(const std::string& ev) {
     std::lock_guard<std::mutex> lk(mu_);
     events_.push_back(ev);
-    if (events_.size() > 2000) events_.erase(events_.begin(), events_.begin() + 500);
+    // A ring, not a list: a long run must not grow without bound. What falls
+    // off is counted -- dropping 500 events in silence is how a trace comes
+    // back looking complete while the interesting stop is the one that went.
+    if (events_.size() > 2000) {
+        events_.erase(events_.begin(), events_.begin() + 500);
+        eventsDropped_ += 500;
+    }
 }
 
 // worker thread: identify a SIGTRAP/signal stop
@@ -749,13 +755,17 @@ std::string DebugSession::handleCmd(const std::string& json) {
         o << "{\"ok\":true,\"state\":\""
           << (state_ == ST_NONE ? "none" : state_ == ST_STOPPED ? "stopped" :
               state_ == ST_RUNNING ? "running" : "exited")
-          << "\",\"pid\":" << pid_ << ",\"events\":[";
+          << "\",\"pid\":" << pid_
+          // Dropped since the previous poll, which is the window `events`
+          // covers: both are reset together below.
+          << ",\"eventsDropped\":" << eventsDropped_ << ",\"events\":[";
         for (size_t i = 0; i < events_.size(); ++i) {
             if (i) o << ",";
             o << events_[i];
         }
         o << "]}";
         events_.clear();
+        eventsDropped_ = 0;
         return o.str();
     }
 

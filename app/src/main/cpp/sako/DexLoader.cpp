@@ -30,6 +30,13 @@ DexInfo parseDex(const Binary& b) {
     u32 methodCount = rd32(p + 88), methodOff = rd32(p + 92);
     u32 classCount = rd32(p + 96), classOff = rd32(p + 100);
 
+    // What the file says it holds, kept before the caps below cut the three
+    // tables down. The caps are defensible; throwing the counts away is not,
+    // because then a capped table goes out as though it were the whole one.
+    info.stringsFound = strCount;
+    info.methodsFound = methodCount;
+    info.classesFound = classCount;
+
     // ---- strings ----
     size_t sCap = std::min<u32>(strCount, 50000);
     info.strings.reserve(sCap);

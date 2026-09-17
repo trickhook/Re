@@ -5,12 +5,34 @@
 namespace sako {
 
 // ---------------- function discovery ----------------
-// How many functions the rest of the engine will carry. Everything downstream
-// — the xref map, the call graph, the JSON function list — is sized against
-// this, so it is a real limit and not a rendering choice. What IS a defect is
-// losing the number that was found, so both scans report it through `found`.
-// The kept slice is the lowest addresses: `out` is sorted before the cut.
-static const size_t kMaxFunctions = 4000;
+// There is no cap here, by decision: the scan carries every function it finds,
+// to the end of the binary. It used to stop at 4000, which on a real library
+// (the 12631-function sample quoted in Analysis.h, or the 37801 of
+// libLLVM-17.so) left two thirds of the image not truncated in one answer but
+// ABSENT from the engine -- no xrefs, no call-graph node, no name for a
+// pointer into it, and no way for the caller to learn any of that was missing.
+//
+// What carrying all of them costs, per function, read off this code and
+// measured on a host build (libLLVM-17.so.1, 123 MB, 37801 functions):
+//
+//   FuncInfo + the AddrNames entry   ~180 B of heap each -> 200k is ~36 MB
+//   buildCallGraph                   funcAt/funcSet are ordered maps, so a
+//                                    call site costs O(log F), not O(F)
+//   analyze() JSON row               ~100 B stripped, ~210 B for C++ symbols
+//                                    with a demangled form -- which is why the
+//                                    JSON list is PAGED rather than capped
+//                                    (see kFunctionsPerPage in Engine.cpp):
+//                                    paging withholds nothing, a cap does
+//   computeJniEnvArgs                ARM64, first decompile, background
+//                                    thread: one disassembly pass over every
+//                                    carried function, so it now covers .text
+//   plugins                          a per-function plugin does as much work
+//                                    as the binary has functions, which is
+//                                    what it was asked to do
+//
+// `found` is still reported by both scans and still means "what the scan
+// found". It equals the returned size today; it stays so that if a limit ever
+// does come back it cannot come back silently.
 
 std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e, size_t* found) {
     std::map<u64, FuncInfo> byAddr;
@@ -122,7 +144,6 @@ std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e, si
         if (out[i].size > 1024 * 1024) out[i].size = 1024 * 1024;
     }
     if (found) *found = out.size();
-    if (out.size() > kMaxFunctions) out.resize(kMaxFunctions);
     return out;
 }
 
@@ -171,20 +192,24 @@ std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e, size
         }
     }
     if (found) *found = out.size();
-    if (out.size() > kMaxFunctions) out.resize(kMaxFunctions);
     return out;
 }
 
 // ---------------- XREF scan ----------------
 std::map<u64, std::vector<Xref>> buildXrefs(const std::string& arch, const u8* code, size_t size,
-                                            u64 va, size_t cap) {
+                                            u64 va, size_t cap, size_t* found) {
     std::map<u64, std::vector<Xref>> out;
     size_t total = 0;
 
+    // The cap is on what is STORED -- a million references is a map the size
+    // of the binary -- but the scan runs to the end either way and counts
+    // every one, because the first thing a full map buys you is knowing when
+    // it is not full. `found` is that count; out.size() is what fits.
     auto push = [&](u64 from, u64 to, const char* type) {
-        if (!to || total >= cap) return;
-        out[to].push_back(Xref{from, to, type});
+        if (!to) return;
         ++total;
+        if (total > cap) return;
+        out[to].push_back(Xref{from, to, type});
     };
 
     if (arch == "X86_64" || arch == "X86") {
@@ -215,6 +240,7 @@ std::map<u64, std::vector<Xref>> buildXrefs(const std::string& arch, const u8* c
             }
         }
     }
+    if (found) *found = total;
     return out;
 }
 

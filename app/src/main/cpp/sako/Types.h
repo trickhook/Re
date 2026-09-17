@@ -112,6 +112,12 @@ struct DexInfo {
     std::vector<std::string> strings;
     std::vector<DexMethod> methods;
     std::vector<DexClass>  classes;
+    // The header's own counts. The three vectors above are capped by the
+    // loader (DexLoader.cpp), and these are what the file says is there, so a
+    // capped table is reported as "N of M" instead of as M.
+    u64 stringsFound = 0;
+    u64 methodsFound = 0;
+    u64 classesFound = 0;
 };
 
 // ---- analysis types ----

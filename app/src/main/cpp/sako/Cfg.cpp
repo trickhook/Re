@@ -69,7 +69,7 @@ Branch classify(const AsmLine& l, const std::string& arch) {
 } // namespace
 
 std::vector<CfgBlock> buildCfg(const std::vector<AsmLine>& lines, u64 funcStart, u64 funcEnd,
-                               const std::string& arch) {
+                               const std::string& arch, size_t* found) {
     std::vector<CfgBlock> blocks;
     if (lines.empty()) return blocks;
 
@@ -93,9 +93,16 @@ std::vector<CfgBlock> buildCfg(const std::vector<AsmLine>& lines, u64 funcStart,
     }
 
     // build blocks
+    //
+    // The walk runs to the end of the listing whatever the cap does, and only
+    // the PUSH is capped: `found` then carries how many blocks the function
+    // has, so a graph drawn from 512 of them can say so. Stopping the walk
+    // instead is what made the cap invisible -- the caller got 512 blocks and
+    // no way to tell them from a function that has exactly 512.
     size_t i = 0;
+    size_t nFound = 0;
     std::vector<size_t> ends; // last line index of each block
-    while (i < lines.size() && blocks.size() < cap) {
+    while (i < lines.size()) {
         size_t start = i;
         while (i < lines.size()) {
             if (brs[i].kind != Kind::Other) { ++i; break; }
@@ -103,6 +110,8 @@ std::vector<CfgBlock> buildCfg(const std::vector<AsmLine>& lines, u64 funcStart,
             if (i + 1 < lines.size() && leaders.count(i + 1)) { ++i; break; }
             ++i;
         }
+        ++nFound;
+        if (blocks.size() >= cap) continue;   // counted, not carried
         CfgBlock blk;
         blk.id = int(blocks.size());
         blk.start = lines[start].addr;
@@ -112,6 +121,7 @@ std::vector<CfgBlock> buildCfg(const std::vector<AsmLine>& lines, u64 funcStart,
         blocks.push_back(blk);
         ends.push_back(i - 1);
     }
+    if (found) *found = nFound;
     if (blocks.empty()) return blocks;
 
     auto blockOfAddr = [&](u64 a) -> int {

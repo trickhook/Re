@@ -152,8 +152,12 @@ IrResult decompileIR(const std::vector<AsmLine>& lines, const std::string& arch,
                      const std::vector<FoundString>& strings = {});
 
 // ---------------- CFG + legacy heuristic pseudo (fallback) ----------------
+// `found`, when given, receives how many basic blocks the function has, which
+// is not how many come back: the vector stops at an internal cap. Same
+// contract as discoverFunctions* below -- the array is what fits, the
+// out-parameter is the measurement.
 std::vector<CfgBlock> buildCfg(const std::vector<AsmLine>& lines, u64 funcStart, u64 funcEnd,
-                               const std::string& arch);
+                               const std::string& arch, size_t* found = nullptr);
 
 // Heuristic ASM -> pseudo-C (register-flavored C with gotos) — fallback path.
 std::string genPseudo(const std::vector<AsmLine>& lines, const std::string& arch,
@@ -166,14 +170,20 @@ std::vector<AsmLine> disassemble(const std::string& arch, const u8* code, size_t
 }
 
 // ---------------- Functions & XREFs ----------------
-// `found`, when given, receives how many functions the scan found BEFORE the
-// cap on what the rest of the engine carries. The count used to be dropped on
-// the floor, which made this the one truncation in the engine that could not
-// even be reported: the caller saw 4000 and had no way to know of the 12631.
+// `found`, when given, receives how many functions the scan found. There is no
+// longer a cap between that number and the vector -- the scan carries every
+// function to the end of the binary (Analyzer.cpp says what that costs) -- so
+// today it always equals the returned size. It stays in the signature because
+// the count used to be dropped on the floor, which made this the one
+// truncation in the engine that could not even be reported: the caller saw
+// 4000 and had no way to know of the 12631.
 std::vector<FuncInfo> discoverFunctionsElf(const Binary& b, const ElfInfo& e, size_t* found = nullptr);
 std::vector<FuncInfo> discoverFunctionsPe(const Binary& b, const PeInfo& e, size_t* found = nullptr);
 
+// `cap` bounds what the map HOLDS; `found`, when given, receives how many
+// references the scan saw, which is the number that says whether the cap bit.
 std::map<u64, std::vector<Xref>> buildXrefs(const std::string& arch, const u8* code, size_t size,
-                                            u64 va, size_t cap = 200000);
+                                            u64 va, size_t cap = 200000,
+                                            size_t* found = nullptr);
 
 } // namespace sako

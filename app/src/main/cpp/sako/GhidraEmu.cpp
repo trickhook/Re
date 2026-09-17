@@ -372,6 +372,7 @@ struct Machine {
     std::vector<EmuCall> calls;
     u64 callsTotal = 0;
     std::map<std::string, EmuUserop> userops;
+    u64 useropsDropped = 0;       // seen past the 64-name table, counted anyway
     std::string pendingNote;      // set by a model, consumed by the record
     bool approximate = false;
     u64 tail[64];
@@ -615,6 +616,7 @@ public:
         if (it == m->userops.end()) {
             EmuUserop u; u.name = nm; u.count = 1; u.harmless = ok;
             if (m->userops.size() < 64) m->userops[nm] = u;
+            else ++m->useropsDropped;   // a 65th distinct name: counted, not kept
         } else {
             ++it->second.count;
         }
@@ -1526,6 +1528,7 @@ EmuResult GhidraEmu::run(const EmuRequest& req) {
     res.heapBase = M.sb.heapLo;
     res.heapUsed = M.sb.heapNext - M.sb.heapLo;
     for (const auto& kv : M.userops) res.userops.push_back(kv.second);
+    res.useropsDropped = M.useropsDropped;
 
     {
         u32 n = M.tailN < 64 ? M.tailN : 64;

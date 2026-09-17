@@ -19,6 +19,25 @@ namespace sako {
 static const size_t kStringCap = 20000;
 // How many of those to put in the analysis JSON the UI reads.
 static const size_t kStringsInJson = 3000;
+// The function list is PAGED, not capped. Nothing limits the analysis any
+// more -- Analyzer.cpp carries every function to the end of the binary -- but
+// one JNI string is a bad place to put all of them. Measured on a host build:
+//
+//   rows    B/row   array    binary
+//   5363     102    0.55 MB  libcrypto.so.3, C symbols
+//  16984      95    1.62 MB  the same library with its symbol tables removed,
+//                            so every name is SUB_xxxxxxxx from the scan
+//  37801     204    7.75 MB  libLLVM-17.so.1, 57% of rows carrying a demangled
+//                            C++ name as well as the mangled one
+//
+// At 204 B/row a 200000-function binary is a 41 MB array, which NewStringUTF
+// must copy into the Java heap before org.json has allocated a single object
+// -- and org.json then spends several hundred bytes per row on top. So
+// analyze() carries the first page and functions(offset, count) serves the
+// rest. The difference from a cap is the whole point: a cap withholds rows the
+// caller can never get, a page is one the caller has not asked for yet.
+static const size_t kFunctionsFirstPage = 12000;   // ~2.5 MB worst case
+static const size_t kFunctionsPageMax   = 20000;   // ~4.1 MB worst case
 // Call edges in the analysis JSON. Measured on a host build (x86-64, warm JVM
 // modelling org.json + parseMeta; a phone is several times slower, though the
 // parse runs on Dispatchers.IO, not the UI thread):
@@ -45,6 +64,13 @@ static const size_t kCallGraphFuncsInJson = 4000;
 // place for 300 rows, so this one stays small — but xrefsInTotal /
 // xrefsOutTotal always carry the real count next to the truncated array.
 static const size_t kXrefRowsInJson = 64;
+// One function's disassembly: the byte window handed to the disassembler, and
+// the instruction budget inside that window. Both are real limits -- a 64 KB
+// function is pathological and 4096 rows is past what the sheet can scroll --
+// and both are reported: functionDetail emits asmBytes and asmTruncated, so a
+// listing that stopped early cannot be read as a function that ends there.
+static const size_t kAsmWindowBytes = 65536;
+static const size_t kAsmInstrsInDetail = 4096;
 
 
 Engine& Engine::instance() {
@@ -57,6 +83,25 @@ static std::string q(const std::string& s) { return "\"" + jsonEscape(s) + "\"";
 static std::string hq(u64 v) { return q(hexAddr(v)); }
 static std::string num(u64 v) {
     std::ostringstream os; os << v; return os.str();
+}
+
+// One row of the function list, for analyze() and for functions(). Both go
+// through here so a paged row and a first-page row stay the same shape.
+void Engine::emitFunctionRow(std::ostringstream& out, const Ctx& c, const FuncInfo& f,
+                             size_t& undemangled) const {
+    out << "{\"addr\":" << hq(f.addr) << ",\"size\":" << num(f.size)
+        << ",\"name\":" << q(f.name) << ",\"from\":" << q(f.from);
+    if (looksMangled(f.name)) {
+        std::string d = demangle(f.name);
+        if (d != f.name) out << ",\"demangled\":" << q(d);
+        else ++undemangled;   // shown as-is; counted, not hidden
+    }
+    // call edge counts
+    auto ce = c.cg.callees.find(f.addr);
+    auto cr = c.cg.callers.find(f.addr);
+    out << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
+        << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
+        << "}";
 }
 
 // ------------------------------------------------------------ data xrefs --
@@ -76,13 +121,23 @@ static std::string num(u64 v) {
 // graph is unchanged by this and stays a graph of calls.
 static void addDataXrefs(const std::string& arch, const u8* code, size_t size, u64 va,
                          u64 mapLo, u64 mapHi,
-                         std::map<u64, std::vector<Xref>>& out, size_t cap = 200000) {
-    size_t total = 0;
-    for (auto& kv : out) total += kv.second.size();
+                         std::map<u64, std::vector<Xref>>& out, size_t cap = 200000,
+                         size_t* seen = nullptr) {
+    size_t stored = 0;
+    for (auto& kv : out) stored += kv.second.size();
+    // `seen` is in/out: it carries in what the code scan already counted --
+    // INCLUDING the references it could not store -- and this pass adds to it.
+    // Starting from the map's size instead would quietly relabel the code
+    // scan's overflow as zero and report a total that is itself capped.
+    size_t total = seen ? *seen : stored;
+    // Same contract as buildXrefs: the cap stops the storing, never the
+    // counting, so the caller can say "200000 of 413118" instead of "200000".
     auto push = [&](u64 from, u64 to) {
-        if (to < mapLo || to >= mapHi || total >= cap) return;
-        out[to].push_back(Xref{from, to, "data"});
+        if (to < mapLo || to >= mapHi) return;
         ++total;
+        if (stored >= cap) return;
+        out[to].push_back(Xref{from, to, "data"});
+        ++stored;
     };
 
     if (arch == "ARM64") {
@@ -153,6 +208,7 @@ static void addDataXrefs(const std::string& arch, const u8* code, size_t size, u
             i += 6;
         }
     }
+    if (seen) *seen = total;
 }
 
 // ------------------------------------------------ decompiler selection --
@@ -474,10 +530,11 @@ void Engine::computeJniEnvArgs(Ctx& c) {
     auto disasmOf = [&](const FuncInfo& fn) -> std::vector<AsmLine> {
         u64 o = vaToOff(c, fn.addr);
         if (o == ~u64(0) || o >= c.bin.data.size()) return {};
-        u64 sz = std::min<u64>(fn.size ? fn.size : 512, 65536);
+        u64 sz = std::min<u64>(fn.size ? fn.size : 512, kAsmWindowBytes);
         sz = std::min<u64>(sz, u64(c.bin.data.size()) - o);
         if (!sz) return {};
-        return c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr, 4096);
+        return c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr,
+                                 kAsmInstrsInDetail);
     };
 
     std::map<u64, const FuncInfo*> byAddr;
@@ -578,16 +635,14 @@ u64 Engine::vaToOff(const Ctx& c, u64 va) {
 
 // ---------------------------------------------------------------- context --
 /**
- * Function discovery is capped, like the call-edge list and the two graph
- * arrays — but unlike them it used to throw the pre-cut count away, so the
- * engine could not report its own truncation even in a note. This is the same
- * sentence the other three caps write, in the same place.
+ * The string scans stop AT their cap instead of counting what they did not
+ * read, so unlike the function count their total is a floor, not a
+ * measurement. Say which, rather than let a cap be printed as a count.
  */
-static void noteFunctionCap(std::vector<std::string>& notes, size_t have, size_t found) {
-    if (found <= have) return;
-    notes.push_back("Function discovery: carrying " + std::to_string(have)
-                    + " of " + std::to_string(found)
-                    + " functions found, lowest address first");
+static void noteStringScanCap(std::vector<std::string>& notes, size_t have, size_t cap) {
+    if (have < cap) return;
+    notes.push_back("String scan: stopped at " + std::to_string(cap)
+                    + " strings; the file may hold more");
 }
 
 bool Engine::ensureCtx(const std::string& path) {
@@ -618,12 +673,12 @@ bool Engine::ensureCtx(const std::string& path) {
             if (c.elf.bits == 32 && c.arch == "X86_64") c.arch = "X86";
             size_t nFound = 0;
             c.funcs = discoverFunctionsElf(c.bin, c.elf, &nFound);
-            noteFunctionCap(c.notes, c.funcs.size(), nFound);
+            c.funcsFound = nFound;   // no cap between the two any more
             u64 va = 0, size = 0;
             if (elfExecRange(c.elf, va, size)) {
                 u64 off = elfVaToOff(c.elf, va);
                 if (off != ~u64(0) && off + size <= n) {
-                    c.xrefs = buildXrefs(c.arch, p + off, size, va);
+                    c.xrefs = buildXrefs(c.arch, p + off, size, va, 200000, &c.xrefsFound);
                     // Data references too, so "what reads this string" has an
                     // answer. Bounded to the addresses the file actually maps.
                     u64 lo = ~u64(0), hi = 0;
@@ -632,7 +687,9 @@ bool Engine::ensureCtx(const std::string& path) {
                             lo = std::min(lo, sg.vaddr);
                             hi = std::max(hi, sg.vaddr + sg.memsz);
                         }
-                    if (lo < hi) addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs);
+                    if (lo < hi)
+                        addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs, 200000,
+                                     &c.xrefsFound);
                 }
             }
             c.names = buildAddrNamesElf(c.bin, c.elf);
@@ -666,6 +723,8 @@ bool Engine::ensureCtx(const std::string& path) {
                 }
                 if (!any) all = extractPrintableStrings(p, n, c.elf.base, kStringCap, 5);
                 c.strings = std::move(all);
+                c.stringsFound = c.strings.size();
+                noteStringScanCap(c.notes, c.strings.size(), kStringCap);
             }
             if (c.funcs.empty()) c.notes.push_back("No function symbols — used linear scan");
             break;
@@ -675,40 +734,69 @@ bool Engine::ensureCtx(const std::string& path) {
             c.arch = c.pe.archEnum;
             size_t nFound = 0;
             c.funcs = discoverFunctionsPe(c.bin, c.pe, &nFound);
-            noteFunctionCap(c.notes, c.funcs.size(), nFound);
+            c.funcsFound = nFound;   // no cap between the two any more
             u64 va = 0, size = 0;
             if (peExecRange(c.pe, va, size)) {
                 u64 off = peVaToOff(c.pe, va);
                 if (off != ~u64(0) && off + size <= n) {
-                    c.xrefs = buildXrefs(c.arch, p + off, size, va);
+                    c.xrefs = buildXrefs(c.arch, p + off, size, va, 200000, &c.xrefsFound);
                     u64 lo = ~u64(0), hi = 0;
                     for (auto& sc : c.pe.sections)
                         if (sc.size) {
                             lo = std::min(lo, sc.addr);
                             hi = std::max(hi, sc.addr + sc.size);
                         }
-                    if (lo < hi) addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs);
+                    if (lo < hi)
+                        addDataXrefs(c.arch, p + off, size, va, lo, hi, c.xrefs, 200000,
+                                     &c.xrefsFound);
                 }
             }
             c.names = buildAddrNamesPe(c.bin, c.pe);
             c.cg = buildCallGraph(c.xrefs, c.funcs, c.names);
             c.strings = extractPrintableStrings(p, n, c.pe.imageBase, 3000, 5);
+            c.stringsFound = c.strings.size();
+            noteStringScanCap(c.notes, c.strings.size(), 3000);
             break;
         }
         case Fmt::DEX: {
             c.dex = parseDex(c.bin);
             c.arch.clear();
-            for (size_t i = 0; i < c.dex.strings.size() && c.strings.size() < 3000; ++i) {
-                if (c.dex.strings[i].size() >= 4)
+            // The walk does not stop at the 3000 the list carries: it counts
+            // every string that belongs in the list and carries the first
+            // 3000 of them, so stringsTotal means the same thing here as it
+            // does for ELF -- strings this engine would show you, not strings
+            // in the file (the same 4-character floor applies to both).
+            for (size_t i = 0; i < c.dex.strings.size(); ++i) {
+                if (c.dex.strings[i].size() < 4) continue;
+                ++c.stringsFound;
+                if (c.strings.size() < 3000)
                     c.strings.push_back(FoundString{u64(i), c.dex.strings[i]});
             }
+            // string_ids_size is exact, so a capped string TABLE is reportable
+            // even though what it cost us is not: we cannot know how many of
+            // the strings we never read would have passed the floor.
+            if (c.dex.stringsFound > c.dex.strings.size())
+                c.notes.push_back("DEX: string table carries "
+                                  + std::to_string(c.dex.strings.size()) + " of "
+                                  + std::to_string(c.dex.stringsFound)
+                                  + " string_ids; strings past that were not read");
             buildDexFuncsAndCalls(c.bin.data, c.dex, c.funcs, c.cg);
+            // The loader caps the method table, and the functions list is built
+            // from it -- so say so, because functionsTotal counts the methods
+            // that reached this point and cannot see the ones that did not.
+            if (c.dex.methodsFound > c.dex.methods.size())
+                c.notes.push_back("DEX: method table carries "
+                                  + std::to_string(c.dex.methods.size()) + " of "
+                                  + std::to_string(c.dex.methodsFound)
+                                  + " method_ids; methods past that are not listed");
             if (c.funcs.empty()) c.notes.push_back("No compiled methods found in DEX");
             break;
         }
         default: {
             c.arch.clear();
             c.strings = extractPrintableStrings(p, n, 0, 3000, 5);
+            c.stringsFound = c.strings.size();
+            noteStringScanCap(c.notes, c.strings.size(), 3000);
             c.notes.push_back("Unknown format — raw mode (hex + strings only)");
             break;
         }
@@ -821,25 +909,46 @@ std::string Engine::analyze(const std::string& path) {
     }
     out << "]";
 
-    // functions
-    out << ",\"functions\":[";
-    for (size_t i = 0; i < c.funcs.size(); ++i) {
+    // functions -- the first page of them. functionsTotal is the whole count,
+    // functionsOffset/functionsCount describe this page, and the rest is one
+    // functions(offset, count) call away. The separator goes in front of
+    // element i and is tested on i alone, so a page closes with "...}]" and
+    // never with the "...},]" that made a truncated answer unparseable.
+    size_t nFuncs = std::min<size_t>(c.funcs.size(), kFunctionsFirstPage);
+    size_t nUndemangled = 0;
+    out << ",\"functionsTotal\":" << num(std::max(c.funcsFound, c.funcs.size()))
+        << ",\"functionsOffset\":0,\"functionsCount\":" << num(nFuncs)
+        << ",\"functions\":[";
+    for (size_t i = 0; i < nFuncs; ++i) {
         if (i) out << ",";
-        auto& f = c.funcs[i];
-        out << "{\"addr\":" << hq(f.addr) << ",\"size\":" << num(f.size)
-            << ",\"name\":" << q(f.name) << ",\"from\":" << q(f.from);
-        if (looksMangled(f.name)) {
-            std::string d = demangle(f.name);
-            if (d != f.name) out << ",\"demangled\":" << q(d);
-        }
-        // call edge counts
-        auto ce = c.cg.callees.find(f.addr);
-        auto cr = c.cg.callers.find(f.addr);
-        out << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
-            << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
-            << "}";
+        emitFunctionRow(out, c, c.funcs[i], nUndemangled);
     }
     out << "]";
+    // Rows whose name looks mangled and that the demangler could not read, so
+    // they carry no "demangled" field. Scoped to the rows in the array above,
+    // because demangle() is a parser and is not run on what is not sent.
+    out << ",\"demangleFailed\":" << num(nUndemangled);
+    if (nFuncs < c.funcs.size())
+        extraNotes.push_back("Functions: this answer carries the first "
+                             + std::to_string(nFuncs) + " of "
+                             + std::to_string(c.funcs.size())
+                             + " functions, lowest address first; ask for the rest by page");
+
+    // Cross-references. Not an array here -- every xref answer in the engine is
+    // a slice of this map, served per function -- but the two numbers belong in
+    // the meta all the same: when the scan saw more than the map holds, every
+    // xrefsInTotal, every nCallers and the call graph itself are floors.
+    {
+        size_t stored = 0;
+        for (auto& kv : c.xrefs) stored += kv.second.size();
+        size_t seen = std::max(c.xrefsFound, stored);
+        out << ",\"xrefsStored\":" << num(stored) << ",\"xrefsTotal\":" << num(seen);
+        if (seen > stored)
+            extraNotes.push_back("Xrefs: the map holds " + std::to_string(stored) + " of "
+                                 + std::to_string(seen)
+                                 + " references found; call and data reference counts"
+                                   " past that point are floors");
+    }
 
     // Call graph. The edge list is sorted by (calling function, target) —
     // see DeepAnalysis.h — so a cap, if one is ever hit, removes a documented
@@ -867,14 +976,29 @@ std::string Engine::analyze(const std::string& path) {
     out << "]";
 
     // strings
-    out << ",\"strings\":[";
-    size_t nStr = c.strings.size() < kStringsInJson ? c.strings.size() : kStringsInJson;
+    //
+    // stringsTotal is what the engine holds and can answer questions about;
+    // `strings` is what this answer carries. For DEX it is string_ids_size out
+    // of the header and therefore exact; for ELF and PE the scan stops at its
+    // own cap, which makes it a floor -- and when that cap fired a note in
+    // `notes` says so, so the number is never passed off as the count.
+    const size_t stringsTotal = std::max(c.stringsFound, c.strings.size());
+    out << ",\"stringsTotal\":" << num(stringsTotal)
+        << ",\"strings\":[";
+    size_t nStr = std::min<size_t>(c.strings.size(), kStringsInJson);
     for (size_t i = 0; i < nStr; ++i) {
         if (i) out << ",";
         out << "{\"addr\":" << hq(c.strings[i].addr)
             << ",\"value\":" << q(c.strings[i].value.substr(0, 256)) << "}";
     }
     out << "]";
+    // Against the total, not against c.strings.size(): DEX cuts its list
+    // while building it, so comparing with what survived would print no note
+    // at all for exactly the case that needs one.
+    if (nStr < stringsTotal)
+        extraNotes.push_back("Strings: this answer carries " + std::to_string(nStr) + " of "
+                             + std::to_string(stringsTotal)
+                             + " strings, lowest address first");
 
     // imports / exports
     out << ",\"imports\":[";
@@ -905,8 +1029,14 @@ std::string Engine::analyze(const std::string& path) {
     }
     out << "],\"soName\":" << q(c.fmt == Fmt::ELF ? c.elf.soName : "");
 
-    // dex extras
-    out << ",\"dexClasses\":[";
+    // dex extras. The loader caps both tables; the header counts say what the
+    // file holds, so unlike the string scans these two totals are exact.
+    u64 dexClassesTotal = c.fmt == Fmt::DEX
+        ? std::max<u64>(c.dex.classesFound, u64(c.dex.classes.size())) : 0;
+    u64 dexMethodsTotal = c.fmt == Fmt::DEX
+        ? std::max<u64>(c.dex.methodsFound, u64(c.dex.methods.size())) : 0;
+    out << ",\"dexClassesTotal\":" << num(dexClassesTotal)
+        << ",\"dexClasses\":[";
     if (c.fmt == Fmt::DEX) {
         for (size_t i = 0; i < c.dex.classes.size(); ++i) {
             if (i) out << ",";
@@ -914,7 +1044,8 @@ std::string Engine::analyze(const std::string& path) {
                 << ",\"super\":" << q(c.dex.classes[i].super) << "}";
         }
     }
-    out << "],\"dexMethods\":[";
+    out << "],\"dexMethodsTotal\":" << num(dexMethodsTotal)
+        << ",\"dexMethods\":[";
     if (c.fmt == Fmt::DEX) {
         for (size_t i = 0; i < c.dex.methods.size(); ++i) {
             if (i) out << ",";
@@ -936,6 +1067,52 @@ std::string Engine::analyze(const std::string& path) {
         out << q(extraNotes[i]);
     }
     out << "]}";
+    return out.str();
+}
+
+// ------------------------------------------------------------- functions --
+/**
+ * One page of the function list. The analysis behind it is not paged and not
+ * capped: c.funcs holds every function found in the binary, and this hands
+ * back the slice asked for, with the total beside it so a caller knows when it
+ * has walked the whole list.
+ */
+std::string Engine::functions(const std::string& path, u64 offset, u64 count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ostringstream out;
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        out << "{\"ok\":false,\"error\":\""
+            << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return out.str();
+    }
+    const Ctx& c = ctx_;
+
+    const size_t have = c.funcs.size();
+    // An offset past the end is not an error, it is the end of the walk: the
+    // answer is an empty page with the same total, which is what a loop that
+    // asks "did I get anything?" needs to terminate.
+    const size_t from = offset >= u64(have) ? have : size_t(offset);
+    size_t want = count == 0 ? kFunctionsFirstPage
+                             : size_t(std::min<u64>(count, u64(kFunctionsPageMax)));
+    const size_t to = std::min<size_t>(have, from + want);
+
+    size_t nUndemangled = 0;
+    // total, offset and count all go out BEFORE the array: the array's length
+    // is a page size, these three are the measurement. `count` is what this
+    // answer really carries, after the clamp, so a caller that asked for more
+    // than kFunctionsPageMax can see that it must ask again rather than
+    // conclude it has reached the end.
+    out << "{\"ok\":true"
+        << ",\"functionsTotal\":" << num(std::max(c.funcsFound, have))
+        << ",\"offset\":" << num(from)
+        << ",\"count\":" << num(to - from)
+        << ",\"functions\":[";
+    for (size_t i = from; i < to; ++i) {
+        if (i > from) out << ",";
+        emitFunctionRow(out, c, c.funcs[i], nUndemangled);
+    }
+    out << "],\"demangleFailed\":" << num(nUndemangled) << "}";
     return out.str();
 }
 
@@ -970,13 +1147,13 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
                 // a DEX method must not read "3 in" on one screen and "0" here.
                 << ",\"nCallees\":" << (ce == c.cg.callees.end() ? 0 : int(ce->second.size()))
                 << ",\"nCallers\":" << (cr == c.cg.callers.end() ? 0 : int(cr->second.size()))
-                << ",\"asm\":[]"
+                << ",\"asmBytes\":0,\"asmTruncated\":false,\"asm\":[]"
                 << ",\"pseudo\":" << q(std::string("// Dalvik bytecode — DEX disassembler backend on the roadmap\n")
                     + "// class: " + m.clazz + "\n// proto: " + m.proto
                     + "\n// code: " + std::to_string(sz) + " bytes\n"
                     + "// callees: " + std::to_string(ce == c.cg.callees.end() ? 0 : (int)ce->second.size())
                     + " · callers: " + std::to_string(cr == c.cg.callers.end() ? 0 : (int)cr->second.size()) + "\n")
-                << ",\"blocks\":[],\"xrefsInTotal\":0,\"xrefsIn\":[]"
+                << ",\"blocksTotal\":0,\"blocks\":[],\"xrefsInTotal\":0,\"xrefsIn\":[]"
                 << ",\"xrefsOutTotal\":0,\"xrefsOut\":[]}";
             break;
         }
@@ -1015,14 +1192,18 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         out << "{\"ok\":false,\"error\":\"Address not mapped in file\"}";
         return out.str();
     }
-    u64 size = std::min<u64>(fn->size ? fn->size : 512, 65536);
+    u64 size = std::min<u64>(fn->size ? fn->size : 512, kAsmWindowBytes);
     size = std::min<u64>(size, u64(c.bin.data.size()) - off);
 
     // For ARM32 the enclosing function's Thumb bit decides the mode wherever the
     // mapping table has nothing to say.
     if (c.dis.armDualMode()) c.dis.setDefaultThumb(fn->thumb);
 
-    auto lines = c.dis.disassemble(c.bin.data.data() + off, size_t(size), fn->addr, 4096);
+    auto lines = c.dis.disassemble(c.bin.data.data() + off, size_t(size), fn->addr,
+                                   kAsmInstrsInDetail);
+    // Read before the padding trim below shortens the list: a budget that
+    // filled up is the truncation, and the trim would hide that it had.
+    const bool asmCapHit = lines.size() >= kAsmInstrsInDetail;
 
     // trim trailing zero-padding runs (e.g. 00 00 after _fini)
     {
@@ -1042,7 +1223,8 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     std::map<u64, std::string> labels;
     for (auto& f : c.funcs) labels[f.addr] = f.name;
 
-    auto blocks = buildCfg(lines, fn->addr, fn->addr + size, c.arch);
+    size_t nBlocksFound = 0;
+    auto blocks = buildCfg(lines, fn->addr, fn->addr + size, c.arch, &nBlocksFound);
 
     // v2: auto comments
     autoComment(c.arch, lines, c.names, c.strings, fn->addr, fn->addr + size);
@@ -1077,6 +1259,14 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         << ",\"irStats\":{\"stmts\":" << ir.nStmts << ",\"whiles\":" << ir.nWhile
         << ",\"ifs\":" << ir.nIf << ",\"gotocs\":" << ir.nGoto
         << ",\"calls\":" << ir.nCalls << "}"
+        // How much of the function the listing below actually covers. `size`
+        // is the window the disassembler was given: smaller than the function
+        // when kAsmWindowBytes or the end of the file clipped it. asmTruncated
+        // also covers the instruction budget, which can stop the decode inside
+        // a window that was not clipped at all. Without these two a listing
+        // that stops at 4096 rows reads exactly like a function that ends.
+        << ",\"asmBytes\":" << num(size)
+        << ",\"asmTruncated\":" << ((asmCapHit || size < fn->size) ? "true" : "false")
         << ",\"asm\":[";
     for (size_t i = 0; i < lines.size(); ++i) {
         if (i) out << ",";
@@ -1089,8 +1279,10 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     // pseudo with escaped newlines
     out << ",\"pseudo\":" << q(pseudo);
 
-    // blocks
-    out << ",\"blocks\":[";
+    // blocks. buildCfg counts every block the function has and carries the
+    // first 512, so blocksTotal is a measurement even when the graph is not.
+    out << ",\"blocksTotal\":" << num(std::max<size_t>(nBlocksFound, blocks.size()))
+        << ",\"blocks\":[";
     for (size_t i = 0; i < blocks.size(); ++i) {
         if (i) out << ",";
         auto& b = blocks[i];
@@ -1223,7 +1415,11 @@ std::string Engine::callGraph(const std::string& path, u64 focus) {
     size_t shown = std::min<size_t>(keep.size(), kCallGraphEdgesInJson);
     out << "{\"ok\":true,\"focus\":\"" << hexAddr(focus) << "\""
         << ",\"edgesTotal\":" << num(keep.size())
-        << ",\"funcsTotal\":" << num(c.funcs.size())
+        // The same number analyze() calls functionsTotal. Discovery no longer
+        // caps the list, but this stays max()-ed against it: it used to print
+        // c.funcs.size(), which was itself the capped figure, so a 12631-
+        // function library reported "4000 of 4000".
+        << ",\"funcsTotal\":" << num(std::max(c.funcsFound, c.funcs.size()))
         << ",\"edges\":[";
     for (size_t i = 0; i < shown; ++i) {
         if (i) out << ",";
@@ -1524,7 +1720,8 @@ std::string Engine::emulate(const std::string& path, const std::string& reqJson)
         }
         out << "]}";
     }
-    out << "],\"userops\":[";
+    out << "],\"useropsDropped\":" << num(r.useropsDropped)
+        << ",\"userops\":[";
     for (size_t i = 0; i < r.userops.size(); ++i) {
         if (i) out << ",";
         out << "{\"n\":" << q(r.userops[i].name) << ",\"count\":" << r.userops[i].count
@@ -1948,6 +2145,15 @@ std::string Engine::scriptRun(const std::string& source, const std::string& path
             }
             frontier.swap(next);
         }
+        // -1 means "no path" everywhere else in this builtin. When the budget
+        // is what stopped the search it means "no path found within 20000
+        // expansions", which is a different claim, so say so in the plugin log
+        // rather than let a bounded search read as a proof of absence.
+        if (expansions >= kMaxExpansions)
+            logBuf << "[engine] reaches(" << hexAddr(from) << ", " << hexAddr(to)
+                   << "): search stopped at " << kMaxExpansions
+                   << " expansions; -1 here means no path was FOUND, not that"
+                      " there is none\n";
         return ScriptValue::ofNum(-1);
     });
 
@@ -2358,6 +2564,30 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
     const bool useGhidra = !wantAsm && ghidraReady(c, path);
     if (useGhidra) computeJniEnvArgs(c);
 
+    // What to write, chosen before the header so the header can say how many.
+    std::vector<const FuncInfo*> targets;
+    if (wantOne) {
+        for (auto& fn : c.funcs)
+            if (fn.addr == addr) { targets.push_back(&fn); break; }
+        if (targets.empty()) {
+            for (auto& fn : c.funcs)
+                if (addr >= fn.addr && addr < fn.addr + fn.size) { targets.push_back(&fn); break; }
+        }
+        if (targets.empty()) {
+            st << "{\"ok\":false,\"error\":\"No function at that address\"}";
+            return st.str();
+        }
+    } else {
+        for (auto& fn : c.funcs)
+            if (fn.from != "import") targets.push_back(&fn);
+    }
+    // Address order, always. c.funcs is sorted when it is built, but
+    // functionDetail appends a synthetic entry for an address no symbol covers
+    // and appends it at the end, so a listing produced after someone opened
+    // such an address would jump backwards once, in the middle.
+    std::sort(targets.begin(), targets.end(),
+              [](const FuncInfo* a, const FuncInfo* b) { return a->addr < b->addr; });
+
     std::string base = c.bin.path;
     size_t slash = base.find_last_of('/');
     if (slash != std::string::npos) base = base.substr(slash + 1);
@@ -2375,6 +2605,7 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
       << (useGhidra ? GhidraDecomp::instance().backendName()
                     : std::string("Nocturne IR lifter"))
       << "\n";
+    f << " * Functions   : " << targets.size() << "\n";
     f << " *\n";
     f << " * This is reconstructed from machine code, not original source. It will\n";
     f << " * not recompile as-is.\n";
@@ -2424,15 +2655,22 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
     std::map<u64, std::string> labels;
     for (auto& fn : c.funcs) labels[fn.addr] = fn.name;
 
-    auto buildFnSource = [&](const FuncInfo& fn, FnSource& out) -> bool {
+    // `why` is filled in on every false return: a function that is missing
+    // from the listing has to be able to say what happened to it.
+    auto buildFnSource = [&](const FuncInfo& fn, FnSource& out, std::string& why) -> bool {
+        why.clear();
         u64 o = vaToOff(c, fn.addr);
-        if (o == ~u64(0) || o >= c.bin.data.size()) return false;
-        u64 sz = std::min<u64>(fn.size ? fn.size : 512, 65536);
+        if (o == ~u64(0) || o >= c.bin.data.size()) {
+            why = "address not mapped in the file";
+            return false;
+        }
+        u64 sz = std::min<u64>(fn.size ? fn.size : 512, kAsmWindowBytes);
         sz = std::min<u64>(sz, u64(c.bin.data.size()) - o);
-        if (!sz) return false;
+        if (!sz) { why = "no bytes at this address"; return false; }
 
         if (c.dis.armDualMode()) c.dis.setDefaultThumb(fn.thumb);
-        out.lines = c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr, 4096);
+        out.lines = c.dis.disassemble(c.bin.data.data() + o, size_t(sz), fn.addr,
+                                      kAsmInstrsInDetail);
 
         int runStart = -1, run = 0;
         for (size_t i = 0; i < out.lines.size(); ++i) {
@@ -2459,83 +2697,176 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
                 out.size = sz;
                 return true;
             }
+            // Kept in case the fallback below produces nothing either: then
+            // this is the reason the reader wants, not "no output".
+            why = err;
         }
         IrResult ir = decompileIR(out.lines, c.arch, fn.addr, fn.name, c.names, c.strings);
         out.pseudo = ir.ok ? ir.text : genPseudo(out.lines, c.arch, fn.addr, fn.name, labels);
         out.mode = ir.ok ? "IR" : "heuristic";
         out.size = sz;
+        if (wantAsm && out.lines.empty()) { why = "no instructions decoded"; return false; }
+        if (!wantAsm && out.pseudo.empty()) {
+            if (why.empty()) why = "the lifter produced no output";
+            return false;
+        }
+        why.clear();
         return true;
     };
 
-    std::vector<const FuncInfo*> targets;
-    if (wantOne) {
-        for (auto& fn : c.funcs)
-            if (fn.addr == addr) { targets.push_back(&fn); break; }
-        if (targets.empty()) {
-            for (auto& fn : c.funcs)
-                if (addr >= fn.addr && addr < fn.addr + fn.size) { targets.push_back(&fn); break; }
-        }
-        if (targets.empty()) {
-            st << "{\"ok\":false,\"error\":\"No function at that address\"}";
-            return st.str();
-        }
-    } else {
-        for (auto& fn : c.funcs)
-            if (fn.from != "import") targets.push_back(&fn);
-    }
+    // Progress and cancellation, in atomics rather than under mutex_ -- which
+    // this call holds for its whole run. A caller that had to take that mutex
+    // to ask "how far along?" would get the answer after the export was over.
+    // The flag is an object so the "running" bit is cleared on every exit,
+    // including one taken by an exception on the way out.
+    struct RunFlag {
+        std::atomic<bool>& b;
+        explicit RunFlag(std::atomic<bool>& r) : b(r) { b = true; }
+        ~RunFlag() { b = false; }
+    } runFlag(exportRunning_);
+    exportCancel_ = false;
+    exportDone_ = 0;
+    exportFailed_ = 0;
+    exportTotal_ = u64(targets.size());
+
+    size_t done = 0, failed = 0;
+    bool cancelled = false;
 
     if (wantHdr) {
         f << "/* " << targets.size() << " functions */\n\n";
         FnSource hs;
         for (auto* fn : targets) {
+            if (exportCancel_.load()) { cancelled = true; break; }
             hs = FnSource{};
-            std::string pseudo = buildFnSource(*fn, hs) ? hs.pseudo : std::string();
-            f << fnSignature(*fn, pseudo) << ";  /* 0x" << std::hex << std::uppercase
-              << fn->addr << std::dec << std::nouppercase << " */\n";
-        }
-        f << "\n";
-        f.flush();
-        st << "{\"ok\":true,\"functions\":" << targets.size() << ",\"bytes\":" << u64(f.tellp()) << "}";
-        return st.str();
-    }
-
-    size_t done = 0, failed = 0;
-    FnSource src;
-    for (auto* fn : targets) {
-        src = FnSource{};
-        if (!buildFnSource(*fn, src)) { ++failed; continue; }
-
-        f << "/* ---------------------------------------------------------------\n";
-        f << "   " << fn->name << "\n";
-        f << "   0x" << std::hex << std::uppercase << fn->addr << std::dec << std::nouppercase
-          << "  ·  " << src.size << " bytes";
-        if (!wantAsm) f << "  ·  " << src.mode;
-        f << "\n   --------------------------------------------------------------- */\n";
-
-        if (wantAsm) {
-            for (auto& l : src.lines) {
-                char buf[32];
-                snprintf(buf, sizeof buf, "%08llX", (unsigned long long)l.addr);
-                f << buf << "  " << l.mnem;
-                if (!l.ops.empty()) f << " " << l.ops;
-                if (!l.comment.empty()) f << "    ; " << l.comment;
-                f << "\n";
+            std::string why, pseudo;
+            bool okFn = false;
+            try {
+                okFn = buildFnSource(*fn, hs, why);
+            } catch (const std::exception& e) {
+                why = e.what();
+            } catch (...) {
+                why = "unknown failure";
             }
-        } else {
-            f << src.pseudo;
-            if (!src.pseudo.empty() && src.pseudo.back() != '\n') f << "\n";
+            if (okFn) { pseudo = hs.pseudo; ++done; }
+            else      { ++failed; }
+            // A stub whose body could not be read still gets a declaration --
+            // with the reason on it, so a reader is not left to guess why this
+            // one prototype is the generic one.
+            f << fnSignature(*fn, pseudo) << ";  /* 0x" << std::hex << std::uppercase
+              << fn->addr << std::dec << std::nouppercase;
+            if (!okFn) f << " — not decompiled: " << (why.empty() ? "no output" : why);
+            f << " */\n";
+            exportFailed_ = u64(failed);
+            exportDone_ = u64(done + failed);
         }
         f << "\n";
-        ++done;
+    } else {
+        FnSource src;
+        for (auto* fn : targets) {
+            // Checked between functions, never inside one: a half-written
+            // function is a file that lies about where the code ends.
+            if (exportCancel_.load()) { cancelled = true; break; }
+
+            src = FnSource{};
+            std::string why;
+            bool okFn = false;
+            // One function the decompiler cannot read must not end the export.
+            // Ghidra catches its own errors and reports them through `err`,
+            // but the disassembler, the IR lifter and the auto-commenter are
+            // all reachable from here too, and an export that dies at function
+            // 400 of 98000 is worth nothing to the person who started it.
+            try {
+                okFn = buildFnSource(*fn, src, why);
+            } catch (const std::exception& e) {
+                why = e.what();
+            } catch (...) {
+                why = "unknown failure";
+            }
+
+            f << "/* ---------------------------------------------------------------\n";
+            f << "   " << fn->name << "\n";
+            f << "   0x" << std::hex << std::uppercase << fn->addr << std::dec
+              << std::nouppercase;
+            if (okFn) {
+                f << "  ·  " << src.size << " bytes";
+                if (!wantAsm) f << "  ·  " << src.mode;
+            }
+            f << "\n   --------------------------------------------------------------- */\n";
+
+            if (!okFn) {
+                // In the file, where the person reading the source will see
+                // it. A function that is simply absent from a listing reads as
+                // a function that is not in the binary.
+                f << "/* " << (wantAsm ? "disassembly" : "decompilation")
+                  << " failed: " << (why.empty() ? std::string("no output") : why)
+                  << " */\n\n";
+                ++failed;
+                exportFailed_ = u64(failed);
+                exportDone_ = u64(done + failed);
+                continue;
+            }
+
+            if (wantAsm) {
+                for (auto& l : src.lines) {
+                    char buf[32];
+                    snprintf(buf, sizeof buf, "%08llX", (unsigned long long)l.addr);
+                    f << buf << "  " << l.mnem;
+                    if (!l.ops.empty()) f << " " << l.ops;
+                    if (!l.comment.empty()) f << "    ; " << l.comment;
+                    f << "\n";
+                }
+            } else {
+                f << src.pseudo;
+                if (!src.pseudo.empty() && src.pseudo.back() != '\n') f << "\n";
+            }
+            f << "\n";
+            ++done;
+            exportDone_ = u64(done + failed);
+        }
     }
+
+    // A partial file has to say so IN the file. The caller is told as well,
+    // but the file outlives the call, and a listing that stops early while
+    // reading as complete is the same lie as a truncated array with no count
+    // beside it.
+    f << "/* ===============================================================\n";
+    if (cancelled)
+        f << "   STOPPED at the caller's request after " << (done + failed) << " of "
+          << targets.size() << " functions. This file is incomplete.\n";
+    else
+        f << "   " << done << " of " << targets.size() << " functions written.\n";
+    if (failed)
+        f << "   " << failed << (failed == 1 ? " function" : " functions")
+          << " could not be decompiled; each one is marked above.\n";
+    f << "   =============================================================== */\n";
 
     f.flush();
     long long bytes = (long long)f.tellp();
     f.close();
 
     st << "{\"ok\":true,\"functions\":" << done << ",\"failed\":" << failed
+       << ",\"total\":" << targets.size()
+       << ",\"cancelled\":" << (cancelled ? "true" : "false")
        << ",\"bytes\":" << bytes << "}";
     return st.str();
 }
+
+/**
+ * How far the export running right now has got. Lock-free on purpose: see the
+ * RunFlag comment above. After a run ends the numbers stay at their final
+ * values with running:false, so a caller that polls once more sees the result
+ * rather than zeroes.
+ */
+std::string Engine::exportProgress() {
+    std::ostringstream out;
+    out << "{\"running\":" << (exportRunning_.load() ? "true" : "false")
+        << ",\"done\":" << exportDone_.load()
+        << ",\"total\":" << exportTotal_.load()
+        << ",\"failed\":" << exportFailed_.load()
+        << ",\"cancelling\":" << (exportCancel_.load() ? "true" : "false") << "}";
+    return out.str();
+}
+
+void Engine::exportStop() { exportCancel_ = true; }
 
 } // namespace sako

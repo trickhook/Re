@@ -121,6 +121,11 @@ struct EmuResult {
     std::vector<EmuCall> calls;
     u64 callsTotal = 0;
     std::vector<EmuUserop> userops;
+    // Userop executions that did not fit the 64-name table above. Not itemised
+    // and not counted per name, but not invisible either: "approximate" tells
+    // you a model returned zero, and this tells you how much of that the list
+    // does not show.
+    u64 useropsDropped = 0;
 
     std::vector<u64> tail;         // the last addresses executed, oldest first
 
