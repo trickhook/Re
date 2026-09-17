@@ -713,6 +713,129 @@ fun XrefSheet(
     }
 }
 
+/**
+ * The functions that reference one string or datum, opened from the strings
+ * panel. XrefSheet above answers "who references this FUNCTION" and is driven by
+ * a [FunctionDetail]; a string belongs to no function, so this is driven by the
+ * ViewModel's [StudioViewModel.stringXrefs] instead — the engine's data-aware
+ * answer (Engine::xrefsTo) for one address.
+ *
+ * Every row is a referencing SITE and always navigates: the site is an
+ * instruction, so even a site outside every known function opens on that
+ * address. The count in the subtitle is the engine's honest total, with the
+ * loaded count beside it when its per-address cap dropped rows — the same shape
+ * XrefSheet uses so the two sheets read alike.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun StringXrefSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
+    val ide = LocalIde.current
+    val target = vm.stringXrefsTarget ?: return
+    val x = vm.stringXrefs
+    val busy = vm.stringXrefsBusy
+    val siteWidth = monoGlyphs(Type.monoSmall, 9)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = ide.panel
+    ) {
+        Column(Modifier.padding(bottom = Space.xl)) {
+            Column(Modifier.padding(horizontal = Space.xl, vertical = Space.s)) {
+                Text(
+                    when (x?.targetKind) {
+                        "code" -> "References to this code address"
+                        "data" -> "References to this data"
+                        else -> "References to this string"
+                    },
+                    color = ide.text, fontSize = Type.title, lineHeight = Type.titleLine,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(Space.xs))
+                val value = x?.value
+                if (!value.isNullOrEmpty()) {
+                    Text(
+                        "“" + value + "”",
+                        color = ide.text, fontSize = Type.label, lineHeight = Type.labelLine,
+                        fontFamily = Mono, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(Space.xs))
+                }
+                val count = when {
+                    x == null -> hexFmt(target)
+                    x.total > x.refs.size -> "${x.refs.size} of ${x.total} · ${hexFmt(target)}"
+                    else -> "${x.total} · ${hexFmt(target)}"
+                }
+                Text(
+                    count,
+                    color = ide.dim2, fontSize = Type.label, lineHeight = Type.labelLine,
+                    fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(Modifier.height(Space.m))
+            when {
+                busy && x == null -> SkeletonLines(8)
+                x == null -> EmptyPanel(
+                    "Could not read references",
+                    "The engine returned no answer for this address."
+                )
+                x.refs.isEmpty() -> EmptyPanel(
+                    if (x.targetKind == "code") "Nothing references this address"
+                    else "Nothing references this string",
+                    "The reference scan found no site that points here — the string may be " +
+                        "unused, or reached only through a pointer the scan does not follow."
+                )
+                else -> LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(x.refs.size) { i ->
+                        val r = x.refs[i]
+                        val known = r.funcAddr != 0L && vm.functionAt(r.funcAddr) != null
+                        val label = when {
+                            known -> vm.effectiveFuncName(r.funcAddr)
+                            r.funcAddr != 0L -> r.funcDisplay.ifBlank { r.funcName }
+                                .ifBlank { hexFmt(r.funcAddr) }
+                            else -> "unmapped"
+                        }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable(role = Role.Button) {
+                                    vm.gotoStringXref(r.funcAddr, r.from)
+                                }
+                                .padding(horizontal = Space.xl, vertical = Space.m),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                hexFmt(r.from), color = ide.dim2, fontSize = Type.monoSmall,
+                                lineHeight = Type.monoSmallLine, fontFamily = Mono, maxLines = 1,
+                                modifier = Modifier.widthIn(min = siteWidth)
+                            )
+                            Spacer(Modifier.width(Space.m))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    label,
+                                    color = if (r.funcAddr != 0L) ide.text else ide.dim,
+                                    fontSize = Type.label, lineHeight = Type.labelLine,
+                                    fontFamily = Mono, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                                if (r.funcAddr == 0L) {
+                                    Text(
+                                        "outside any known function", color = ide.dim2,
+                                        fontSize = Type.caption, lineHeight = Type.captionLine,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(Space.m))
+                            StatChip(r.type.ifEmpty { "ref" }, mnemonicColor(r.type, ide))
+                        }
+                        HorizontalDivider(color = ide.border)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ================================================================= pieces ==
 
 @Composable

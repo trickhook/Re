@@ -106,6 +106,27 @@ object NativeBridge {
 
     external fun nativeAnalyze(path: String): String
     external fun nativeFunction(path: String, addr: Long): String
+
+    /**
+     * References TO one address, data included. [nativeFunction] answers "who
+     * references this FUNCTION" and cannot serve a string or datum, whose
+     * address resolves to no function; this answers "who references this
+     * ADDRESS" by walking the same reference map the analysis built (the store
+     * behind the script builtin count_xrefs_to) and mapping every referencing
+     * site to the function that contains it. It is the direct route from a
+     * string to the routine that uses it — the address of "pinned public key"
+     * to the SSL-pinning function — without decompiling candidates one by one.
+     *
+     * Returns `{"ok":true,"target":"0x…","targetKind":"string"|"data"|"code",
+     * "value":"…"(strings only),"total":N,"shown":M,"refs":[{"from":"0x…",
+     * "funcAddr":"0x…","funcName":"…","funcDisplay":"…"(when demangled),
+     * "type":"data"|"call"|…}]}` or `{"ok":false,"error":"…"}`. `refs` is
+     * capped (`shown` of `total`); `funcAddr` is `0x0` for a site outside every
+     * known function. Engine side: Engine::xrefsTo.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeXrefsTo(path: String, address: Long): String
     external fun nativeCallGraph(path: String, focus: Long): String
 
     /**

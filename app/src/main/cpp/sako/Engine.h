@@ -60,6 +60,25 @@ public:
     // Per-function detail (asm + comments + IR pseudo-C + CFG + xrefs) → JSON
     std::string functionDetail(const std::string& path, u64 addr);
 
+    // Cross-references TO one address, data included. functionDetail answers
+    // "who references this FUNCTION" by walking the slice of c.xrefs that lands
+    // inside a function body; this answers "who references this ADDRESS" for
+    // one exact target key — the string/datum case that has no function to
+    // resolve to. It reads the SAME c.xrefs store the script builtin
+    // count_xrefs_to reads, so the total here and count_xrefs_to(addr,"any")
+    // are the same number; every referencing site is mapped to the function
+    // that contains it. The point is the data case: the address behind a
+    // string like "pinned public key" resolves to no function, so
+    // functionDetail either fails or answers for the wrong one, while this
+    // returns the functions that reference the string. If the address is
+    // itself inside a function it degenerates honestly to that function's
+    // code callers. Returns:
+    //   {ok, target, targetKind ("string"|"data"|"code"), value?,
+    //    total, shown, refs:[{from, funcAddr, funcName, funcDisplay?, type}]}
+    // `total` is the honest count; `refs` is capped and `shown` says how many
+    // it carries.
+    std::string xrefsTo(const std::string& path, u64 addr);
+
     // Binary diff — compare two LINKED binaries (typically two versions of the
     // same library) and classify every function identical / changed / added /
     // removed, with a similarity score for the changed ones. `pathA` is the

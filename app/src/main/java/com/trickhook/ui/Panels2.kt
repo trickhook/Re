@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
@@ -288,6 +289,12 @@ fun StringsPanel(vm: StudioViewModel) {
             }
         }
     }
+    // Opened by the references affordance on a row: the functions that use the
+    // string. Driven by the ViewModel, so the async engine call can fill it in
+    // while the sheet is already up. Its rows live in Common.kt beside XrefSheet.
+    if (vm.stringXrefsTarget != null) {
+        StringXrefSheet(vm, onDismiss = { vm.closeStringXrefs() })
+    }
 }
 
 @Composable
@@ -343,6 +350,19 @@ private fun StringsHitRow(vm: StudioViewModel, s: FoundStr, modifier: Modifier =
             }
         }
         Spacer(Modifier.width(Space.m))
+        // Who references this string. A string lives in .rodata and belongs to
+        // no function, so the row's own tap (code or hex) cannot answer it; this
+        // hands the address to the engine's data-aware reference map and opens
+        // the functions that use it — the direct route from a string to its
+        // routine.
+        IconButton(onClick = { vm.loadStringXrefs(s.addr) }) {
+            Icon(
+                Icons.Filled.CallReceived,
+                contentDescription = "Functions that reference this string",
+                tint = ide.dim,
+                modifier = Modifier.size(16.dp)
+            )
+        }
         if (fn != null && off != null) {
             // The second destination: the raw bytes. Only worth its own button
             // when the tap itself is already spoken for by the code view.

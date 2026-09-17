@@ -108,6 +108,41 @@ data class AsmLine(val addr: Long, val bytes: String, val mnem: String, val ops:
 data class CfgBlock(val id: Int, val start: Long, val end: Long, val nInstr: Int, val succ: List<Int>)
 data class Xref(val from: Long, val to: Long, val type: String)
 
+/**
+ * One site that references a DATA address (a string or datum), mapped to the
+ * function that contains it. [from] is the referencing instruction; [funcAddr]
+ * is its containing function's start, or 0 when the site is outside every known
+ * function; [funcName] is that function's raw symbol and [funcDisplay] its
+ * demangled form (equal to [funcName] when nothing demangled).
+ */
+data class XrefSite(
+    val from: Long,
+    val funcAddr: Long,
+    val funcName: String,
+    val funcDisplay: String,
+    val type: String
+)
+
+/**
+ * The functions that reference one address — the answer to "who uses this
+ * string?". Unlike [FunctionDetail]'s xrefs, which are a function's own, this
+ * is keyed on any target address, so a string or datum that belongs to no
+ * function still has an answer. [targetKind] is "string", "data" or "code";
+ * [value] is the string's text when the target is one. [refs] is capped:
+ * [total] is the honest count and [shown] (== refs.size) how many rows came
+ * back. Engine side: Engine::xrefsTo, via [com.trickhook.engine.NativeBridge.nativeXrefsTo].
+ */
+data class AddressXrefs(
+    val ok: Boolean,
+    val error: String?,
+    val target: Long,
+    val targetKind: String,
+    val value: String?,
+    val total: Int,
+    val shown: Int,
+    val refs: List<XrefSite>
+)
+
 data class IrStats(val stmts: Int, val whiles: Int, val ifs: Int, val gotos: Int, val calls: Int)
 
 data class FunctionDetail(
@@ -374,6 +409,41 @@ fun parseDetail(json: String): FunctionDetail {
         asmBytes = o.optInt("asmBytes"),
         asmTruncated = o.optBoolean("asmTruncated"),
         blocksTotal = maxOf(o.optInt("blocksTotal"), blocks.size)
+    )
+}
+
+/**
+ * Read the engine's `xrefsTo` answer. `refs` is the ground truth for what
+ * arrived; `total` is the engine's honest count (>= refs.size when the 500-row
+ * cap dropped some), and `shown` is trusted only as far as the array actually
+ * carries, so a walk never steps past rows it never received -- the same rule
+ * [parseFunctionPage] applies to `count`.
+ */
+fun parseAddressXrefs(json: String): AddressXrefs {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return AddressXrefs(false, o.optString("error", "xrefs failed"), 0, "", null, 0, 0, emptyList())
+    }
+    val refs = o.optJSONArray("refs")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val s = arr.getJSONObject(i)
+            XrefSite(
+                from = hx(s.optString("from")),
+                funcAddr = hx(s.optString("funcAddr")),
+                funcName = s.optString("funcName"),
+                funcDisplay = s.optString("funcDisplay").ifEmpty { s.optString("funcName") },
+                type = s.optString("type")
+            )
+        }
+    } ?: emptyList()
+    return AddressXrefs(
+        ok = true, error = null,
+        target = hx(o.optString("target")),
+        targetKind = o.optString("targetKind"),
+        value = if (o.has("value")) o.optString("value") else null,
+        total = maxOf(o.optInt("total"), refs.size),
+        shown = minOf(o.optInt("shown"), refs.size),
+        refs = refs
     )
 }
 

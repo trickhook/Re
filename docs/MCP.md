@@ -396,6 +396,7 @@ Read-only, always available:
 | `decompile_function` | Pseudo-C, with the Ghidra p-code backend or the built-in IR lifter. |
 | `decompile_functions` | Decompile a batch — an address list, or an offset+count window over the whole function list — in one call, each row identical to `decompile_function`'s. Bounded by a function count and a total size, and reports how far it got. |
 | `xrefs` | References in and out of a function, with the call site and the owning function. Paginated. |
+| `find_string_xrefs` | Given the address of a string or datum — not a function — the functions that reference it, each with the referencing site. The direct route from a string to the routine that uses it; the data-aware counterpart to `xrefs`. Paginated. |
 | `call_graph` | A bounded neighbourhood around one function, or the busiest functions in the binary. |
 | `read_memory` | Bytes as hex and ASCII, by virtual address or file offset. |
 | `emulate_function` | Run one function under the p-code emulator and read back what it wrote. |

@@ -6,6 +6,7 @@ import com.trickhook.model.CallEdge
 import com.trickhook.model.FoundStr
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
+import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseDetail
 import com.trickhook.model.parseFunctionPage
 import com.trickhook.ui.parseAddr
@@ -552,6 +553,33 @@ class McpTools(allowWrites: Boolean) {
                 )
             ), false
         ) { xrefs(it) })
+
+        add(Tool(
+            "find_string_xrefs", "References to a string or datum",
+            "Given the ADDRESS of a string or other datum — not a function — the functions " +
+                "that reference it. This is the direct route from a string to the routine that " +
+                "uses it: take the address of \"pinned public key\" from list_strings and get " +
+                "the SSL-pinning function, instead of decompiling candidates one by one. Each " +
+                "row is a referencing SITE — the instruction address, the function that " +
+                "contains it, and the reference type. `targetKind` reports whether the address " +
+                "is a `string`, other `data`, or `code`; a `code` address has no data to " +
+                "reference it, so the answer degenerates to that function's callers, which is " +
+                "what `xrefs` is for. Reads the reference map built at analysis time — the same " +
+                "store the string-hunter plugin reads — so it is cheap and runs no decompiler. " +
+                "Paginated, with an honest total when the engine's per-address cap drops rows.",
+            schema(
+                listOf("address"),
+                listOf(
+                    "address" to strProp(
+                        "Address of the string or datum, in hex (\"0x2285f0\", \"2285f0\"). " +
+                            "Take it from list_strings, or from any answer that carries an " +
+                            "`address` for a string."
+                    ),
+                    "offset" to offsetProp(),
+                    "limit" to limitProp(50, 200)
+                )
+            ), false
+        ) { findStringXrefs(it) })
 
         add(Tool(
             "call_graph", "Walk the call graph",
@@ -1458,6 +1486,75 @@ class McpTools(allowWrites: Boolean) {
         }
         paginate(out, total, w, shown)
         return Outcome(out, "${effectiveName(fn.addr)} · $direction · $shown of $total")
+    }
+
+    /**
+     * The functions that reference a DATA address. Where [xrefs] resolves the
+     * asked address to a function first — and so cannot serve a string, which
+     * belongs to none — this hands the exact address to the engine's data-aware
+     * reference map and maps each referencing site to its function. Paginates
+     * over the rows the engine returned; when its per-address cap dropped some,
+     * `referencesFound` names the honest total beside them, the same way
+     * list_strings names `stringsFound`.
+     */
+    private fun findStringXrefs(args: JSONObject): Outcome {
+        val addr = addressArg(args, "address")
+        openMeta()
+        val path = openPath()
+        val x = parseAddressXrefs(NativeBridge.nativeXrefsTo(path, addr))
+        if (!x.ok) throw Failure(x.error ?: "the engine could not read references to ${hx(addr)}")
+        val vm = session()
+        val w = window(args, 50, 200)
+        val page = slice(x.refs, w)
+        val arr = JSONArray()
+        for (r in page) {
+            val row = JSONObject().put("site", hx(r.from)).put("type", r.type)
+            if (r.funcAddr != 0L) {
+                row.put("function", hx(r.funcAddr))
+                // A user rename in the app wins; otherwise the engine's
+                // demangled name, which the app carries too. Same source of
+                // truth as the `xrefs` tool, so the two never name one
+                // function two ways.
+                row.put(
+                    "name",
+                    if (vm.functionAt(r.funcAddr) != null) effectiveName(r.funcAddr)
+                    else r.funcDisplay.ifBlank { r.funcName }.ifBlank { hx(r.funcAddr) }
+                )
+            } else {
+                row.put("function", JSONObject.NULL)
+                row.put("name", JSONObject.NULL)
+                row.put("note", "outside any known function")
+            }
+            arr.put(row)
+        }
+        val out = JSONObject()
+            .put("target", hx(x.target))
+            .put("targetKind", x.targetKind)
+        if (x.value != null) {
+            if (x.value.length > 240) {
+                out.put("value", x.value.take(240)).put("valueTruncated", true)
+                    .put("valueLength", x.value.length)
+            } else out.put("value", x.value)
+        }
+        out.put("references", arr)
+        // `total` here paginates the rows that exist; the engine's own total can
+        // be larger when its 500-row per-address cap dropped some, and that is
+        // named separately so nextOffset never promises a row that was dropped.
+        paginate(out, x.refs.size, w, page.size)
+        if (x.total > x.refs.size) {
+            out.put("referencesFound", x.total)
+            out.put(
+                "coverage",
+                "The engine counted ${x.total} references to ${hx(addr)} and returned " +
+                    "the first ${x.refs.size}."
+            )
+        }
+        val tail = when (x.targetKind) {
+            "code" -> " · code address, so these are its callers — xrefs is the tool for a function"
+            "data" -> if (x.total == 0) " · nothing references this address" else ""
+            else -> if (x.total == 0) " · nothing references this string" else ""
+        }
+        return Outcome(out, "${x.targetKind} ${hx(addr)} · ${page.size} of ${x.total}$tail")
     }
 
     private fun xrefArray(rows: List<com.trickhook.ui.XrefRow>): JSONArray {

@@ -1431,6 +1431,107 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     return out.str();
 }
 
+// ------------------------------------------------------------------ xrefsTo --
+// "Who references THIS address?" for any address, a string or datum included.
+// functionDetail above answers the same question for a function by walking the
+// slice of c.xrefs keyed inside [addr, addr+size); this answers it for one
+// exact target key, which is what a datum has. It reads the SAME c.xrefs store
+// the script builtin count_xrefs_to reads and does the same one-key lookup, so
+// `total` here and count_xrefs_to(addr,"any") in a plugin are the same count —
+// the map is keyed by TARGET, so the references to `addr` are one vector and
+// there is no full-map scan. Every referencing SITE is then mapped to the
+// function that contains it, which is the whole point: the address behind a
+// string resolves to no function on its own, and this turns each site into the
+// function that touches the string.
+std::string Engine::xrefsTo(const std::string& path, u64 addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+    std::ostringstream out;
+
+    // What sits at this address, so the answer can say whether it served the
+    // case it exists for. A string start (or a byte inside a string) is
+    // "string"; an address inside a function body is "code" and the answer
+    // degenerates to that function's code callers; everything else referenced
+    // is "data". String and code live in different sections, so the checks
+    // never actually collide -- the order only fixes which label wins if they
+    // somehow did.
+    std::string targetKind = "data";
+    std::string targetValue;
+    bool haveValue = false;
+    for (const auto& s : c.strings) {
+        u64 span = s.value.empty() ? 1 : u64(s.value.size());
+        if (addr >= s.addr && addr < s.addr + span) {
+            targetKind = "string";
+            targetValue = s.value;
+            haveValue = true;
+            break;
+        }
+    }
+
+    // Sorted (start,index) table for site -> containing function, built once
+    // and binary-searched per site -- the same shape scriptRun's func_containing
+    // uses, for the same reason: a linear scan per site would be O(functions)
+    // each time, and a target with hundreds of references would pay it hundreds
+    // of times. c.funcs is not mutated here (unlike functionDetail, which
+    // appends a synthetic entry), so the index cannot fall out of step.
+    std::vector<std::pair<u64, size_t>> byAddr;
+    byAddr.reserve(c.funcs.size());
+    for (size_t i = 0; i < c.funcs.size(); ++i) byAddr.push_back({c.funcs[i].addr, i});
+    std::sort(byAddr.begin(), byAddr.end());
+    auto containing = [&c, &byAddr](u64 a) -> const FuncInfo* {
+        auto it = std::upper_bound(byAddr.begin(), byAddr.end(), a,
+                                   [](u64 v, const std::pair<u64, size_t>& e) {
+                                       return v < e.first;
+                                   });
+        if (it == byAddr.begin()) return nullptr;
+        size_t idx = (it - 1)->second;
+        if (idx >= c.funcs.size()) return nullptr;
+        const FuncInfo& f = c.funcs[idx];
+        if (f.addr != (it - 1)->first) return nullptr;
+        if (f.size ? (a < f.addr + f.size) : (a == f.addr)) return &f;
+        return nullptr;
+    };
+    if (targetKind != "string" && containing(addr)) targetKind = "code";
+
+    // The one map lookup, exactly as count_xrefs_to does it.
+    const size_t kRefsCap = 500;
+    size_t total = 0, shown = 0;
+    std::ostringstream refs;
+    auto it = c.xrefs.find(addr);
+    if (it != c.xrefs.end()) {
+        for (const auto& x : it->second) {
+            ++total;
+            if (shown >= kRefsCap) continue;
+            const FuncInfo* f = containing(x.from);
+            if (shown) refs << ",";
+            refs << "{\"from\":" << hq(x.from)
+                 << ",\"funcAddr\":" << hq(f ? f->addr : 0)
+                 << ",\"funcName\":" << q(f ? f->name : std::string());
+            if (f && looksMangled(f->name)) {
+                std::string d = demangle(f->name);
+                if (d != f->name) refs << ",\"funcDisplay\":" << q(d);
+            }
+            refs << ",\"type\":" << q(x.type) << "}";
+            ++shown;
+        }
+    }
+
+    out << "{\"ok\":true,\"target\":" << hq(addr)
+        << ",\"targetKind\":" << q(targetKind);
+    if (haveValue) out << ",\"value\":" << q(targetValue);
+    out << ",\"total\":" << num(u64(total))
+        << ",\"shown\":" << num(u64(shown))
+        << ",\"refs\":[" << refs.str() << "]}";
+    return out.str();
+}
+
 // -------------------------------------------------------------------- diff --
 // Reduce every function in a context to the descriptor the matcher compares
 // (BinDiff.h): address, name, a hash of the raw function bytes, and the

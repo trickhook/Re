@@ -22,6 +22,7 @@ import com.trickhook.engine.NativeBridge
 import com.trickhook.mcp.McpRuntime
 import com.trickhook.model.ApkEntry
 import com.trickhook.model.ApkResourceEntry
+import com.trickhook.model.AddressXrefs
 import com.trickhook.model.AnalysisMeta
 import com.trickhook.model.AppLibScan
 import com.trickhook.model.AppNativeLib
@@ -55,6 +56,7 @@ import com.trickhook.model.FRIDA_EXPORTS_CAP
 import com.trickhook.model.fridaScript
 import com.trickhook.model.idaIdcScript
 import com.trickhook.model.idaPythonScript
+import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
@@ -265,6 +267,16 @@ class StudioViewModel : ViewModel() {
     var installedLibsLoading by mutableStateOf(false); private set
     var selectedFunc by mutableStateOf<Long?>(null); private set
     var detail by mutableStateOf<FunctionDetail?>(null); private set
+
+    // "Who references this string?" The strings panel asks for one address at a
+    // time; [stringXrefsTarget] non-null means the sheet is open for it,
+    // [stringXrefs] holds the loaded answer (null while it is in flight), and
+    // [stringXrefsBusy] gates the spinner. Unlike [detail]'s xrefs, which are a
+    // function's own, this is keyed on a data address that belongs to no
+    // function — see [loadStringXrefs].
+    var stringXrefsTarget by mutableStateOf<Long?>(null); private set
+    var stringXrefs by mutableStateOf<AddressXrefs?>(null); private set
+    var stringXrefsBusy by mutableStateOf(false); private set
     var tab by mutableStateOf(Tab.ASSEMBLY)
     var darkTheme by mutableStateOf(true)
 
@@ -1296,6 +1308,59 @@ class StudioViewModel : ViewModel() {
                 log("ERROR", e.message ?: "callgraph error")
             } finally { callGraphBusy = false; globalPhase = "" }
         }
+    }
+
+    // --------------------------------------------------------- string xrefs --
+    /**
+     * Load the functions that reference the datum at [addr] and open the sheet
+     * over them. This is the string case the per-function xref sheet cannot
+     * serve: a string belongs to no function, so [selectFunction] on its address
+     * would decompile the wrong thing. The engine's data-aware reference map
+     * answers it directly (Engine::xrefsTo).
+     *
+     * [stringXrefsTarget] is set first so the sheet can open on a spinner while
+     * the JNI call runs, and the result is applied only if the user has not
+     * closed or reaimed the sheet in the meantime — a stale answer must never
+     * land under a different string's header.
+     */
+    fun loadStringXrefs(addr: Long) {
+        val path = currentPath ?: return
+        stringXrefsTarget = addr
+        stringXrefs = null
+        viewModelScope.launch {
+            stringXrefsBusy = true
+            try {
+                val x = withContext(Dispatchers.IO) {
+                    parseAddressXrefs(NativeBridge.nativeXrefsTo(path, addr))
+                }
+                if (stringXrefsTarget == addr) {
+                    if (x.ok) stringXrefs = x
+                    else log("WARN", x.error ?: "string xrefs failed")
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "string xrefs error")
+            } finally {
+                stringXrefsBusy = false
+            }
+        }
+    }
+
+    /** Dismiss the string-xref sheet and drop its answer. */
+    fun closeStringXrefs() {
+        stringXrefsTarget = null
+        stringXrefs = null
+    }
+
+    /**
+     * Jump from the string-xref sheet to one referencing SITE: open Assembly on
+     * its function (or on the site itself when it belongs to none) and land the
+     * listing on the exact instruction. Closes the sheet first, so Back returns
+     * to wherever the jump started rather than to a modal.
+     */
+    fun gotoStringXref(funcAddr: Long, site: Long) {
+        closeStringXrefs()
+        navigateTo(tab = Tab.ASSEMBLY, addr = if (funcAddr != 0L) funcAddr else site)
+        requestGoto(site)
     }
 
     // ------------------------------------------------------------- projects --
