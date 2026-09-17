@@ -73,8 +73,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.trickhook.model.DbgBp
+import com.trickhook.model.DbgProc
 import com.trickhook.model.DbgState
 import com.trickhook.shizuku.DbgBackend
+import com.trickhook.shizuku.RootDaemon
+import com.trickhook.shizuku.RootStage
 import com.trickhook.shizuku.ShizukuGate
 import com.trickhook.shizuku.ShizukuStage
 import com.trickhook.vm.DbgMode
@@ -174,23 +177,34 @@ fun DebuggerPanel(vm: StudioViewModel) {
 
     // A privileged backend has a process behind it that has to exist before it
     // can be told anything, so Spawn and Attach wait for it rather than sending
-    // a command into a null binder and reporting "command failed".
-    val backendLive = !backend.privileged || ShizukuGate.ready
+    // a command into a null binder (or a broken pipe) and reporting "command
+    // failed". Each privileged backend has its own readiness signal.
+    val backendLive = when {
+        !backend.privileged -> true                 // LOCAL: always in-process
+        backend.usesShizuku -> ShizukuGate.ready
+        else -> RootDaemon.ready                     // DbgBackend.ROOT
+    }
 
     // Registers the Shizuku listeners the first time this tab is opened and
-    // re-reads the world on every entry after that: a permission granted inside
-    // Shizuku's own app while Nocturne was on another tab is picked up here
-    // rather than needing a restart. Nothing is started by it.
-    LaunchedEffect(Unit) { ShizukuGate.attach(ctx) }
+    // re-reads the world on every entry after that, and hands the root daemon
+    // the application context so it has a files dir before Connect. Nothing is
+    // started by either: a permission granted inside Shizuku's own app while
+    // Nocturne was on another tab is picked up here rather than needing a
+    // restart, and no su is invoked until someone presses Connect.
+    LaunchedEffect(Unit) {
+        ShizukuGate.attach(ctx)
+        RootDaemon.attach(ctx)
+    }
 
     // Shizuku only says whether it is shell or root once its binder has
     // answered, which can be after the backend chip was pressed. Without this,
     // a root user would sit on a backend labelled "shell" with Attach greyed
     // out for a capability they actually have. Re-labelling does not disturb a
-    // live session: it is the same process either way.
+    // live session: it is the same process either way. Only the Shizuku
+    // backends are reconciled to Shizuku's uid — ROOT is not a Shizuku backend.
     LaunchedEffect(ShizukuGate.serverUid, backend) {
         val uid = ShizukuGate.serverUid
-        if (backend.privileged && uid >= 0) {
+        if (backend.usesShizuku && uid >= 0) {
             val real = DbgBackend.forUid(uid)
             if (real != backend) vm.selectDbgBackend(real)
         }
@@ -292,7 +306,10 @@ fun DebuggerPanel(vm: StudioViewModel) {
                 // SELinux every single time, so the control says so by being
                 // unavailable instead of by producing an error afterwards.
                 Button(
-                    onClick = { showAttach = true },
+                    // Kick the process list off before the dialog composes, so
+                    // it opens straight into the loading skeleton rather than a
+                    // one-frame "empty" while the fetch starts.
+                    onClick = { vm.dbgListProcesses(ctx); showAttach = true },
                     enabled = !launching && backendLive && backend.offersAttach,
                     contentPadding = DbgBtnPad
                 ) { Text("Attach", fontSize = Type.label) }
@@ -314,8 +331,11 @@ fun DebuggerPanel(vm: StudioViewModel) {
             }
         }
 
-        // The whole Shizuku state machine, in the one place it matters.
-        if (backend.privileged) ShizukuStrip(vm)
+        // The whole Shizuku state machine, in the one place it matters — or the
+        // root-daemon strip for the su backend. Each privileged backend shows
+        // exactly the connect/disconnect flow for its own transport.
+        if (backend.usesShizuku) ShizukuStrip(vm)
+        if (backend == DbgBackend.ROOT) RootStrip(vm)
 
         // ---- the control stack. One panel surface for all of it: four
         // adjacent bands each drawing their own background would stack two
@@ -361,14 +381,19 @@ fun DebuggerPanel(vm: StudioViewModel) {
                     "Two debugger modes:\n" +
                         "  • Spawn/Attach — real ptrace session: breakpoints, registers, memory, stack, threads.\n" +
                         "  • (Old) syscall tracer — set program below and Run trace.",
-                    if (backend.privileged) {
-                        "Through Shizuku the sample is staged into /data/local/tmp as uid " +
-                            (if (backend == DbgBackend.SHIZUKU_ROOT) "0" else "2000") +
-                            ", made executable, and traced as a child of that process."
-                    } else {
-                        "In-process ptrace needs root or a debuggable target, and SELinux can " +
-                            "refuse it even then. An imported sample cannot be run here at all — " +
-                            "switch to the Shizuku backend above."
+                    when {
+                        backend.usesShizuku ->
+                            "Through Shizuku the sample is staged into /data/local/tmp as uid " +
+                                (if (backend == DbgBackend.SHIZUKU_ROOT) "0" else "2000") +
+                                ", made executable, and traced as a child of that process."
+                        backend == DbgBackend.ROOT ->
+                            "Through su the sample is staged into this app's files, made " +
+                                "executable, and traced by a root daemon that spawns it as its own " +
+                                "child. Attach reaches any pid on the device."
+                        else ->
+                            "In-process ptrace needs root or a debuggable target, and SELinux can " +
+                                "refuse it even then. An imported sample cannot be run here at all — " +
+                                "switch to a privileged backend above."
                     }
                 )
             }
@@ -996,17 +1021,19 @@ private fun TraceView(vm: StudioViewModel) {
 /**
  * Which process the session runs in, and one line saying what that buys.
  *
- * Two chips, not three: the privileged one names the privilege the Shizuku
- * server actually has rather than offering both and letting the user find out.
- * [ShizukuGate.serverUid] is 0 for a root or Sui backend and 2000 for adb, so
- * the label is read off the server, never guessed.
+ * Three chips: in-process, the Shizuku one, and su root. The Shizuku chip names
+ * the privilege the Shizuku server actually has rather than offering shell and
+ * root separately and letting the user find out — [ShizukuGate.serverUid] is 0
+ * for a root or Sui backend and 2000 for adb, so the label is read off the
+ * server, never guessed. The Root (su) chip is a separate path to uid 0 that
+ * needs no Shizuku at all.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BackendRow(vm: StudioViewModel) {
     val ide = LocalIde.current
     val live = vm.dbgBackend
-    val privileged = DbgBackend.forUid(ShizukuGate.serverUid)
+    val shizuku = DbgBackend.forUid(ShizukuGate.serverUid)
     Column(
         Modifier
             .fillMaxWidth()
@@ -1020,8 +1047,11 @@ private fun BackendRow(vm: StudioViewModel) {
             BackendChip(DbgBackend.LOCAL, live == DbgBackend.LOCAL) {
                 vm.selectDbgBackend(DbgBackend.LOCAL)
             }
-            BackendChip(privileged, live.privileged) {
-                vm.selectDbgBackend(privileged)
+            BackendChip(shizuku, live.usesShizuku) {
+                vm.selectDbgBackend(shizuku)
+            }
+            BackendChip(DbgBackend.ROOT, live == DbgBackend.ROOT) {
+                vm.selectDbgBackend(DbgBackend.ROOT)
             }
         }
         // The capability line follows the SELECTED backend, so it is always
@@ -1208,6 +1238,115 @@ private fun ShizukuStrip(vm: StudioViewModel) {
     }
 }
 
+/**
+ * The su root daemon's state, and the one thing to do about each of it.
+ *
+ * The counterpart of [ShizukuStrip] for [DbgBackend.ROOT]. There is no separate
+ * app to install or permission to grant in another screen — root is either
+ * there or it is not — so this is a shorter machine than Shizuku's: check/start,
+ * running, or a reason it could not. Connect runs the whole probe-and-launch on
+ * a worker thread; the button reflects where that got to.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RootStrip(vm: StudioViewModel) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+    val stage = RootDaemon.stage
+
+    val title = when (stage) {
+        RootStage.UNKNOWN -> "ROOT NOT CHECKED"
+        RootStage.CHECKING -> "STARTING"
+        RootStage.NO_ROOT -> "NO ROOT"
+        RootStage.RUNNING -> "CONNECTED"
+        RootStage.FAILED -> "COULD NOT START"
+        RootStage.DIED -> "CONNECTION LOST"
+    }
+    val tint = when (stage) {
+        RootStage.RUNNING -> ide.entry
+        RootStage.NO_ROOT, RootStage.FAILED, RootStage.DIED -> ide.red
+        else -> ide.amber
+    }
+    val actionLabel = when (stage) {
+        RootStage.UNKNOWN -> "Connect"
+        RootStage.NO_ROOT, RootStage.FAILED -> "Try again"
+        RootStage.DIED -> "Reconnect"
+        RootStage.RUNNING -> "Disconnect"
+        RootStage.CHECKING -> ""
+    }
+    val onAction = {
+        if (stage == RootStage.RUNNING) {
+            // The daemon owns the tracee, so stopping it kills the session.
+            // Ending the session first keeps the screen and the process telling
+            // the same story.
+            if (vm.dbgMode == DbgMode.SESSION) vm.dbgKill()
+            RootDaemon.disconnect()
+        } else {
+            RootDaemon.connect(ctx)
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .animateContentSize(tween(motionMs()))
+            .surface1(RectangleShape)
+            .padding(horizontal = Space.l, vertical = Space.m)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(Space.m)
+                    .background(tint, CircleShape)
+            )
+            Spacer(Modifier.width(Space.s))
+            Text(title, color = tint, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1)
+            Spacer(Modifier.weight(1f))
+            // su reaches uid 0 with no Shizuku in the picture; say so, because
+            // none of the Shizuku advice applies to this backend.
+            StatChip("SU", ide.violet)
+        }
+
+        val line = RootDaemon.daemonLine
+        if (stage == RootStage.RUNNING && line.isNotEmpty()) {
+            Text(
+                line,
+                color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 2,
+                modifier = Modifier.padding(vertical = Space.xs)
+            )
+        } else {
+            Text(
+                RootDaemon.detail,
+                color = ide.dim, fontSize = Type.caption, lineHeight = Type.captionLine,
+                modifier = Modifier.padding(vertical = Space.xs)
+            )
+        }
+
+        val staged = RootDaemon.stagedPath
+        if (staged.isNotEmpty()) {
+            Text(
+                "staged " + staged,
+                color = ide.cyan, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 2
+            )
+        }
+        // Probing su can raise a root prompt and then start a process, both of
+        // which take seconds; staging is the same "something is happening" wait.
+        if (vm.dbgStaging || stage == RootStage.CHECKING) SkeletonLines(lines = 2)
+
+        if (actionLabel.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = Space.s)
+            ) {
+                Button(onClick = onAction, contentPadding = DbgBtnPad) {
+                    Text(actionLabel, fontSize = Type.label)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SpawnDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: () -> Unit) {
     val ide = LocalIde.current
@@ -1245,9 +1384,15 @@ private fun SpawnDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: ()
                     }
                     Spacer(Modifier.height(Space.s))
                     Text(
-                        "Copies the open file into /data/local/tmp through the privileged " +
-                            "process, makes it executable there, and traces it as that process's " +
-                            "own child. It is deleted again when the session ends.",
+                        if (vm.dbgBackend == DbgBackend.ROOT) {
+                            "Copies the open file into this app's files, makes it executable, and " +
+                                "the root daemon traces it as its own child. It is deleted again " +
+                                "when the session ends."
+                        } else {
+                            "Copies the open file into /data/local/tmp through the privileged " +
+                                "process, makes it executable there, and traces it as that " +
+                                "process's own child. It is deleted again when the session ends."
+                        },
                         color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
                     )
                     Spacer(Modifier.height(Space.l))
@@ -1281,39 +1426,143 @@ private fun SpawnDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: ()
     )
 }
 
+/** How tall the process list grows before it scrolls inside the dialog. */
+private val PickerHeight = 240.dp
+
+/**
+ * Pick a running process to attach to, instead of typing a pid.
+ *
+ * The list is the engine's `ps` op resolved to installed, non-system apps: an
+ * app label prominent, its process name and pid secondary. Tapping a row
+ * attaches. A search field filters it, and a manual-PID field stays as the
+ * power-user fallback a rooted user still wants — so nothing that the old typed
+ * dialog could do is lost.
+ *
+ * What the list can show depends on the backend, honestly:
+ *  - SHIZUKU_ROOT and ROOT enumerate and attach — the list is live.
+ *  - LOCAL can only see this app's own process under hidepid, so the list is
+ *    near-empty and the note points at the PID field or a root backend.
+ *  - SHIZUKU_SHELL never reaches here: it cannot attach, so its Attach control
+ *    is unavailable and this dialog does not open for it.
+ */
 @Composable
 private fun AttachDialog(vm: StudioViewModel, onLaunch: () -> Unit, onDismiss: () -> Unit) {
     val ide = LocalIde.current
-    var pid by remember { mutableStateOf("") }
+    val backend = vm.dbgBackend
+    var query by remember { mutableStateOf("") }
+    var manualPid by remember { mutableStateOf("") }
+
+    // The fetch is kicked off by the Attach button before this dialog composes,
+    // so the list (or its loading skeleton) is already coming. Dropping it on
+    // close keeps a stale list from flashing on the next open.
+    val close = {
+        vm.dbgClearProcs()
+        onDismiss()
+    }
+
+    val procs = vm.dbgProcs
+    val filtered = remember(procs, query) {
+        if (query.isBlank()) procs
+        else procs.filter {
+            it.label.contains(query, ignoreCase = true) ||
+                it.name.contains(query, ignoreCase = true) ||
+                it.pid.toString().contains(query)
+        }
+    }
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = close,
         containerColor = ide.panel,
-        title = { Text("Attach to PID", color = ide.accent, fontSize = Type.section) },
+        title = { Text("Attach to process", color = ide.accent, fontSize = Type.section) },
         text = {
             Column {
                 OutlinedTextField(
-                    value = pid, onValueChange = { pid = it.filter { c -> c.isDigit() } },
-                    label = { Text("PID") }, singleLine = true,
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Filter apps", fontSize = Type.caption) },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Filter the process list by app, name or pid" },
                     textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
                 )
                 Spacer(Modifier.height(Space.s))
+                Box(Modifier.heightIn(max = PickerHeight)) {
+                    when {
+                        vm.dbgProcsLoading && procs.isEmpty() -> SkeletonLines(lines = 6)
+                        filtered.isEmpty() -> EmptyPanel(
+                            if (procs.isEmpty()) "No processes to show" else "Nothing matches",
+                            if (backend == DbgBackend.LOCAL) {
+                                "In-process enumeration only sees this app's own process (hidepid). " +
+                                    "Use the PID field below, or switch to a root backend to list " +
+                                    "other apps."
+                            } else if (procs.isEmpty()) {
+                                "No installed-app processes were found. Pull the list again, or use " +
+                                    "the PID field below."
+                            } else {
+                                "No app matches \"" + query + "\"."
+                            }
+                        )
+                        else -> LazyColumn(Modifier.fillMaxWidth()) {
+                            items(filtered, key = { it.pid }) { p ->
+                                ProcRow(p) {
+                                    vm.dbgAttach(p.pid)
+                                    onLaunch()
+                                    close()
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(Space.m))
                 Text(
-                    if (vm.dbgBackend == DbgBackend.SHIZUKU_ROOT) {
-                        "Running as uid 0: any pid on the device can be attached. Find one with " +
-                            "adb shell ps -A, or in the Threads list of a session you started."
-                    } else {
-                        "Attach requires same-uid or root. Find PIDs via adb shell ps."
-                    },
-                    color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                    "Advanced — attach by PID",
+                    color = ide.dim2, fontSize = Type.caption, fontFamily = Mono
+                )
+                Spacer(Modifier.height(Space.xs))
+                OutlinedTextField(
+                    value = manualPid,
+                    onValueChange = { manualPid = it.filter { c -> c.isDigit() } },
+                    label = { Text("PID", fontSize = Type.caption) },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Attach to a process id typed by hand" },
+                    textStyle = TextStyle(fontSize = Type.mono, fontFamily = Mono, color = ide.text)
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                pid.toLongOrNull()?.let { vm.dbgAttach(it); onLaunch() }
-                onDismiss()
-            }) { Text("Attach", color = ide.accent) }
+            TextButton(
+                onClick = {
+                    manualPid.toLongOrNull()?.let { vm.dbgAttach(it); onLaunch() }
+                    close()
+                },
+                enabled = manualPid.toLongOrNull() != null
+            ) { Text("Attach PID", color = ide.accent) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = ide.dim) } }
+        dismissButton = { TextButton(onClick = close) { Text("Cancel", color = ide.dim) } }
     )
+}
+
+/** One row of the attach picker: app label over process name and pid. */
+@Composable
+private fun ProcRow(p: DbgProc, onClick: () -> Unit) {
+    val ide = LocalIde.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(
+                onClickLabel = "Attach to " + p.label + " (pid " + p.pid + ")",
+                role = Role.Button,
+                onClick = onClick
+            )
+            .padding(horizontal = Space.s, vertical = Space.m)
+    ) {
+        Text(p.label, color = ide.text, fontSize = Type.body, maxLines = 1)
+        Text(
+            p.name.ifBlank { "?" } + "  ·  pid " + p.pid + "  ·  uid " + p.uid,
+            color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1
+        )
+    }
 }

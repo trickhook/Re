@@ -444,6 +444,15 @@ fun parseCallGraph(json: String): CallGraphData {
 data class DbgBp(val addr: Long, val hits: Int, val enabled: Boolean)
 data class DbgEvent(val type: String, val addr: Long, val pc: Long, val sig: Int, val code: Int)
 data class DbgThread(val tid: Long, val name: String)
+
+/**
+ * One row of the attach picker: a running process of an installed app. [pid],
+ * [uid] and [name] (the process name from /proc) come from the engine's `ps`
+ * op; [label] is the human app name the app side resolves from [uid] with
+ * PackageManager, falling back to [name] when the package cannot be resolved.
+ */
+data class DbgProc(val pid: Long, val uid: Int, val name: String, val label: String)
+
 data class DbgState(
     val ok: Boolean,
     val error: String?,

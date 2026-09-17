@@ -61,6 +61,26 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <!--
+      Broad package visibility, for the debugger's attach picker only.
+
+      The picker lists the running processes of installed apps and shows each
+      one's human label beside its process name. The engine's `ps` op returns
+      pid, uid and process name from /proc; turning a uid into "Signal" or
+      "Camera" is a PackageManager lookup (getPackagesForUid), and since API 30
+      that returns only packages this app can already see. The <queries> block
+      below makes Shizuku visible; resolving an ARBITRARY running app means
+      seeing every package, which is what this grants.
+
+      It is a read-only capability — it reveals which packages exist, nothing
+      more — and it is used by nothing but label resolution in the picker. On a
+      device or build where it is absent, the picker degrades honestly: it falls
+      back to the raw process name (usually the package id) instead of a label.
+      This is a root/Shizuku reverse-engineering tool distributed outside Play,
+      where inspecting the processes on your own device is the entire point.
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!--
       Package visibility, required since API 30.
 
       The debugger tab has to tell "Shizuku is not installed" apart from

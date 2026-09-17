@@ -137,8 +137,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ghidra/cpp/architecture.cc")
     set(SAKO_GHIDRA ON)
 endif()
 
-add_library(nocturne SHARED
-    sako_jni.cpp
+# The engine, minus the JNI bridge. libnocturne.so is this list plus
+# sako_jni.cpp; the `nocturned` daemon (see the bottom of this file) is this
+# list plus its own main(). Keeping it in one variable is what makes the daemon
+# literally the same engine as the app runs, rather than a fork that can drift:
+# a source added here is compiled into both. sako_jni.cpp is NOT in it because
+# it is the only file that needs <jni.h>, and the daemon has no JNI.
+set(SAKO_ENGINE_SOURCES
     sako/Types.cpp
     sako/Binary.cpp
     sako/ElfLoader.cpp
@@ -160,6 +165,10 @@ add_library(nocturne SHARED
     sako/GhidraEmu.cpp
     sako/JniTypes.cpp
     sako/Prototypes.cpp)
+
+add_library(nocturne SHARED
+    sako_jni.cpp
+    ${SAKO_ENGINE_SOURCES})
 
 target_include_directories(nocturne PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sako
@@ -218,3 +227,58 @@ target_compile_options(crackme PRIVATE -O0 -fno-builtin)
 # built. This is a build-ordering edge only — it does not alter nocturne's
 # compile flags, sources or link line.
 add_dependencies(nocturne crackme)
+
+
+# --- nocturned: the ROOT backend's debugger daemon --------------------------
+# A standalone executable, one per ABI, that IS the engine's JSON debugger over
+# a pipe (see samples/nocturned.cpp). The app launches it with `su` and talks to
+# it on its stdin/stdout; it is the fourth debugger backend's privileged half,
+# the way NocturneUserService is the Shizuku backends'. Same engine, same
+# protocol, different transport.
+#
+# Unlike crackme, this DOES share the engine's code — it is built from exactly
+# the same ${SAKO_ENGINE_SOURCES} that libnocturne.so is, plus its own main(),
+# so there is no second debugger to keep in step. It is a self-contained
+# executable (no dependency on libnocturne.so at runtime), because it is copied
+# out of assets and exec'd from app storage under su, where pointing a loader at
+# the app's libraries would be one more thing to get right on every device.
+#
+# It is a plain executable — no `lib` prefix, no `.so` suffix — so AGP's jniLibs
+# globbing (**/*.so) never packages it as a library; app/build.gradle.kts copies
+# it into assets/bin/<abi>/nocturned instead. The include dirs, the
+# capstone/ghidra defines and the link line mirror `nocturne` exactly, so the
+# shared sources compile identically in both targets.
+add_executable(nocturned samples/nocturned.cpp ${SAKO_ENGINE_SOURCES})
+
+# Same include roots as nocturne, PLUS the cpp root itself: nocturned.cpp lives
+# in samples/ and includes "sako/Engine.h", so it needs the directory that holds
+# sako/ on the path. sako_jni.cpp gets that for free by sitting in the cpp root;
+# the daemon does not, so add it explicitly.
+target_include_directories(nocturned PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sako
+    ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
+
+if(SAKO_CAP_LIB)
+    target_compile_definitions(nocturned PRIVATE SAKO_HAVE_CAPSTONE=1)
+    target_link_libraries(nocturned PRIVATE ${SAKO_CAP_LIB})
+endif()
+
+if(SAKO_GHIDRA)
+    target_compile_definitions(nocturned PRIVATE SAKO_HAVE_GHIDRA=1)
+    target_link_libraries(nocturned PRIVATE ghidra_decomp)
+endif()
+
+target_link_libraries(nocturned PRIVATE android log)
+
+# Same predictable, per-ABI output layout crackme uses, so app/build.gradle.kts
+# can find it without knowing CMake's hashed .cxx tree:
+# <module>/build/nocturned/<abi>/nocturned. Ninja (single-config) writes here
+# verbatim, with no per-config subdirectory.
+set_target_properties(nocturned PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/nocturned/${ANDROID_ABI}")
+
+# Hang it off the engine for the same reason crackme is: it forces the daemon to
+# build on every native build without a `targets` filter that would change how
+# libnocturne.so itself links. Build-ordering only.
+add_dependencies(nocturne nocturned)

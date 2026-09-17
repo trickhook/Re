@@ -26,6 +26,7 @@ import com.trickhook.model.AnalysisMeta
 import com.trickhook.model.CallEdge
 import com.trickhook.model.CallGraphData
 import com.trickhook.model.ConsoleLine
+import com.trickhook.model.DbgProc
 import com.trickhook.model.DbgState
 import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
@@ -56,6 +57,7 @@ import com.trickhook.model.parseIdcAnnotations
 import com.trickhook.model.parseMeta
 import com.trickhook.model.parseScriptResult
 import com.trickhook.shizuku.DbgBackend
+import com.trickhook.shizuku.RootDaemon
 import com.trickhook.shizuku.ShizukuGate
 import com.trickhook.update.UpdateException
 import com.trickhook.update.UpdateFailure
@@ -370,6 +372,16 @@ class StudioViewModel : ViewModel() {
     var dbgThreads by mutableStateOf<List<DbgThread>>(emptyList())
 
     /**
+     * The installed-app processes the attach picker offers, from the last
+     * [dbgListProcesses] call, and whether that call is in flight. Held apart
+     * from [dbgState] like [dbgThreads]: this is fetched by the Attach dialog,
+     * not by the session poll, so the poll's wholesale replacement of dbgState
+     * must not touch it.
+     */
+    var dbgProcs by mutableStateOf<List<DbgProc>>(emptyList()); private set
+    var dbgProcsLoading by mutableStateOf(false); private set
+
+    /**
      * Which process the ptrace session runs in.
      *
      * [DbgBackend.LOCAL] is the default and is exactly what the debugger has
@@ -451,6 +463,10 @@ class StudioViewModel : ViewModel() {
      */
     override fun onCleared() {
         McpRuntime.detach(this)
+        // A su-launched root daemon holds a tracer and must not outlive the app.
+        // This is the teardown path; the daemon also exits on its own when the
+        // pipe it reads closes, but killing it here is the explicit belt.
+        RootDaemon.disconnect()
         super.onCleared()
     }
 
@@ -1865,14 +1881,20 @@ class StudioViewModel : ViewModel() {
      *
      * [DbgBackend.LOCAL] is the JNI call this has always been. The Shizuku
      * backends put the identical JSON across a Binder into a process running as
-     * shell or root — same protocol, same parser, same event log. The transport
-     * never throws: a dead binder comes back as `{"ok":false,"error":...}` and
-     * is reported like any other failed command.
+     * shell or root. [DbgBackend.ROOT] puts the identical JSON down a pipe into
+     * a su-launched daemon — same protocol, same parser, same event log, a pipe
+     * instead of a Binder. Neither transport throws: a dead binder or a broken
+     * pipe comes back as `{"ok":false,"error":...}` and is reported like any
+     * other failed command.
      *
-     * Blocking; only [dbgCmd] calls it, and only from Dispatchers.IO.
+     * Blocking; only [dbgCmd] and [dbgListProcesses] call it, and only from
+     * Dispatchers.IO.
      */
-    private fun dbgSend(backend: DbgBackend, json: String): String =
-        if (backend == DbgBackend.LOCAL) NativeBridge.nativeDbgCmd(json) else ShizukuGate.cmd(json)
+    private fun dbgSend(backend: DbgBackend, json: String): String = when {
+        backend == DbgBackend.LOCAL -> NativeBridge.nativeDbgCmd(json)
+        backend.usesShizuku -> ShizukuGate.cmd(json)
+        else -> RootDaemon.cmd(json)   // DbgBackend.ROOT
+    }
 
     /**
      * Point the debugger at a different process. Any live session is killed
@@ -1882,13 +1904,20 @@ class StudioViewModel : ViewModel() {
      */
     fun selectDbgBackend(backend: DbgBackend) {
         if (backend == dbgBackend) return
-        // Shell and root are the SAME privileged process, relabelled once
-        // Shizuku says which uid it runs as. Killing a session for that would
-        // throw away a live tracee because a caption changed.
-        val sameProcess = backend.privileged && dbgBackend.privileged
+        // Shizuku shell and Shizuku root are the SAME privileged process,
+        // relabelled once Shizuku says which uid it runs as. Killing a session
+        // for that would throw away a live tracee because a caption changed. The
+        // su daemon (ROOT) is a DIFFERENT process, so switching to or from it is
+        // never the same process — only two Shizuku backends are.
+        val sameProcess = backend.usesShizuku && dbgBackend.usesShizuku
         if (!sameProcess) {
             if (dbgMode == DbgMode.SESSION) dbgKill()
             dbgClearStaged()
+        }
+        // Leaving the Root backend takes its daemon down with it: a root process
+        // holding a tracer must not outlive the backend that owns it.
+        if (dbgBackend == DbgBackend.ROOT && backend != DbgBackend.ROOT) {
+            RootDaemon.disconnect()
         }
         dbgBackend = backend
         log("INFO", "Debugger backend: ${backend.label}")
@@ -1904,8 +1933,15 @@ class StudioViewModel : ViewModel() {
         // with an error, and the session poll sends four of them every 400 ms.
         // Since a failed command is now a toast, that is a toast twice a second
         // for as long as the tab is open — so the session ends here, once, with
-        // one line saying why, instead.
-        if (backend.privileged && !ShizukuGate.ready) {
+        // one line saying why, instead. Each privileged backend has its own
+        // "is the process there" signal: Shizuku's binder, or the su daemon's
+        // pipe.
+        val transportDown = when {
+            !backend.privileged -> false
+            backend.usesShizuku -> !ShizukuGate.ready
+            else -> !RootDaemon.ready   // DbgBackend.ROOT
+        }
+        if (transportDown) {
             if (dbgMode == DbgMode.SESSION) {
                 dbgMode = DbgMode.NONE
                 clearDbgSessionViews()
@@ -1999,18 +2035,31 @@ class StudioViewModel : ViewModel() {
             dbgStaging = true
             globalPhase = "Staging"
             try {
-                val res = withContext(Dispatchers.IO) { ShizukuGate.stageSample(File(path)) }
-                if (!res.ok) {
-                    log("ERROR", "Staging failed: ${res.note}")
+                // Both privileged transports stage, by different routes: Shizuku
+                // ships the bytes across the Binder into /data/local/tmp; ROOT
+                // copies into the app's own files, which its root daemon can
+                // read and exec. Same result — a path the tracer can spawn.
+                val staged = withContext(Dispatchers.IO) {
+                    if (backend.usesShizuku) {
+                        val r = ShizukuGate.stageSample(File(path))
+                        StagedInfo(r.ok, r.path, r.note, r.machine)
+                    } else {
+                        val r = RootDaemon.stageSample(File(path))
+                        StagedInfo(r.ok, r.path, r.note, r.machine)
+                    }
+                }
+                if (!staged.ok) {
+                    log("ERROR", "Staging failed: ${staged.note}")
                     return@launch
                 }
-                val arch = res.machine.ifEmpty { "unknown" }
-                log("OK", "Staged to ${res.path} ($arch)")
+                val arch = staged.machine.ifEmpty { "unknown" }
+                log("OK", "Staged to ${staged.path} ($arch)")
+                if (staged.note.isNotEmpty()) log("WARN", staged.note)
                 dbgMode = DbgMode.SESSION
                 dbgEvents = emptyList()
                 clearDbgSessionViews()
                 val escaped = args.replace("\"", "\\\"").replace("\n", "\\n")
-                dbgCmd("""{"op":"spawn","prog":"${res.path}","args":"$escaped"}""")
+                dbgCmd("""{"op":"spawn","prog":"${staged.path}","args":"$escaped"}""")
             } catch (e: Exception) {
                 log("ERROR", e.message ?: "staging error")
             } finally {
@@ -2020,6 +2069,14 @@ class StudioViewModel : ViewModel() {
         }
     }
 
+    /** A staged sample, from either privileged backend's staging path. */
+    private class StagedInfo(
+        val ok: Boolean,
+        val path: String,
+        val note: String,
+        val machine: String
+    )
+
     /**
      * Delete the staged sample. Called whenever a session ends, so the tmp
      * directory does not accumulate executables — the privileged service also
@@ -2027,11 +2084,15 @@ class StudioViewModel : ViewModel() {
      * tidy paths.
      */
     private fun dbgClearStaged() {
-        if (!dbgBackend.privileged) return
-        // Off the main thread: this is a Binder call into a process that may be
-        // sitting in waitpid. It is a no-op when nothing is staged.
+        val backend = dbgBackend
+        if (!backend.privileged) return
+        // Off the main thread: for Shizuku this is a Binder call into a process
+        // that may be sitting in waitpid; for ROOT it is a local file delete.
+        // Either is a no-op when nothing is staged.
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { ShizukuGate.unstage() }
+            withContext(Dispatchers.IO) {
+                if (backend.usesShizuku) ShizukuGate.unstage() else RootDaemon.unstage()
+            }
         }
     }
 
@@ -2079,6 +2140,105 @@ class StudioViewModel : ViewModel() {
      * callers because its answer was unreachable.
      */
     fun dbgRefreshThreads() = dbgCmd("""{"op":"threads"}""") { s -> dbgThreads = s.threads }
+
+    /**
+     * Fill [dbgProcs] with the running processes of installed, non-system apps,
+     * for the attach picker. The engine's `ps` op returns every process it can
+     * read from /proc — pid, real uid, process name — over whichever backend is
+     * live (the one JSON protocol, so no new IPC). This side then does the two
+     * things only it can: keep the uids in the app range (appId 10000..19999,
+     * i.e. installed apps, never system) and turn each uid into a human app
+     * label with PackageManager.
+     *
+     * Not routed through [dbgCmd]/parseDbg: that folds an answer into the
+     * session's [dbgState], and this runs before any session exists and needs
+     * PackageManager besides. It uses [dbgSend] directly, so it honours the
+     * backend routing and never throws — a dead transport comes back as an
+     * error answer that parses to an empty list.
+     *
+     * Gating by backend is deliberate and honest:
+     *  - LOCAL sees only this app's own process (hidepid), so the list is
+     *    near-empty; the picker keeps its manual-PID path and says so.
+     *  - SHIZUKU_SHELL can read /proc but cannot attach, so its Attach control
+     *    is unavailable ([DbgBackend.offersAttach] is false) and the picker is
+     *    never reached from it.
+     *  - SHIZUKU_ROOT and ROOT enumerate and attach — the picker is fully live.
+     */
+    fun dbgListProcesses(context: Context) {
+        val backend = dbgBackend
+        val app = context.applicationContext
+        // Set synchronously so the first composition after the dialog opens
+        // already shows the skeleton, not a one-frame "empty" flash.
+        dbgProcsLoading = true
+        viewModelScope.launch {
+            try {
+                val procs = withContext(Dispatchers.IO) {
+                    parseProcs(dbgSend(backend, """{"op":"ps"}"""), app)
+                }
+                dbgProcs = procs
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "could not list processes")
+                dbgProcs = emptyList()
+            } finally {
+                dbgProcsLoading = false
+            }
+        }
+    }
+
+    /** Drop the picker's process list, e.g. when the Attach dialog closes. */
+    fun dbgClearProcs() {
+        dbgProcs = emptyList()
+    }
+
+    /**
+     * Parse a `ps` answer into installed-app rows, resolving each uid to a
+     * human label once. Runs on Dispatchers.IO: [android.content.pm.PackageManager]
+     * calls can touch disk.
+     */
+    private fun parseProcs(answer: String, context: Context): List<DbgProc> {
+        val obj = try {
+            org.json.JSONObject(answer)
+        } catch (t: Throwable) {
+            return emptyList()
+        }
+        if (!obj.optBoolean("ok")) return emptyList()
+        val arr = obj.optJSONArray("procs") ?: return emptyList()
+        val pm = context.packageManager
+        val labelCache = HashMap<Int, String?>()
+        fun labelFor(uid: Int): String? = labelCache.getOrPut(uid) {
+            val pkgs = try {
+                pm.getPackagesForUid(uid)
+            } catch (t: Throwable) {
+                null
+            }
+            val pkg = pkgs?.firstOrNull() ?: return@getOrPut null
+            try {
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            } catch (t: Throwable) {
+                pkg
+            }
+        }
+        val out = ArrayList<DbgProc>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val uid = o.optInt("uid", -1)
+            if (uid < 0) continue
+            // appId ignoring the multi-user offset: an installed app is
+            // 10000..19999; anything below 10000 is system and is excluded.
+            val appId = uid % 100000
+            if (appId !in 10000..19999) continue
+            val name = o.optString("name")
+            // An app-range uid with no resolvable package is an isolated or
+            // gone process, not something to offer; skip it. A resolvable one
+            // with an unreadable label falls back to the package/process name.
+            val label = labelFor(uid) ?: continue
+            out.add(DbgProc(o.optLong("pid"), uid, name, label.ifBlank { name }))
+        }
+        // App label first, then pid, so an app's several processes group and
+        // read in a stable order.
+        out.sortWith(compareBy({ it.label.lowercase() }, { it.pid }))
+        return out
+    }
 
     fun dbgKill() {
         dbgCmd("""{"op":"kill"}""")

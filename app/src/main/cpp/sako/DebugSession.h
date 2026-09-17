@@ -26,7 +26,7 @@ public:
 
     // One JSON command in -> one JSON response out.
     // ops: spawn, attach, detach, kill, cont, step, bp_add, bp_del, bp_list,
-    //      regs, setreg, read, write, stack, threads, status, poll
+    //      regs, setreg, read, write, stack, threads, status, ps, poll
     std::string cmd(const std::string& json);
 
     bool active() const;

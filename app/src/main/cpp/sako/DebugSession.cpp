@@ -442,6 +442,81 @@ std::string DebugSession::handleCmd(const std::string& json) {
         return o.str();
     }
 
+    if (op == "ps") {
+        // Enumerate processes for the attach picker. A plain /proc walk with no
+        // session of its own, so it sits ABOVE the "no active session" guard
+        // below and answers on every backend that can read /proc: the app's own
+        // uid (which hidepid limits to this one process), a uid-2000 shell
+        // service, or a root tracer. It reports pid, real uid and process name;
+        // the app applies the "installed, non-system app" filter and turns a
+        // uid into a human label, because only the app has PackageManager.
+        o << "{\"ok\":true,\"procs\":[";
+        DIR* d = opendir("/proc");
+        bool first = true;
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d)) != nullptr) {
+                // A /proc entry whose name is all digits is a pid; skip . .. and
+                // the named entries (self, net, meminfo, ...).
+                bool numeric = e->d_name[0] != '\0';
+                for (const char* p = e->d_name; *p; ++p)
+                    if (*p < '0' || *p > '9') { numeric = false; break; }
+                if (!numeric) continue;
+                const std::string base = std::string("/proc/") + e->d_name;
+
+                // Real uid from the Uid: line of status ("Uid:\treal\teff\t..").
+                // When status cannot be read — hidepid, or the process exited
+                // mid-walk — the pid is dropped rather than reported with a
+                // fabricated uid.
+                long uid = -1;
+                if (FILE* sf = fopen((base + "/status").c_str(), "r")) {
+                    char lbuf[256];
+                    while (fgets(lbuf, sizeof lbuf, sf)) {
+                        if (strncmp(lbuf, "Uid:", 4) == 0) {
+                            uid = strtol(lbuf + 4, nullptr, 10);
+                            break;
+                        }
+                    }
+                    fclose(sf);
+                }
+                if (uid < 0) continue;
+
+                // Name: the first NUL-delimited token of cmdline — the program
+                // path or the app's process name — falling back to comm for a
+                // kernel thread or a process that has not written argv yet.
+                std::string name;
+                if (FILE* cf = fopen((base + "/cmdline").c_str(), "rb")) {
+                    char cbuf[256];
+                    size_t n = fread(cbuf, 1, sizeof cbuf - 1, cf);
+                    fclose(cf);
+                    if (n > 0) { cbuf[n] = '\0'; name = cbuf; }
+                }
+                if (name.empty()) {
+                    if (FILE* mf = fopen((base + "/comm").c_str(), "r")) {
+                        char nb[64] = {0};
+                        if (fgets(nb, sizeof nb, mf)) {
+                            name = nb;
+                            while (!name.empty() && (name.back() == '\n' || name.back() == '\r'))
+                                name.pop_back();
+                        }
+                        fclose(mf);
+                    }
+                }
+
+                if (!first) o << ",";
+                first = false;
+                // e->d_name is the pid as decimal text: a valid JSON number, so
+                // it goes out unquoted without a reparse.
+                o << "{\"pid\":" << e->d_name
+                  << ",\"uid\":" << uid
+                  << ",\"name\":\"" << jsonEscape(name) << "\"}";
+            }
+            closedir(d);
+        }
+        o << "]}";
+        return o.str();
+    }
+
     if (op == "spawn") {
         cleanup();
         std::string prog = j.str("prog");
