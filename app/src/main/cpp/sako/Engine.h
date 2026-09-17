@@ -79,6 +79,26 @@ public:
     // it carries.
     std::string xrefsTo(const std::string& path, u64 addr);
 
+    // Anti-analysis & pinning scan — the capstone on xrefsTo. Ensures the
+    // context for `path`, then runs the pattern database in Detections.h over
+    // exactly what the analysis already holds: the string table, the function
+    // list and the reference map. A category's token names a string, the SAME
+    // c.xrefs store xrefsTo reads maps that string's referencing sites to their
+    // containing functions, and a referencing function under a category is a
+    // detection; a function whose own name contains a token is a direct
+    // detection. A matched string that nothing references is an unattributed
+    // hit, still reported. Attributed detections are deduped by (functionAddr,
+    // category). Naming is resolved the SAME way as xrefsTo — the raw symbol
+    // plus a demangled `funcDisplay` when it looks mangled — so the two can
+    // never disagree. READ-ONLY: it changes nothing in the context. Returns:
+    //   {ok, total, shown, counts:{<category>:N,...}, unattributed,
+    //    detections:[{category, confidence ("high"|"medium"|"low"),
+    //      funcAddr, funcName, funcDisplay?, evidence, tokens:[...],
+    //      source ("string"|"name"|"mixed"), site, stringAddr?, value?, hits}]}
+    // `total` is the honest count; `detections` is capped and `shown` says how
+    // many it carries. `funcAddr` is 0x0 for an unattributed hit.
+    std::string detect(const std::string& path);
+
     // Binary diff — compare two LINKED binaries (typically two versions of the
     // same library) and classify every function identical / changed / added /
     // removed, with a similarity score for the changed ones. `pathA` is the

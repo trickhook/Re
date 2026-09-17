@@ -74,6 +74,17 @@ Java_com_trickhook_engine_NativeBridge_nativeXrefsTo(JNIEnv* env, jobject, jstri
     return toJString(env, sako::Engine::instance().xrefsTo(path, u64(addr)));
 }
 
+// Anti-analysis & pinning scan of the open binary — the capstone on
+// nativeXrefsTo. READ-ONLY: it changes nothing in the analysis context. It
+// runs the pattern database over the string table, the function list and the
+// same reference map nativeXrefsTo reads, and reports the security/anti-
+// analysis routines it finds — see Engine::detect for the JSON shape.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDetect(JNIEnv* env, jobject, jstring jpath) {
+    std::string path = toStdString(env, jpath);
+    return toJString(env, sako::Engine::instance().detect(path));
+}
+
 // Binary diff: classify every function of A vs B (identical/changed/added/
 // removed). pathA is the open/analysed binary, pathB the one to compare it to;
 // B is analysed into a scratch context, so A's analysis is left untouched.

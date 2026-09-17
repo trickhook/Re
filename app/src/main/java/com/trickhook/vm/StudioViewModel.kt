@@ -35,6 +35,7 @@ import com.trickhook.model.DbgProc
 import com.trickhook.model.DbgState
 import com.trickhook.model.DbgThread
 import com.trickhook.model.DebugResult
+import com.trickhook.model.DetectionResult
 import com.trickhook.model.ExportProgress
 import com.trickhook.model.ExportResult
 import com.trickhook.model.FuncInfo
@@ -58,6 +59,7 @@ import com.trickhook.model.idaIdcScript
 import com.trickhook.model.idaPythonScript
 import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseCallGraph
+import com.trickhook.model.parseDetections
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
 import com.trickhook.model.parseDetail
@@ -124,6 +126,7 @@ enum class Tab(val title: String, val group: TabGroup) {
     MAP("Map", TabGroup.EXPLORE),
     APK("APK", TabGroup.ANALYZE),
     DEBUGGER("Debugger", TabGroup.ANALYZE),
+    DETECTIONS("Detections", TabGroup.ANALYZE),
     PLUGINS("Plugins", TabGroup.OUTPUT),
     CONSOLE("Console", TabGroup.OUTPUT);
 
@@ -277,6 +280,16 @@ class StudioViewModel : ViewModel() {
     var stringXrefsTarget by mutableStateOf<Long?>(null); private set
     var stringXrefs by mutableStateOf<AddressXrefs?>(null); private set
     var stringXrefsBusy by mutableStateOf(false); private set
+
+    // "What anti-analysis / pinning routines are in here?" The Detections view
+    // runs the scan once per open binary and browses the result. [detections]
+    // holds the loaded answer (null before the first scan or while one is in
+    // flight), [detectionsBusy] gates the spinner, and [detectionsError] carries
+    // a failure so the panel can show it rather than an empty list. See
+    // [runDetections]; the engine pass is Engine::detect.
+    var detections by mutableStateOf<DetectionResult?>(null); private set
+    var detectionsBusy by mutableStateOf(false); private set
+    var detectionsError by mutableStateOf<String?>(null); private set
     var tab by mutableStateOf(Tab.ASSEMBLY)
     var darkTheme by mutableStateOf(true)
 
@@ -802,6 +815,11 @@ class StudioViewModel : ViewModel() {
         graphScale = 1f; graphPanX = 0f; graphPanY = 0f
         graphZoomReq = 1f; graphFitReq = false
         gotoAddr = null; hexGotoOffset = null
+        // detectionsBusy is cleared too: a scan still running for the previous
+        // binary is path-guarded and will not clear it (its result is dropped),
+        // so without this the new binary's spinner could stay stuck and its
+        // auto-scan never start.
+        detections = null; detectionsError = null; detectionsBusy = false
         clearHistory()
         lastPluginUndoable = false
         pluginUndo = null
@@ -1361,6 +1379,65 @@ class StudioViewModel : ViewModel() {
         closeStringXrefs()
         navigateTo(tab = Tab.ASSEMBLY, addr = if (funcAddr != 0L) funcAddr else site)
         requestGoto(site)
+    }
+
+    // --------------------------------------------------------- detections --
+    /**
+     * Run the anti-analysis / pinning scan over the open binary and hold the
+     * result for the Detections view. The scan is the engine's Engine::detect —
+     * a READ-ONLY pass over the string table, the function list and the same
+     * reference map the xref sheet uses — so it changes nothing. Guarded by the
+     * open path, so a scan that returns after the user has opened a different
+     * binary is dropped rather than shown under the wrong file.
+     */
+    fun runDetections() {
+        val path = currentPath ?: return
+        detectionsBusy = true
+        detectionsError = null
+        viewModelScope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) {
+                    parseDetections(NativeBridge.nativeDetect(path))
+                }
+                if (currentPath == path) {
+                    if (r.ok) {
+                        detections = r
+                        log("OK", "Detections: ${r.total} across ${r.counts.size} categories")
+                    } else {
+                        detectionsError = r.error ?: "scan failed"
+                        log("WARN", detectionsError ?: "scan failed")
+                    }
+                }
+            } catch (e: Exception) {
+                if (currentPath == path) detectionsError = e.message ?: "scan error"
+                log("ERROR", e.message ?: "detections error")
+            } finally {
+                if (currentPath == path) detectionsBusy = false
+            }
+        }
+    }
+
+    /**
+     * Jump from a detection to the exact code: open Assembly on its function (or
+     * on the referencing site itself when the detection belongs to no function)
+     * and land the listing on [site]. This is the goto path the string-xref
+     * sheet uses ([gotoStringXref]), so a detection and an xref land a jump the
+     * same way.
+     */
+    fun gotoDetection(funcAddr: Long, site: Long) {
+        navigateTo(tab = Tab.ASSEMBLY, addr = if (funcAddr != 0L) funcAddr else site)
+        requestGoto(site)
+    }
+
+    /**
+     * An unattributed detection has no function and no referencing site — only
+     * the matched string's address. Reveal its bytes in the hex view, the same
+     * fallback the strings list uses for a string that belongs to no function.
+     */
+    fun gotoDetectionString(stringAddr: Long) {
+        val off = fileOffsetOf(stringAddr) ?: return
+        requestHexGoto(off)
+        navigateTo(tab = Tab.HEX)
     }
 
     // ------------------------------------------------------------- projects --

@@ -6,8 +6,10 @@ import com.trickhook.model.CallEdge
 import com.trickhook.model.FoundStr
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
+import com.trickhook.model.Detection
 import com.trickhook.model.parseAddressXrefs
 import com.trickhook.model.parseDetail
+import com.trickhook.model.parseDetections
 import com.trickhook.model.parseFunctionPage
 import com.trickhook.ui.parseAddr
 import com.trickhook.ui.xrefRows
@@ -580,6 +582,42 @@ class McpTools(allowWrites: Boolean) {
                 )
             ), false
         ) { findStringXrefs(it) })
+
+        add(Tool(
+            "scan_protections", "Scan for anti-analysis & pinning",
+            "Scan the open binary for likely security / anti-analysis routines and report " +
+                "them grouped by category: ssl-pinning, root-detection, anti-debug, " +
+                "anti-frida, emulator-detection and tamper-detection. This is the capstone " +
+                "on find_string_xrefs and runs the same machinery: a category token names a " +
+                "string, that string's referencing sites map to their containing functions " +
+                "through the reference map built at analysis time, and a referencing function " +
+                "under a category is a detection; a function whose own name contains a token " +
+                "is a direct detection. Each detection carries a confidence and the exact " +
+                "matched token(s) as evidence, so a broad token like \"frida\" is reported but " +
+                "weighted low — judge it by its evidence. A matched string that nothing " +
+                "references is still reported as an unattributed hit. READ-ONLY, cheap, runs " +
+                "no decompiler. `counts` carries the whole-binary per-category totals even " +
+                "when a page shows fewer. Paginated over the flat detection list.",
+            schema(
+                emptyList(),
+                listOf(
+                    "category" to enumProp(
+                        "Restrict to one category. Omit (or `all`) for every category.",
+                        listOf(
+                            "all", "ssl-pinning", "root-detection", "anti-debug",
+                            "anti-frida", "emulator-detection", "tamper-detection"
+                        ),
+                        "all"
+                    ),
+                    "minConfidence" to enumProp(
+                        "Drop detections weaker than this. `low` (default) keeps all.",
+                        listOf("low", "medium", "high"), "low"
+                    ),
+                    "offset" to offsetProp(),
+                    "limit" to limitProp(100, 400)
+                )
+            ), false
+        ) { scanProtections(it) })
 
         add(Tool(
             "call_graph", "Walk the call graph",
@@ -1555,6 +1593,110 @@ class McpTools(allowWrites: Boolean) {
             else -> if (x.total == 0) " · nothing references this string" else ""
         }
         return Outcome(out, "${x.targetKind} ${hx(addr)} · ${page.size} of ${x.total}$tail")
+    }
+
+    /**
+     * The anti-analysis / pinning scan, grouped by category. Mirrors
+     * [findStringXrefs]: it hands the open binary to the engine's read-only
+     * scan (Engine::detect, which reuses the reference map [findStringXrefs]
+     * uses) and paginates over the flat detection list, grouping the page by
+     * category. `counts` carries the whole-binary per-category totals so paging
+     * never hides a category, and a function's name comes from the SAME source
+     * of truth as every other tool — a user rename wins, else the demangled
+     * name — so a detection never names a function differently from `xrefs`.
+     */
+    private fun scanProtections(args: JSONObject): Outcome {
+        openMeta()
+        val path = openPath()
+        val res = parseDetections(NativeBridge.nativeDetect(path))
+        if (!res.ok) throw Failure(res.error ?: "the engine could not scan the open binary")
+        val vm = session()
+
+        val cat = enumArg(
+            args, "category",
+            listOf(
+                "all", "ssl-pinning", "root-detection", "anti-debug",
+                "anti-frida", "emulator-detection", "tamper-detection"
+            ),
+            "all"
+        )
+        val minConf = enumArg(args, "minConfidence", listOf("low", "medium", "high"), "low")
+        val minRank = confRank(minConf)
+
+        val filtered = res.detections.filter {
+            (cat == "all" || it.category == cat) && confRank(it.confidence) >= minRank
+        }
+        val w = window(args, 100, 400)
+        val page = slice(filtered, w)
+
+        // Group the page by category, keeping the engine's category order.
+        val grouped = LinkedHashMap<String, MutableList<Detection>>()
+        for (d in page) grouped.getOrPut(d.category) { mutableListOf() }.add(d)
+
+        val cats = JSONArray()
+        for ((category, list) in grouped) {
+            val arr = JSONArray()
+            for (d in list) {
+                val row = JSONObject()
+                    .put("confidence", d.confidence)
+                    .put("evidence", d.evidence)
+                    .put("source", d.source)
+                    .put("tokens", JSONArray(d.tokens))
+                if (d.funcAddr != 0L) {
+                    row.put("function", hx(d.funcAddr))
+                    row.put(
+                        "name",
+                        if (vm.functionAt(d.funcAddr) != null) effectiveName(d.funcAddr)
+                        else d.funcDisplay.ifBlank { d.funcName }.ifBlank { hx(d.funcAddr) }
+                    )
+                    row.put("site", hx(d.site))
+                } else {
+                    row.put("function", JSONObject.NULL)
+                    row.put("name", JSONObject.NULL)
+                    row.put("note", "unattributed — a matched string nothing references")
+                }
+                if (d.stringAddr != 0L) row.put("stringAddress", hx(d.stringAddr))
+                val v = d.value
+                if (v != null) {
+                    if (v.length > 160) row.put("value", v.take(160)).put("valueTruncated", true)
+                    else row.put("value", v)
+                }
+                arr.put(row)
+            }
+            cats.put(
+                JSONObject()
+                    .put("category", category)
+                    .put("count", res.counts[category] ?: list.size)
+                    .put("detections", arr)
+            )
+        }
+
+        val out = JSONObject().put("categories", cats)
+        // Whole-binary per-category totals, so a page never hides a category.
+        val countsObj = JSONObject()
+        for ((k, n) in res.counts) countsObj.put(k, n)
+        out.put("counts", countsObj)
+        out.put("unattributed", res.unattributed)
+        if (res.total > res.detections.size) {
+            out.put("detectionsFound", res.total)
+            out.put(
+                "coverage",
+                "The engine found ${res.total} detections and returned the first ${res.detections.size}."
+            )
+        }
+        paginate(out, filtered.size, w, page.size)
+        val tail = buildString {
+            if (cat != "all") append(" · $cat")
+            if (minConf != "low") append(" · >= $minConf")
+            if (filtered.isEmpty()) append(" · nothing matched")
+        }
+        return Outcome(out, "${page.size} of ${filtered.size} detections$tail")
+    }
+
+    private fun confRank(c: String): Int = when (c) {
+        "high" -> 2
+        "medium" -> 1
+        else -> 0
     }
 
     private fun xrefArray(rows: List<com.trickhook.ui.XrefRow>): JSONArray {

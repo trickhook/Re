@@ -1,6 +1,7 @@
 #include "Engine.h"
 #include "LibSig.h"
 #include "BinDiff.h"
+#include "Detections.h"
 #include "GhidraArch.h"
 #include "GhidraEmu.h"
 #include "JniTypes.h"
@@ -77,6 +78,11 @@ static const size_t kAsmInstrsInDetail = 4096;
 // The lists can each be tens of thousands of functions on a large library, so
 // they are capped for the UI; counts{} carries the honest totals beside them.
 static const size_t kDiffListCap = 500;
+// Detection rows carried in one detect() answer. Detections are deduped by
+// (functionAddr, category), so this is far above any real count; it is the same
+// kind of safety valve xrefsTo's cap is, with `total` beside it and `counts`
+// carrying the honest per-category totals over the whole (uncapped) result.
+static const size_t kDetectionsCap = 1000;
 
 
 Engine& Engine::instance() {
@@ -1529,6 +1535,84 @@ std::string Engine::xrefsTo(const std::string& path, u64 addr) {
     out << ",\"total\":" << num(u64(total))
         << ",\"shown\":" << num(u64(shown))
         << ",\"refs\":[" << refs.str() << "]}";
+    return out.str();
+}
+
+// ------------------------------------------------------------------ detect --
+// Anti-analysis & pinning scan — the capstone on xrefsTo. Same lock and the
+// same ensureCtx error path; the scan itself is Detections.h run over exactly
+// the three fields the analysis already holds (c.strings, c.funcs, c.xrefs).
+// Nothing here parses the binary or mutates the context. Naming is applied the
+// SAME way xrefsTo applies it — the raw funcName plus a demangled funcDisplay
+// when it looks mangled — so a detection and an xref name one function alike.
+std::string Engine::detect(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+
+    detections::ScanResult r = detections::scan(c.strings, c.funcs, c.xrefs);
+
+    // Per-category totals over the WHOLE (uncapped) result, so a capped row
+    // list never turns a count into a floor wearing a measurement's clothes.
+    std::map<std::string, size_t> counts;
+    for (const auto& d : r.detections) counts[d.category] += 1;
+
+    std::ostringstream out;
+    out << "{\"ok\":true"
+        << ",\"total\":" << num(u64(r.detections.size()))
+        << ",\"unattributed\":" << num(u64(r.unattributed))
+        << ",\"stringMatches\":" << num(u64(r.stringMatches))
+        << ",\"nameMatches\":" << num(u64(r.nameMatches))
+        << ",\"counts\":{";
+    // Category order is the database's, and only categories that fired appear.
+    bool firstCat = true;
+    for (const auto& cat : detections::database()) {
+        auto it = counts.find(cat.name);
+        if (it == counts.end()) continue;
+        if (!firstCat) out << ",";
+        firstCat = false;
+        out << q(cat.name) << ":" << num(u64(it->second));
+    }
+    out << "}";
+
+    size_t shown = 0;
+    std::ostringstream rows;
+    for (const auto& d : r.detections) {
+        if (shown >= kDetectionsCap) break;
+        if (shown) rows << ",";
+        rows << "{\"category\":" << q(d.category)
+             << ",\"confidence\":" << q(detections::confidenceName(d.confidence))
+             << ",\"funcAddr\":" << hq(d.funcAddr)
+             << ",\"funcName\":" << q(d.funcName);
+        // The one demangle-at-emit rule xrefsTo uses, kept identical here.
+        if (looksMangled(d.funcName)) {
+            std::string disp = demangle(d.funcName);
+            if (disp != d.funcName) rows << ",\"funcDisplay\":" << q(disp);
+        }
+        rows << ",\"evidence\":" << q(d.evidence)
+             << ",\"source\":" << q(d.source)
+             << ",\"site\":" << hq(d.site)
+             << ",\"hits\":" << num(u64(d.hits));
+        if (d.stringAddr) rows << ",\"stringAddr\":" << hq(d.stringAddr);
+        if (!d.value.empty()) rows << ",\"value\":" << q(d.value);
+        // Every distinct matched token, so no match hides behind `evidence`.
+        rows << ",\"tokens\":[";
+        for (size_t i = 0; i < d.tokens.size(); ++i) {
+            if (i) rows << ",";
+            rows << q(d.tokens[i]);
+        }
+        rows << "]}";
+        ++shown;
+    }
+
+    out << ",\"shown\":" << num(u64(shown))
+        << ",\"detections\":[" << rows.str() << "]}";
     return out.str();
 }
 

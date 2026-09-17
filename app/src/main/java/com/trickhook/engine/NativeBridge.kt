@@ -127,6 +127,37 @@ object NativeBridge {
      * BACKGROUND THREAD: it takes the engine mutex.
      */
     external fun nativeXrefsTo(path: String, address: Long): String
+
+    /**
+     * Anti-analysis & pinning scan of the open binary — the capstone on
+     * [nativeXrefsTo]. It runs a pattern database (categories such as
+     * ssl-pinning, root-detection, anti-debug, anti-frida, emulator-detection
+     * and tamper-detection) over exactly what the analysis already holds: the
+     * string table, the function list and the SAME reference map [nativeXrefsTo]
+     * walks. A category token names a string, that string's referencing sites
+     * map to their containing functions, and a referencing function under a
+     * category is a detection; a function whose own name contains a token is a
+     * direct detection. A matched string that nothing references is an
+     * unattributed hit, still reported.
+     *
+     * READ-ONLY: it mutates nothing in the context. Function naming is resolved
+     * the same way [nativeXrefsTo] resolves it (raw `funcName` plus a demangled
+     * `funcDisplay` when it looks mangled), so a detection and an xref can never
+     * name one function two ways.
+     *
+     * Returns `{"ok":true,"total":N,"shown":M,"unattributed":K,
+     * "counts":{"<category>":N,...},"detections":[{"category":"…",
+     * "confidence":"high"|"medium"|"low","funcAddr":"0x…","funcName":"…",
+     * "funcDisplay":"…"(when demangled),"evidence":"<matched token>",
+     * "tokens":["…"],"source":"string"|"name"|"mixed","site":"0x…",
+     * "stringAddr":"0x…"(when a string drove it),"value":"…"(the string),
+     * "hits":N}]}` or `{"ok":false,"error":"…"}`. `funcAddr` is `0x0` for an
+     * unattributed hit. `detections` is capped (`shown` of `total`); `counts`
+     * carries the honest per-category totals. Engine side: Engine::detect.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex.
+     */
+    external fun nativeDetect(path: String): String
     external fun nativeCallGraph(path: String, focus: Long): String
 
     /**

@@ -143,6 +143,52 @@ data class AddressXrefs(
     val refs: List<XrefSite>
 )
 
+/**
+ * One detection from the anti-analysis scan. A category-under-a-function
+ * finding, or ([funcAddr] == 0) an unattributed hit on a string that nothing
+ * references. [confidence] is "high", "medium" or "low"; [evidence] is the
+ * representative matched token and [tokens] every distinct token that folded
+ * into the row, so nothing is hidden behind it. [source] is "string", "name" or
+ * "mixed"; [site] is the instruction to jump to — a referencing site for a
+ * string match, the function start for a name match. [stringAddr]/[value]
+ * describe the string when one drove the match (0 / null otherwise).
+ * [funcDisplay] is the demangled name, equal to [funcName] when nothing
+ * demangled. Engine side: Engine::detect, via
+ * [com.trickhook.engine.NativeBridge.nativeDetect].
+ */
+data class Detection(
+    val category: String,
+    val confidence: String,
+    val funcAddr: Long,
+    val funcName: String,
+    val funcDisplay: String,
+    val evidence: String,
+    val tokens: List<String>,
+    val source: String,
+    val site: Long,
+    val stringAddr: Long,
+    val value: String?,
+    val hits: Int
+)
+
+/**
+ * The whole anti-analysis scan of the open binary — the answer to "what
+ * security / anti-analysis routines are in here?". [counts] is the per-category
+ * total over the whole result; [detections] is capped, with [total] the honest
+ * count and [shown] (== detections.size) how many rows came back.
+ * [unattributed] counts the detections with no containing function. Engine
+ * side: Engine::detect, via [com.trickhook.engine.NativeBridge.nativeDetect].
+ */
+data class DetectionResult(
+    val ok: Boolean,
+    val error: String?,
+    val total: Int,
+    val shown: Int,
+    val unattributed: Int,
+    val counts: Map<String, Int>,
+    val detections: List<Detection>
+)
+
 data class IrStats(val stmts: Int, val whiles: Int, val ifs: Int, val gotos: Int, val calls: Int)
 
 data class FunctionDetail(
@@ -444,6 +490,59 @@ fun parseAddressXrefs(json: String): AddressXrefs {
         total = maxOf(o.optInt("total"), refs.size),
         shown = minOf(o.optInt("shown"), refs.size),
         refs = refs
+    )
+}
+
+/**
+ * Read the engine's `detect` answer, the same way [parseAddressXrefs] reads
+ * `xrefsTo`: `detections` is the ground truth for what arrived, `total` the
+ * engine's honest count (>= detections.size when the row cap dropped some), and
+ * `shown` trusted only as far as the array actually carries.
+ */
+fun parseDetections(json: String): DetectionResult {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return DetectionResult(
+            false, o.optString("error", "detect failed"), 0, 0, 0, emptyMap(), emptyList()
+        )
+    }
+    val dets = o.optJSONArray("detections")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val d = arr.getJSONObject(i)
+            val toks = d.optJSONArray("tokens")?.let { ta ->
+                (0 until ta.length()).map { ta.optString(it) }
+            } ?: emptyList()
+            Detection(
+                category = d.optString("category"),
+                confidence = d.optString("confidence"),
+                funcAddr = hx(d.optString("funcAddr")),
+                funcName = d.optString("funcName"),
+                funcDisplay = d.optString("funcDisplay").ifEmpty { d.optString("funcName") },
+                evidence = d.optString("evidence"),
+                tokens = toks,
+                source = d.optString("source"),
+                site = hx(d.optString("site")),
+                stringAddr = hx(d.optString("stringAddr")),
+                value = if (d.has("value")) d.optString("value") else null,
+                hits = d.optInt("hits")
+            )
+        }
+    } ?: emptyList()
+    val counts = LinkedHashMap<String, Int>()
+    o.optJSONObject("counts")?.let { co ->
+        val keys = co.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            counts[k] = co.optInt(k)
+        }
+    }
+    return DetectionResult(
+        ok = true, error = null,
+        total = maxOf(o.optInt("total"), dets.size),
+        shown = minOf(o.optInt("shown"), dets.size),
+        unattributed = o.optInt("unattributed"),
+        counts = counts,
+        detections = dets
     )
 }
 

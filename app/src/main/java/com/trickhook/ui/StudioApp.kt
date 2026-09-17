@@ -104,6 +104,7 @@ import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
@@ -949,6 +950,7 @@ private fun PanelHost(vm: StudioViewModel, popFlag: BooleanArray, modifier: Modi
             Tab.MAP -> MapPanel(vm)
             Tab.APK -> ApkPanel(vm)
             Tab.DEBUGGER -> DebuggerPanel(vm)
+            Tab.DETECTIONS -> DetectionsPanel(vm)
             Tab.PLUGINS -> PluginsPanel(vm)
             Tab.CONSOLE -> ConsolePanel(vm)
         }
@@ -2261,6 +2263,7 @@ private fun tabIcon(t: Tab): ImageVector = when (t) {
     Tab.MAP       -> Icons.Filled.Layers
     Tab.APK       -> Icons.Filled.Android
     Tab.DEBUGGER  -> Icons.Filled.BugReport
+    Tab.DETECTIONS -> Icons.Filled.Security
     Tab.PLUGINS   -> Icons.Filled.Extension
     Tab.CONSOLE   -> Icons.Filled.Terminal
 }
