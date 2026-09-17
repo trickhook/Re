@@ -388,11 +388,13 @@ Read-only, always available:
 | Tool | What it does |
 |---|---|
 | `analysis_overview` | Format, architecture, entry, base, sections, segments, counts, decompiler state. Call this first. |
-| `list_functions` | List or search functions. Paginated, sortable by address, name, size or call-graph degree. |
+| `triage` | One orientation pass: imports grouped by interest (crypto, anti-debug, JNI, networking, process/exec), the hottest functions by incoming xref, and the most notable strings. Where to dig. |
+| `list_functions` | List or search functions. `scope=loaded` searches the loaded set and sorts by address, name, size or call-graph degree; `scope=all` pages the whole binary in address order via the engine, so every function is reachable. Paginated. |
 | `list_strings` | Recovered strings with their addresses. Paginated, substring search. |
 | `list_symbols` | Imports or exports. Paginated, substring search. |
 | `disassemble_function` | Instructions with bytes, mnemonic, operands, the engine's auto-comments and yours. Paginated. |
 | `decompile_function` | Pseudo-C, with the Ghidra p-code backend or the built-in IR lifter. |
+| `decompile_functions` | Decompile a batch — an address list, or an offset+count window over the whole function list — in one call, each row identical to `decompile_function`'s. Bounded by a function count and a total size, and reports how far it got. |
 | `xrefs` | References in and out of a function, with the call site and the owning function. Paginated. |
 | `call_graph` | A bounded neighbourhood around one function, or the busiest functions in the binary. |
 | `read_memory` | Bytes as hex and ASCII, by virtual address or file offset. |
@@ -416,3 +418,13 @@ Every list is paginated the same way: `offset` and `limit` going in, and
 `total`, `count` and `nextOffset` coming back. A binary here can carry well over
 a thousand functions and twelve thousand call edges — page through them, do not
 try to pull them all into one answer.
+
+The whole binary is reachable without pulling it all at once. A large library
+loads only its first several thousand functions into the app; `list_functions`
+with `scope=all` pages the engine's entire function list in address order (its
+answer adds `scanned` and `functionsTotal`), and `decompile_functions` sweeps
+that same list in bounded batches. Both keep every answer capped and report the
+total, so a walk always knows how much remains. The recovered-strings list is
+the one that does not page beyond what the analysis holds — the engine exposes
+no whole-binary string cursor — and `list_strings` says so in its `coverage`
+line when there are more.

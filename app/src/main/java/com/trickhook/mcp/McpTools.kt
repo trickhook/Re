@@ -3,9 +3,11 @@ package com.trickhook.mcp
 import com.trickhook.engine.NativeBridge
 import com.trickhook.model.AnalysisMeta
 import com.trickhook.model.CallEdge
+import com.trickhook.model.FoundStr
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FunctionDetail
 import com.trickhook.model.parseDetail
+import com.trickhook.model.parseFunctionPage
 import com.trickhook.ui.parseAddr
 import com.trickhook.ui.xrefRows
 import com.trickhook.vm.StudioViewModel
@@ -30,7 +32,11 @@ import java.util.concurrent.locks.ReentrantLock
  * and 12,000+ call edges; a tool that answers with all of them has spent a
  * client's whole context on data nobody read. Each list tool takes `offset` and
  * `limit`, and every list answer carries `total`, `count` and `nextOffset` so
- * the model can page deliberately instead of guessing.
+ * the model can page deliberately instead of guessing. Reaching the whole
+ * binary and keeping answers bounded are not in tension: `list_functions`
+ * scope=all and `decompile_functions` page the engine's entire function list
+ * one bounded window at a time, so every function is in reach without any one
+ * answer being unbounded.
  *
  * The three tools that write — [RENAME], [COMMENT], [BOOKMARK] — are separated
  * from the rest by [Tool.write] and are neither advertised nor callable unless
@@ -67,6 +73,66 @@ class McpTools(allowWrites: Boolean) {
 
         /** Instructions one disassemble_function call may return. */
         private const val ASM_CAP = 400
+
+        /**
+         * Functions one whole-binary page (list_functions scope=all,
+         * decompile_functions in range mode) may name. The engine's own
+         * nativeFunctionPage allows far more; this is the cap that keeps one
+         * answer readable in a client's transcript.
+         */
+        private const val WALK_CAP = 200
+
+        /** Functions one decompile_functions call may decompile. */
+        private const val BATCH_MAX = 20
+
+        /**
+         * Total pseudo-C a decompile_functions call may accumulate across the
+         * whole batch. Each row is still capped at [PSEUDO_CAP]; this bounds the
+         * sum so a handful of large functions cannot fill a client's context in
+         * one call. Reported back as `stoppedForSize` with the offset to resume.
+         */
+        private const val BATCH_PSEUDO_CAP = 100000
+
+        /**
+         * Import-name substrings that put an import in a triage bucket, matched
+         * case-insensitively. The crypto and anti-debug needles follow the
+         * bundled crypto-finder and anti-debug-scanner plugins; the rest are the
+         * obvious libc, TLS and loader entry points for each area. A match is a
+         * lead to look at, not proof — an import can fall in more than one
+         * bucket, and each bucket reports how many matched against the total.
+         */
+        private val TRIAGE_IMPORTS: List<Pair<String, List<String>>> = listOf(
+            "crypto" to listOf(
+                "aes", "sha1", "sha256", "sha512", "sha3", "md5", "rc4", "des_",
+                "3des", "rsa", "hmac", "crypt", "cipher", "evp_", "chacha",
+                "poly1305", "blowfish", "curve25519", "ed25519", "ecdsa", "ecdh",
+                "bn_", "base64", "pbkdf", "scrypt", "argon2", "drbg"
+            ),
+            "antiDebug" to listOf(
+                "ptrace", "getppid", "sysconf", "prctl", "personality", "kill"
+            ),
+            "jni" to listOf(
+                "jni", "java_", "registernatives", "getjavavm", "findclass"
+            ),
+            "networking" to listOf(
+                "socket", "connect", "getaddrinfo", "gethostbyname", "inet_",
+                "recv", "send", "htons", "htonl", "ntoh", "ssl_", "mbedtls",
+                "gnutls", "openssl", "curl_", "sendto", "recvfrom", "getsockopt",
+                "setsockopt"
+            ),
+            "processExec" to listOf(
+                "execve", "execl", "execv", "execvp", "posix_spawn", "fork",
+                "vfork", "system", "popen", "waitpid", "wait4", "clone",
+                "dlopen", "dlsym", "syscall"
+            )
+        )
+
+        /** A printf-style conversion, the mark of a format string. */
+        private val FORMAT_SPEC = Regex("%[#0-9.+ lhLzjt-]*[diouxXeEfgGaAcspn]")
+
+        /** A run that reads as an embedded key or hash: long, all hex or all base64. */
+        private val HEX_BLOB = Regex("^[0-9a-fA-F]{16,}$")
+        private val BASE64_BLOB = Regex("^[A-Za-z0-9+/]{24,}={0,2}$")
 
         /**
          * One engine call at a time.
@@ -297,24 +363,64 @@ class McpTools(allowWrites: Boolean) {
         ) { overview() })
 
         add(Tool(
+            "triage", "Triage the binary",
+            "One orientation pass over the open binary — where to dig, before you decompile " +
+                "anything. Built entirely from what the engine already holds (imports, " +
+                "strings, cross-reference counts and the function list), so it runs cheap and " +
+                "reads nothing new off the engine. It returns three things. First, imports " +
+                "grouped by interest — crypto, anti-debug/ptrace, JNI, networking/sockets and " +
+                "process/exec — matched by name the way the bundled crypto-finder and " +
+                "anti-debug-scanner plugins do, plus any Java_ JNI entry points from the " +
+                "function list. Second, the hottest functions by incoming cross-reference " +
+                "count. Third, the most notable strings — URLs, filesystem paths, format " +
+                "strings and likely keys or hashes. Every list is capped and reports its own " +
+                "total, and the buckets ranked over loaded data rather than the whole binary " +
+                "say so. A name match is a lead, not a verdict. Takes an optional per-list " +
+                "`limit`.",
+            schema(
+                emptyList(),
+                listOf(
+                    "limit" to intProp(
+                        "Rows each list returns before it is capped; every list still " +
+                            "reports its full total.",
+                        1, 50, 12
+                    )
+                )
+            ), false
+        ) { triage(it) })
+
+        add(Tool(
             "list_functions", "List functions",
             "List or search the functions the engine found. `query` is a case-insensitive " +
                 "substring matched against the symbol name, the demangled name and any name " +
-                "recorded in this project. Paginated: this binary can hold well over a " +
-                "thousand functions, so read `total` and page with `offset` rather than " +
-                "raising `limit`. Each row's `address` is what disassemble_function, " +
-                "decompile_function, xrefs, call_graph and emulate_function take.",
+                "recorded in this project. Each row's `address` is what disassemble_function, " +
+                "decompile_function, xrefs, call_graph and emulate_function take.\n\n" +
+                "`scope` decides how much of the binary is in view. `loaded` (the default) " +
+                "searches and sorts the functions the app has already loaded — fast, and the " +
+                "only scope that honours `sort`, but a large library keeps most of its " +
+                "functions unloaded, and the answer says how many. `all` walks the WHOLE " +
+                "function list straight from the engine in address order, paging with " +
+                "`offset` and `nextOffset`, so every function is reachable and a name can be " +
+                "ruled truly absent; `query` still filters, and the answer reports `scanned` " +
+                "(rows walked, what `nextOffset` advances by) alongside `count` (rows that " +
+                "matched). At most " + WALK_CAP + " functions per page in either scope.",
             schema(
                 emptyList(),
                 listOf(
                     "query" to strProp("Case-insensitive substring of the function name. Omit for all."),
+                    "scope" to enumProp(
+                        "`loaded` searches the functions the app holds and honours `sort`; " +
+                            "`all` walks the whole binary in address order via the engine.",
+                        listOf("loaded", "all"), "loaded"
+                    ),
                     "sort" to enumProp(
-                        "Row order. `callers` and `callees` sort by call-graph degree, " +
-                            "descending — the quickest way to the functions that matter.",
+                        "Row order, applied in scope=loaded only. `callers` and `callees` " +
+                            "sort by call-graph degree, descending — the quickest way to the " +
+                            "functions that matter.",
                         listOf("address", "name", "size", "callers", "callees"), "address"
                     ),
                     "offset" to offsetProp(),
-                    "limit" to limitProp(50, 200)
+                    "limit" to limitProp(50, WALK_CAP)
                 )
             ), false
         ) { listFunctions(it) })
@@ -385,6 +491,44 @@ class McpTools(allowWrites: Boolean) {
                 )
             ), false
         ) { decompile(it) })
+
+        add(Tool(
+            "decompile_functions", "Decompile many functions",
+            "Decompile a batch of functions to pseudo-C in one call, so a sweep is one round " +
+                "trip instead of twenty. Each row is exactly what decompile_function returns " +
+                "for that address — same engine pass, same $PSEUDO_CAP-character per-row cap, " +
+                "same `truncated` flag — because it runs that identical path per function.\n\n" +
+                "Name the functions one of two ways: `addresses`, an explicit list of function " +
+                "addresses in hex, or `offset`+`count`, a window over the WHOLE function list " +
+                "in address order (the same walk list_functions scope=all pages), which is how " +
+                "you sweep a binary front to back. At most " + BATCH_MAX + " functions per " +
+                "call, and the batch also stops once its pseudo-C passes a total size cap — " +
+                "either way the answer reports `count`, `requested` and, in range mode, " +
+                "`nextOffset` to continue. A function that fails to decompile comes back as a " +
+                "row with an `error` instead of failing the batch. This holds the engine for " +
+                "its whole run, like any decompile does; it is not parallel.",
+            schema(
+                emptyList(),
+                listOf(
+                    "addresses" to strListProp(
+                        "Function addresses in hex. Overrides offset/count when present. " +
+                            "An address inside a body resolves to its function."
+                    ),
+                    "offset" to intProp(
+                        "Start index into the whole-binary function list (address order). " +
+                            "Used when `addresses` is omitted.",
+                        0, Int.MAX_VALUE, 0
+                    ),
+                    "count" to intProp(
+                        "How many functions from `offset` to decompile.", 1, BATCH_MAX, 8
+                    ),
+                    "backend" to enumProp(
+                        "Which decompiler to run, as in decompile_function.",
+                        listOf("current", "ghidra", "ir"), "current"
+                    )
+                )
+            ), false
+        ) { decompileBatch(it) })
 
         add(Tool(
             "xrefs", "Cross-references",
@@ -734,9 +878,154 @@ class McpTools(allowWrites: Boolean) {
         )
     }
 
+    /**
+     * triage: one orientation pass, built only from what the engine already
+     * holds — imports (complete), the loaded function list and its xref counts,
+     * and the strings this analysis carries. It reads nothing new off the
+     * engine, so it is cheap; the price is that the function and string buckets
+     * see the loaded prefix of a large binary, and the answer says so.
+     */
+    private fun triage(args: JSONObject): Outcome {
+        val m = openMeta()
+        val cap = intArg(args, "limit", 12, 1, 50)
+
+        // Imports grouped by interest. An import can land in more than one
+        // bucket; each bucket carries its own total against the cap.
+        val imports = JSONObject()
+        for ((label, needles) in TRIAGE_IMPORTS) {
+            val matched = m.imports.filter { imp ->
+                val n = imp.name.lowercase()
+                needles.any { n.contains(it) }
+            }
+            val syms = JSONArray()
+            for (s in matched.take(cap)) {
+                syms.put(JSONObject().put("name", s.name).put("address", hx(s.addr)))
+            }
+            imports.put(
+                label,
+                JSONObject().put("total", matched.size)
+                    .put("count", minOf(matched.size, cap)).put("symbols", syms)
+            )
+        }
+
+        // JNI entry points are Java_* in the function list, not named imports.
+        val jniEntries = m.functions.filter { it.name.contains("Java_", ignoreCase = true) }
+        val jniArr = JSONArray()
+        for (f in jniEntries.take(cap)) {
+            jniArr.put(JSONObject().put("address", hx(f.addr)).put("name", effectiveName(f.addr)))
+        }
+
+        // Hottest functions by incoming reference count.
+        val hot = m.functions.sortedByDescending { it.nCallers }.take(cap)
+        val hotArr = JSONArray()
+        for (f in hot) {
+            hotArr.put(
+                JSONObject().put("address", hx(f.addr)).put("name", effectiveName(f.addr))
+                    .put("callers", f.nCallers).put("callees", f.nCallees).put("size", f.size)
+            )
+        }
+
+        // Notable strings, sorted into four leads.
+        val urls = ArrayList<FoundStr>()
+        val paths = ArrayList<FoundStr>()
+        val formats = ArrayList<FoundStr>()
+        val keys = ArrayList<FoundStr>()
+        for (s in m.strings) {
+            val v = s.value
+            val isUrl = v.contains("://")
+            if (isUrl) urls.add(s)
+            if (!isUrl && isPathish(v)) paths.add(s)
+            if (!isUrl && FORMAT_SPEC.containsMatchIn(v)) formats.add(s)
+            if (isKeyish(v)) keys.add(s)
+        }
+        val notable = JSONObject()
+            .put("urls", stringBucket(urls, cap))
+            .put("paths", stringBucket(paths, cap))
+            .put("formatStrings", stringBucket(formats, cap))
+            .put("likelyKeys", stringBucket(keys, cap))
+
+        val fnFound = maxOf(m.functionsTotal, m.functions.size)
+        val strFound = maxOf(m.stringsTotal, m.strings.size)
+        val out = JSONObject()
+        out.put("imports", imports)
+        out.put("importsScanned", m.imports.size)
+        out.put(
+            "jniEntryPoints",
+            JSONObject().put("total", jniEntries.size)
+                .put("count", minOf(jniEntries.size, cap)).put("functions", jniArr)
+        )
+        out.put("hotFunctions", hotArr)
+        out.put("hotFunctionsRanked", m.functions.size)
+        out.put("functionsTotal", fnFound)
+        out.put("notableStrings", notable)
+        out.put("stringsScanned", m.strings.size)
+        out.put("stringsTotal", strFound)
+
+        val caveats = JSONArray()
+        if (fnFound > m.functions.size) caveats.put(
+            "Hot functions and JNI entry points are drawn from the ${m.functions.size} " +
+                "functions loaded, of $fnFound the engine found, the same set call_graph's " +
+                "busiest list ranks over. list_functions scope=\"all\" reaches the rest in " +
+                "address order (it does not rank by callers)."
+        )
+        if (strFound > m.strings.size) caveats.put(
+            "Notable strings are drawn from the ${m.strings.size} strings this analysis holds, " +
+                "of $strFound found."
+        )
+        if (m.xrefsAreFloors) caveats.put(
+            "Caller counts are floors: the reference map holds ${m.xrefsStored} of ${m.xrefsTotal}."
+        )
+        if (caveats.length() > 0) out.put("coverage", caveats)
+        out.put(
+            "note",
+            "Name matches are leads, not verdicts. Imports are complete; the function and " +
+                "string buckets are what the analysis holds. Start from the fullest bucket."
+        )
+
+        val crypto = imports.getJSONObject("crypto").getInt("total")
+        val anti = imports.getJSONObject("antiDebug").getInt("total")
+        return Outcome(out, "triage · crypto $crypto, anti-debug $anti · ${hot.size} hot funcs")
+    }
+
+    /** One notable-strings bucket: total matched, and the first [cap] values. */
+    private fun stringBucket(rows: List<FoundStr>, cap: Int): JSONObject {
+        val arr = JSONArray()
+        for (s in rows.take(cap)) {
+            val o = JSONObject().put("address", hx(s.addr))
+            if (s.value.length > 160) {
+                o.put("value", s.value.take(160)).put("truncated", true).put("length", s.value.length)
+            } else {
+                o.put("value", s.value)
+            }
+            arr.put(o)
+        }
+        return JSONObject().put("total", rows.size).put("count", minOf(rows.size, cap)).put("values", arr)
+    }
+
+    /** A filesystem-path-looking string: a rooted path, or a known Android dir. */
+    private fun isPathish(v: String): Boolean {
+        if (v.length < 2 || v.length > 200) return false
+        if (v.startsWith("/") && v.indexOf('/', 1) >= 0) return true
+        return v.contains("/proc/") || v.contains("/system/") ||
+            v.contains("/data/") || v.contains("/sdcard/") || v.contains("/dev/")
+    }
+
+    /** A string that reads as an embedded key, secret or hash. A lead, not proof. */
+    private fun isKeyish(v: String): Boolean {
+        val t = v.trim()
+        if (t.length in 16..512 && (HEX_BLOB.matches(t) || BASE64_BLOB.matches(t))) return true
+        val low = v.lowercase()
+        return low.contains("secret") || low.contains("password") || low.contains("passwd") ||
+            low.contains("api_key") || low.contains("apikey") || low.contains("private key") ||
+            low.contains("-----begin") || low.contains("token") ||
+            (low.contains("key") && (low.contains("=") || low.contains(":")))
+    }
+
     private fun listFunctions(args: JSONObject): Outcome {
         val m = openMeta()
         val q = textArg(args, "query", false).trim()
+        val scope = enumArg(args, "scope", listOf("loaded", "all"), "loaded")
+        if (scope == "all") return listFunctionsWholeBinary(args, m, q)
         val sort = enumArg(args, "sort", listOf("address", "name", "size", "callers", "callees"), "address")
 
         var rows = m.functions
@@ -787,11 +1076,88 @@ class McpTools(allowWrites: Boolean) {
             out.put(
                 "coverage",
                 "Searched the ${m.functions.size} functions loaded; the engine found $found. " +
-                    "Load the rest in the app's Functions tab before concluding a name is absent."
+                    "Pass scope=\"all\" to walk or search the whole binary before concluding " +
+                    "a name is absent."
             )
         }
         val note = if (q.isEmpty()) "" else " matching \"$q\""
         return Outcome(out, "${page.size} of ${rows.size}" + note)
+    }
+
+    /**
+     * list_functions scope=all: the WHOLE function list, paged straight from the
+     * engine in address order, so no function is out of reach. Never mutates the
+     * app's loaded set — the page is read and dropped, unlike the app's own
+     * loadMoreFunctions which appends.
+     *
+     * The engine's rows carry their own names; a rename recorded in this project
+     * overrides one, but the app's effectiveFuncName would turn an UNLOADED
+     * row's name into "sub_…" (it only knows loaded functions), so names here go
+     * through [pagedName] instead.
+     *
+     * `count` is rows returned after `query`; `scanned` is rows walked, and
+     * `nextOffset` advances by `scanned`. With no query the two are equal.
+     */
+    private fun listFunctionsWholeBinary(args: JSONObject, m: AnalysisMeta, q: String): Outcome {
+        val w = window(args, 50, WALK_CAP)
+        val page = parseFunctionPage(
+            NativeBridge.nativeFunctionPage(openPath(), w.offset.toLong(), w.limit.toLong())
+        )
+        if (!page.ok) throw Failure(page.error ?: "the engine could not page the function list.")
+        val total = maxOf(page.functionsTotal, m.functionsTotal, m.functions.size)
+        val matched = if (q.isEmpty()) page.functions
+            else page.functions.filter { f ->
+                f.name.contains(q, true) ||
+                    (f.demangled?.contains(q, true) == true) ||
+                    pagedName(f).contains(q, true)
+            }
+        val arr = JSONArray()
+        for (f in matched) {
+            val name = pagedName(f)
+            val row = JSONObject()
+                .put("address", hx(f.addr))
+                .put("name", name)
+                .put("size", f.size)
+                .put("source", f.from)
+                .put("callers", f.nCallers)
+                .put("callees", f.nCallees)
+            if (f.name.isNotEmpty() && f.name != name) row.put("originalName", f.name)
+            f.demangled?.takeIf { it.isNotBlank() }?.let { row.put("demangled", it) }
+            arr.put(row)
+        }
+        val scanned = page.count
+        val out = JSONObject().put("scope", "all").put("functions", arr)
+        out.put("total", total)
+        out.put("offset", w.offset)
+        out.put("scanned", scanned)
+        out.put("count", matched.size)
+        out.put("functionsTotal", total)
+        out.put("pageCap", WALK_CAP)
+        val next = w.offset + scanned
+        if (scanned > 0 && next < total) out.put("nextOffset", next)
+        else out.put("nextOffset", JSONObject.NULL)
+        if (q.isNotEmpty()) {
+            out.put("query", q)
+            out.put(
+                "coverage",
+                "Walked $scanned of $total functions from offset ${w.offset}; " +
+                    "${matched.size} matched \"$q\". Page on with nextOffset until it is null."
+            )
+        }
+        val note = if (q.isEmpty()) "" else " matching \"$q\""
+        return Outcome(out, "whole binary · ${matched.size} of $total at ${w.offset}" + note)
+    }
+
+    /**
+     * The name to show for an engine function row: a project rename if one is
+     * recorded at that address, otherwise the engine's own name, otherwise the
+     * synthetic sub_ form. Works for a row the app never loaded, which is why it
+     * reads the row's own name rather than looking the address up.
+     */
+    private fun pagedName(f: FuncInfo): String {
+        val key = annotationKey(f.addr)
+        return session().renames[key]
+            ?: f.name.ifBlank { "sub_" + key.removePrefix("0x").lowercase() }
     }
 
     private fun listStrings(args: JSONObject): Outcome {
@@ -931,6 +1297,135 @@ class McpTools(allowWrites: Boolean) {
             out.put("note", "${hx(asked)} is inside this function, which starts at ${hx(fn.addr)}.")
         }
         return Outcome(out, "${effectiveName(fn.addr)} · ${d.backend} · ${text.length} chars")
+    }
+
+    /**
+     * decompile_functions: a batch of functions down the exact same
+     * [functionDetail] path decompile_function uses, so a row here cannot drift
+     * from a single-function row. Bounded twice over — at most [BATCH_MAX]
+     * functions, and it stops once the pseudo-C it has gathered passes
+     * [BATCH_PSEUDO_CAP] — and it reports how far it got either way.
+     *
+     * Range mode reads its addresses from [nativeFunctionPage], the same
+     * whole-binary walk list_functions scope=all uses, without ever adding them
+     * to the app's loaded set. A function the engine cannot decompile becomes a
+     * row with an `error`, not a failed call.
+     */
+    private fun decompileBatch(args: JSONObject): Outcome {
+        val m = openMeta()
+        val backend = enumArg(args, "backend", listOf("current", "ghidra", "ir"), "current")
+
+        val explicit = addressList(args, "addresses")
+        val rangeMode = explicit == null
+
+        val targets: List<Long>
+        val requested: Int
+        var offset = 0
+        var functionsTotal = 0
+        if (rangeMode) {
+            offset = intArg(args, "offset", 0, 0, Int.MAX_VALUE)
+            val count = intArg(args, "count", 8, 1, BATCH_MAX)
+            val page = parseFunctionPage(
+                NativeBridge.nativeFunctionPage(openPath(), offset.toLong(), count.toLong())
+            )
+            if (!page.ok) throw Failure(page.error ?: "the engine could not page the function list.")
+            functionsTotal = maxOf(page.functionsTotal, m.functionsTotal, m.functions.size)
+            targets = page.functions.map { it.addr }
+            requested = count
+        } else {
+            requested = explicit!!.size
+            targets = explicit.take(BATCH_MAX)
+        }
+
+        val arr = JSONArray()
+        var decompiled = 0
+        var failed = 0
+        var usedChars = 0
+        var stoppedForSize = false
+        for (addr in targets) {
+            if (arr.length() > 0 && usedChars >= BATCH_PSEUDO_CAP) { stoppedForSize = true; break }
+            val row = JSONObject().put("address", hx(addr))
+            try {
+                // Range rows are function starts from the engine; an explicit
+                // address may point inside a body, so resolve it the way
+                // decompile_function does, falling back to the address itself
+                // when it names a function the app has not loaded.
+                val start = if (rangeMode) addr
+                    else try { resolveFunction(addr).addr } catch (e: Failure) { addr }
+                val d = functionDetail(start, backend)
+                if (start != addr) row.put("function", hx(start))
+                row.put("name", session().renames[annotationKey(start)]
+                    ?: d.name.ifBlank { "sub_" + annotationKey(start).removePrefix("0x").lowercase() })
+                row.put("size", d.size)
+                row.put("backend", d.backend)
+                row.put("pseudoMode", d.pseudoMode)
+                val text = d.pseudo
+                if (text.length > PSEUDO_CAP) {
+                    row.put("pseudoC", text.take(PSEUDO_CAP)).put("truncated", true)
+                        .put("totalCharacters", text.length)
+                    usedChars += PSEUDO_CAP
+                } else {
+                    row.put("pseudoC", text).put("truncated", false)
+                    usedChars += text.length
+                }
+                decompiled += 1
+            } catch (e: Exception) {
+                // One function the engine cannot decompile is a row with an
+                // error, never a failed batch. Failure is an Exception too, so
+                // its clean message rides the same path.
+                row.put("error", e.message ?: "could not decompile this address")
+                failed += 1
+            }
+            arr.put(row)
+        }
+
+        val consumed = arr.length()
+        val out = JSONObject()
+            .put("mode", if (rangeMode) "range" else "addresses")
+            .put("backend", backend)
+            .put("requested", requested)
+            .put("count", consumed)
+            .put("decompiled", decompiled)
+            .put("failed", failed)
+            .put("functions", arr)
+        if (stoppedForSize) out.put("stoppedForSize", true)
+        if (rangeMode) {
+            out.put("offset", offset)
+            out.put("functionsTotal", functionsTotal)
+            val next = offset + consumed
+            if (consumed > 0 && next < functionsTotal) out.put("nextOffset", next)
+            else out.put("nextOffset", JSONObject.NULL)
+            if (stoppedForSize) out.put(
+                "coverage",
+                "Stopped after $consumed functions at the $BATCH_PSEUDO_CAP-character pseudo-C " +
+                    "budget. Continue from nextOffset."
+            )
+        } else if (consumed < requested) {
+            // Address mode leaves the rest to the caller, whether the BATCH_MAX
+            // ceiling or the size budget is what stopped it.
+            out.put(
+                "coverage",
+                "Returned $consumed of $requested requested" +
+                    (if (stoppedForSize) ", stopping at the $BATCH_PSEUDO_CAP-character pseudo-C budget"
+                    else "; at most $BATCH_MAX functions per call") +
+                    " — send the remaining addresses in a follow-up call."
+            )
+        }
+        return Outcome(out, "$decompiled decompiled, $failed failed" +
+            (if (stoppedForSize) " (size cap)" else ""))
+    }
+
+    /** Address list from a string array argument, or null when absent or empty. */
+    private fun addressList(args: JSONObject, name: String): List<Long>? {
+        if (!args.has(name) || args.isNull(name)) return null
+        val v = args.optJSONArray(name) ?: return null
+        val out = ArrayList<Long>()
+        for (i in 0 until v.length()) {
+            val s = v.optString(i, "").trim()
+            if (s.isEmpty()) continue
+            out.add(parseAddr(s) ?: throw Failure("`$name`[$i] is not an address: \"$s\"."))
+        }
+        return if (out.isEmpty()) null else out
     }
 
     private fun xrefs(args: JSONObject): Outcome {

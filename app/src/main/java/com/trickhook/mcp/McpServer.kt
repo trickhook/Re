@@ -679,7 +679,9 @@ that takes a filesystem path, by design — if you need a different binary, ask 
 user to open it on the device.
 
 Start with analysis_overview. It tells you the format, the architecture and how
-much of everything there is.
+much of everything there is. Then triage for one orientation pass — imports
+grouped by interest, the hottest functions, the most notable strings — which is
+the fastest way to decide where to dig.
 
 Addresses are hex strings, with or without 0x ("0x2a10" or "2a10"). Take them
 from list_functions rather than inventing them. An address inside a function
@@ -689,6 +691,12 @@ Every list is paginated and every list answer carries total, count and
 nextOffset. This binary can hold well over a thousand functions and twelve
 thousand call edges: page deliberately, and filter with `query` rather than
 raising `limit` and reading the lot.
+
+A large binary keeps most of its functions unloaded, and list_functions searches
+only the loaded ones by default — its answer says how many it did not see. Pass
+scope="all" to walk or search the WHOLE function list straight from the engine,
+and decompile_functions to pull a batch of functions' pseudo-C in one call
+instead of one round trip each.
 
 decompile_function with the Ghidra backend can take several seconds. xrefs runs
 the same engine pass — use call_graph when you want to walk many functions
