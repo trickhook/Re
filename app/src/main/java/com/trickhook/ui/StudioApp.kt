@@ -732,6 +732,8 @@ fun StudioApp(vm: StudioViewModel) {
 
     InstalledAppsSheet(vm)
 
+    ManifestSheet(vm)
+
     DiffPanel(vm)
     if (showDiffChooser) {
         DiffChooserDialog(

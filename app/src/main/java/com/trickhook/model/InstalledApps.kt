@@ -161,34 +161,7 @@ object InstalledApps {
         for ((splitName, path) in apkPaths) {
             val f = File(path)
             if (!f.canRead()) continue
-            try {
-                ZipFile(f).use { zf ->
-                    readable++
-                    zf.entries().asSequence()
-                        .filter { !it.isDirectory }
-                        .forEach { e ->
-                            val name = e.name
-                            if (!name.startsWith("lib/") || !name.endsWith(".so")) return@forEach
-                            // lib / <abi> / <name>.so — exactly three components.
-                            val parts = name.split('/')
-                            if (parts.size != 3) return@forEach
-                            libs.add(
-                                AppNativeLib(
-                                    pkg = pkg,
-                                    libName = parts[2],
-                                    abi = parts[1],
-                                    splitName = splitName,
-                                    splitPath = path,
-                                    entryName = name,
-                                    size = e.size
-                                )
-                            )
-                        }
-                }
-            } catch (t: Throwable) {
-                // A split that will not open as a ZIP is skipped; it simply does
-                // not contribute libraries and is not counted as readable.
-            }
+            if (collectLibsFromZip(f, pkg, splitName, libs)) readable++
         }
 
         val note = when {
@@ -210,5 +183,87 @@ object InstalledApps {
             libs = libs,
             note = note
         )
+    }
+
+    /**
+     * The same native-library enumeration as [scanNativeLibs], but for ONE APK
+     * file the caller already holds — the file the APK/attack-surface view was
+     * opened from, rather than an installed package's splits. It walks that
+     * single archive's native library entries (lib then abi then a .so) through
+     * the exact same [collectLibsFromZip] machinery, so a lone .apk and an
+     * installed app report their native code identically. One file, so
+     * [apkCount] is 1.
+     */
+    fun scanApkFile(file: File, supportedAbis: List<String>, pkg: String = ""): AppLibScan {
+        val primaryAbi = supportedAbis.firstOrNull() ?: ""
+        if (!file.canRead()) {
+            return AppLibScan(
+                pkg, ok = false, primaryAbi = primaryAbi,
+                apkCount = 1, readableApkCount = 0, libs = emptyList(),
+                note = "This APK file could not be read from here."
+            )
+        }
+        val libs = ArrayList<AppNativeLib>()
+        val readable = if (collectLibsFromZip(file, pkg, file.name, libs)) 1 else 0
+        val note = when {
+            readable == 0 ->
+                "This APK file could not be opened as a ZIP archive."
+            libs.isEmpty() ->
+                "This APK ships no extractable .so under lib/. Its native code may be in " +
+                    "an asset pack this feature cannot read, or it is all DEX."
+            else -> ""
+        }
+        return AppLibScan(
+            pkg = pkg,
+            ok = readable > 0,
+            primaryAbi = primaryAbi,
+            apkCount = 1,
+            readableApkCount = readable,
+            libs = libs,
+            note = note
+        )
+    }
+
+    /**
+     * Open one APK (a base, a split, or a lone file) as a ZIP and append every
+     * lib/<abi>/<name>.so entry it holds to [out]. Returns true when the archive
+     * opened (whether or not it held any .so), false when it would not open as a
+     * ZIP at all — which is what the caller counts as a readable APK. The one
+     * copy of this walk, shared by the installed-splits scan and the single-file
+     * scan, so the two can never disagree about what a native library is.
+     */
+    private fun collectLibsFromZip(
+        f: File,
+        pkg: String,
+        splitName: String,
+        out: MutableList<AppNativeLib>
+    ): Boolean = try {
+        ZipFile(f).use { zf ->
+            zf.entries().asSequence()
+                .filter { !it.isDirectory }
+                .forEach { e ->
+                    val name = e.name
+                    if (!name.startsWith("lib/") || !name.endsWith(".so")) return@forEach
+                    // lib / <abi> / <name>.so — exactly three components.
+                    val parts = name.split('/')
+                    if (parts.size != 3) return@forEach
+                    out.add(
+                        AppNativeLib(
+                            pkg = pkg,
+                            libName = parts[2],
+                            abi = parts[1],
+                            splitName = splitName,
+                            splitPath = f.absolutePath,
+                            entryName = name,
+                            size = e.size
+                        )
+                    )
+                }
+        }
+        true
+    } catch (t: Throwable) {
+        // An archive that will not open as a ZIP is skipped; it contributes no
+        // libraries and is not counted as readable.
+        false
     }
 }

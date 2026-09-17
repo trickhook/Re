@@ -18,6 +18,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -274,6 +276,31 @@ private fun AppRow(app: InstalledApp, onPick: (InstalledApp) -> Unit) {
         if (app.isSystem) {
             Spacer(Modifier.width(Space.m))
             StatChip("system", ide.dim2)
+        }
+        // A second action on the row: read this app's manifest / attack surface
+        // instead of its libraries. Its own clickable, so the row's main tap
+        // still opens the native-lib picker; the manifest sheet stacks over this
+        // one, so dismissing it returns to the app list.
+        Spacer(Modifier.width(Space.s))
+        Box(
+            Modifier
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = "Inspect manifest and attack surface of ${app.label}"
+                ) {
+                    manifestTargetPkg = app.pkg
+                    manifestTargetLabel = app.label
+                    showManifestSheet = true
+                }
+                .heightIn(min = 40.dp)
+                .padding(Space.s),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Filled.Security,
+                contentDescription = "Inspect manifest and attack surface",
+                tint = ide.accent, modifier = Modifier.size(16.dp)
+            )
         }
     }
 }

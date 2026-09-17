@@ -26,6 +26,8 @@ import com.trickhook.model.AddressXrefs
 import com.trickhook.model.AnalysisMeta
 import com.trickhook.model.AppLibScan
 import com.trickhook.model.AppNativeLib
+import com.trickhook.model.AttackSurface
+import com.trickhook.model.AttackSurfaceScanner
 import com.trickhook.model.InstalledApp
 import com.trickhook.model.InstalledApps
 import com.trickhook.model.CallEdge
@@ -268,6 +270,14 @@ class StudioViewModel : ViewModel() {
     var installedAppsLoading by mutableStateOf(false); private set
     var installedLibs by mutableStateOf<AppLibScan?>(null); private set
     var installedLibsLoading by mutableStateOf(false); private set
+    // The manifest / attack-surface triage sheet: identity, exported components,
+    // permissions, deep links, native libs and signing for one app — an
+    // installed package (via PackageManager) or the open APK file. Loaded off
+    // the main thread; [attackSurfaceLabel] is the header text shown while the
+    // scan is still in flight.
+    var attackSurface by mutableStateOf<AttackSurface?>(null); private set
+    var attackSurfaceLoading by mutableStateOf(false); private set
+    var attackSurfaceLabel by mutableStateOf(""); private set
     var selectedFunc by mutableStateOf<Long?>(null); private set
     var detail by mutableStateOf<FunctionDetail?>(null); private set
 
@@ -3323,6 +3333,93 @@ class StudioViewModel : ViewModel() {
             // standing beside a library that came from somewhere else.
             loadFile(dst, "${lib.libName} — $appLabel", fromApk = false)
         }
+    }
+
+    // ----------------------------------------------- attack-surface triage --
+    /**
+     * The app the most recent attack-surface scan was asked for, keyed so a slow
+     * scan that lands after the user has moved to another target is dropped
+     * rather than shown against the wrong app. Read and written on the main
+     * thread only, exactly like [installedLibsReq].
+     */
+    private var attackSurfaceReq: String? = null
+
+    /**
+     * Load the attack surface of one INSTALLED package for the manifest sheet.
+     * PackageManager carries identity, components (with their effective exported
+     * flags), permissions and signing certificates; the base APK's binary
+     * manifest is read additively for deep links; native libraries are the
+     * ordinary installed-app scan. All of it is off the main thread.
+     */
+    fun loadAttackSurfaceForPackage(context: Context, pkg: String, label: String) {
+        val app = context.applicationContext
+        val abis = Build.SUPPORTED_ABIS.toList()
+        val req = "pkg:$pkg"
+        attackSurfaceReq = req
+        attackSurface = null
+        attackSurfaceLoading = true
+        attackSurfaceLabel = label.ifBlank { pkg }
+        viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    AttackSurfaceScanner.fromInstalled(app.packageManager, pkg, label, abis)
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "could not read $pkg's manifest")
+                null
+            }
+            if (attackSurfaceReq == req) {
+                attackSurface = result
+                attackSurfaceLoading = false
+            }
+        }
+    }
+
+    /**
+     * Load the attack surface of the OPEN APK file. Uses getPackageArchiveInfo
+     * for components and permissions and the file's own binary manifest for deep
+     * links; signing certificates are not exposed for an archive, and the sheet
+     * says where to see them instead. Does nothing when the open file is not an
+     * APK ([apkFile] is null), which is when the sheet's entry point is hidden.
+     */
+    fun loadAttackSurfaceForOpenApk(context: Context) {
+        val f = apkFile
+        if (f == null) {
+            attackSurface = null
+            attackSurfaceLoading = false
+            attackSurfaceReq = null
+            return
+        }
+        val app = context.applicationContext
+        val abis = Build.SUPPORTED_ABIS.toList()
+        val req = "file:${f.absolutePath}"
+        attackSurfaceReq = req
+        attackSurface = null
+        attackSurfaceLoading = true
+        attackSurfaceLabel = manifest?.appLabel?.takeIf { it.isNotBlank() && !it.startsWith("@") }
+            ?: manifest?.packageName?.takeIf { it.isNotBlank() }
+            ?: f.name
+        viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    AttackSurfaceScanner.fromApkFile(app.packageManager, f, abis)
+                }
+            } catch (e: Exception) {
+                log("ERROR", e.message ?: "could not read this APK's manifest")
+                null
+            }
+            if (attackSurfaceReq == req) {
+                attackSurface = result
+                attackSurfaceLoading = false
+            }
+        }
+    }
+
+    /** Drop the attack-surface result, e.g. when the manifest sheet closes. */
+    fun clearAttackSurface() {
+        attackSurface = null
+        attackSurfaceLoading = false
+        attackSurfaceReq = null
     }
 
     // ---------------------------------------------------------------- diff --

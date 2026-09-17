@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PriorityHigh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -54,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.trickhook.model.dangerousPermissionGroup
 import com.trickhook.vm.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -61,63 +64,6 @@ import java.util.zip.ZipFile
 
 private val APK_SECTIONS = listOf(
     "Manifest", "Components", "Permissions", "DEX", "Native libs", "Resources"
-)
-
-/**
- * The platform's runtime ("dangerous") permissions, mapped to the group the
- * system shows the user. The old test was `p.contains("SMS")`, which flagged
- * any third-party permission whose name merely contained one of six words and
- * missed every dangerous permission that did not — it both over- and
- * under-reported. This matches the declared name exactly, and only inside the
- * platform's own namespaces.
- */
-private val DANGEROUS_PERMISSIONS: Map<String, String> = mapOf(
-    "ACCESS_FINE_LOCATION" to "location",
-    "ACCESS_COARSE_LOCATION" to "location",
-    "ACCESS_BACKGROUND_LOCATION" to "location",
-    "ACCESS_MEDIA_LOCATION" to "location",
-    "CAMERA" to "camera",
-    "RECORD_AUDIO" to "microphone",
-    "READ_CONTACTS" to "contacts",
-    "WRITE_CONTACTS" to "contacts",
-    "GET_ACCOUNTS" to "contacts",
-    "READ_CALENDAR" to "calendar",
-    "WRITE_CALENDAR" to "calendar",
-    "SEND_SMS" to "SMS",
-    "RECEIVE_SMS" to "SMS",
-    "READ_SMS" to "SMS",
-    "RECEIVE_MMS" to "SMS",
-    "RECEIVE_WAP_PUSH" to "SMS",
-    "READ_CALL_LOG" to "call log",
-    "WRITE_CALL_LOG" to "call log",
-    "PROCESS_OUTGOING_CALLS" to "call log",
-    "READ_PHONE_STATE" to "phone",
-    "READ_PHONE_NUMBERS" to "phone",
-    "CALL_PHONE" to "phone",
-    "ANSWER_PHONE_CALLS" to "phone",
-    "ACCEPT_HANDOVER" to "phone",
-    "USE_SIP" to "phone",
-    "ADD_VOICEMAIL" to "phone",
-    "READ_EXTERNAL_STORAGE" to "storage",
-    "WRITE_EXTERNAL_STORAGE" to "storage",
-    "READ_MEDIA_IMAGES" to "media",
-    "READ_MEDIA_VIDEO" to "media",
-    "READ_MEDIA_AUDIO" to "media",
-    "READ_MEDIA_VISUAL_USER_SELECTED" to "media",
-    "BODY_SENSORS" to "sensors",
-    "BODY_SENSORS_BACKGROUND" to "sensors",
-    "ACTIVITY_RECOGNITION" to "sensors",
-    "BLUETOOTH_SCAN" to "nearby devices",
-    "BLUETOOTH_CONNECT" to "nearby devices",
-    "BLUETOOTH_ADVERTISE" to "nearby devices",
-    "UWB_RANGING" to "nearby devices",
-    "NEARBY_WIFI_DEVICES" to "nearby devices",
-    "POST_NOTIFICATIONS" to "notifications"
-)
-
-private val PLATFORM_PERMISSION_PREFIXES = listOf(
-    "android.permission.",
-    "com.android.voicemail.permission."
 )
 
 /** One flattened manifest component: activity, service, receiver or provider. */
@@ -128,12 +74,15 @@ private data class ApkComponentRow(
     val actions: List<String>
 )
 
-/** The group a dangerous permission belongs to, or null if it is not one. */
-private fun dangerousGroup(permission: String): String? {
-    val p = permission.trim()
-    val prefix = PLATFORM_PERMISSION_PREFIXES.firstOrNull { p.startsWith(it) } ?: return null
-    return DANGEROUS_PERMISSIONS[p.removePrefix(prefix)]
-}
+/**
+ * The group a dangerous permission belongs to, or null if it is not one.
+ *
+ * The classification itself — the platform dangerous-permission map, matched by
+ * exact name inside the platform's own namespaces — is the model layer's
+ * [dangerousPermissionGroup], shared with the attack-surface triage so the two
+ * views can never disagree about what "dangerous" means.
+ */
+private fun dangerousGroup(permission: String): String? = dangerousPermissionGroup(permission)
 
 /**
  * The archive the resource list was read out of, or null when nothing here
@@ -287,7 +236,39 @@ private fun ManifestSection(vm: StudioViewModel) {
                     mi.packageName, color = ide.accent, fontSize = Type.section, fontFamily = Mono,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(Modifier.height(Space.s))
+                Spacer(Modifier.height(Space.m))
+                // The consolidated attack-surface triage for this APK: the same
+                // sheet the installed-apps picker opens per app, here for the
+                // open file. Exported components, permissions, deep links, native
+                // libs and signing in one prominent view rather than spread over
+                // the tabs above.
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(role = Role.Button, onClickLabel = "Open the attack-surface triage") {
+                            manifestTargetPkg = null
+                            manifestTargetLabel = mi.appLabel
+                                .takeIf { it.isNotBlank() && !it.startsWith("@") } ?: mi.packageName
+                            showManifestSheet = true
+                        }
+                        .border(1.dp, ide.borderStrong, RoundedCornerShape(8.dp))
+                        .padding(horizontal = Space.m, vertical = Space.m),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Security, contentDescription = null,
+                        tint = ide.accent, modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(Space.m))
+                    Column(Modifier.weight(1f)) {
+                        Text("Attack surface", color = ide.text, fontSize = Type.body)
+                        Text(
+                            "exported components, permissions, deep links, native libs, signing",
+                            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+                        )
+                    }
+                }
+                Spacer(Modifier.height(Space.m))
                 KeyValue("version", "${mi.versionName} (${mi.versionCode})")
                 KeyValue("minSdk / targetSdk", "${mi.minSdk.ifEmpty { "?" }} / ${mi.targetSdk.ifEmpty { "?" }}")
                 KeyValue("app label", mi.appLabel.ifEmpty { "-" })
