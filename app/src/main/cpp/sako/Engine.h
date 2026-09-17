@@ -99,6 +99,20 @@ public:
     // many it carries. `funcAddr` is 0x0 for an unattributed hit.
     std::string detect(const std::string& path);
 
+    // Install the user annotation overlay for `path`. `json` is
+    //   {"renames":{"0x1234":"my_name",...},"comments":{"0x1234":"note",...}}
+    // exactly as the app serialises its rename/comment maps; the address keys
+    // are read with base-16 strtoull, so any hex spelling (0x-prefixed or not,
+    // any case, any zero-padding) is accepted. It ensures the context for `path`
+    // (the same one-slot cache and lock as xrefsTo/detect), then REPLACES the
+    // overlay, so a rename or comment the analyst removed disappears on the next
+    // call. Once set, every read tool and the .c/.asm export show the user's
+    // names and comments; with an empty overlay (the default) their output is
+    // byte-identical to what it was before this call existed. Returns
+    // {"ok":true,"renames":N,"comments":M} or {"ok":false,"error":"..."}.
+    // Same locking contract as xrefsTo/detect: it takes the engine mutex.
+    std::string setAnnotations(const std::string& path, const std::string& json);
+
     // ------------------------------------------------------------ DEX / smali
     // The Dalvik half of the engine. The native disassembler decodes machine
     // code and cannot touch DEX bytecode, so these three surface the .dex the
@@ -245,6 +259,32 @@ private:
         // Computed once, the first time a decompiler backend asks for it.
         std::map<u64, int> jniEnvArg;
         bool jniEnvArgDone = false;
+
+        // ---- user annotation overlay (setAnnotations) ----
+        // Renames and comments the analyst made in the app, keyed by address.
+        // Empty on a freshly built context, and every emit site is byte-for-byte
+        // unchanged while they stay empty; the app pushes them in with
+        // setAnnotations after the context is warm. userNames also feeds the
+        // AddrNames override (names.setOverrides) so a renamed callee shows its
+        // user name at every call site, not just in its own row.
+        std::map<u64, std::string> userNames;
+        std::map<u64, std::string> userComments;
+
+        // The display name for the function at `addr`: a user rename wins,
+        // otherwise the demangle-if-mangled result that every "displayName" /
+        // "demangled" / "funcDisplay" emit site computed before the overlay
+        // existed. With no rename for `addr` this returns exactly that, so those
+        // sites are unchanged when the overlay is empty.
+        std::string displayNameFor(u64 addr, const std::string& rawName) const;
+        // A user rename for `addr` if one exists, otherwise `rawName` verbatim --
+        // no demangling. For the call-graph node names and the pseudo-C / export
+        // function header, which never demangled, so this keeps them unchanged
+        // when the overlay is empty.
+        std::string overlayName(u64 addr, const std::string& rawName) const;
+        // Merge a user comment for `addr` into an existing (auto-)comment without
+        // clobbering it: "<auto> | user: <text>", or "user: <text>" when there
+        // was none. A no-op when no user comment covers `addr`.
+        void mergeUserComment(u64 addr, std::string& comment) const;
     };
 
     bool ensureCtx(const std::string& path);

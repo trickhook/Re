@@ -85,6 +85,19 @@ Java_com_trickhook_engine_NativeBridge_nativeDetect(JNIEnv* env, jobject, jstrin
     return toJString(env, sako::Engine::instance().detect(path));
 }
 
+// Install the user annotation overlay (renames + comments) onto the analysis
+// context for `path`. json is {"renames":{"0x..":"name"},"comments":{"0x..":
+// "text"}}; the engine reuses/ensures the context and REPLACES the overlay, so
+// a removed rename/comment disappears. Once set, every read tool and the .c/.asm
+// export reflect the analyst's names and comments. Same mutex as nativeXrefsTo.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeSetAnnotations(JNIEnv* env, jobject, jstring jpath,
+                                                            jstring jjson) {
+    std::string path = toStdString(env, jpath);
+    std::string json = toStdString(env, jjson);
+    return toJString(env, sako::Engine::instance().setAnnotations(path, json));
+}
+
 // Binary diff: classify every function of A vs B (identical/changed/added/
 // removed). pathA is the open/analysed binary, pathB the one to compare it to;
 // B is analysed into a scratch context, so A's analysis is left untouched.

@@ -882,12 +882,50 @@ class StudioViewModel : ViewModel() {
             comments.clear()
             bookmarks = emptyList()
             notesCache = emptyList()
+            pushAnnotationsToEngine()   // clears the engine overlay too
             return
         }
         renames.clear(); renames.putAll(d.renames(projectId))
         comments.clear(); comments.putAll(d.comments(projectId))
         bookmarks = d.bookmarks(projectId)
         refreshNotes(d)
+        // The maps are loaded; hand them to the engine so its own output (the MCP
+        // read tools, the .c/.asm export) shows the analyst's names and comments.
+        // This is the one place that re-establishes the overlay after a reopen or
+        // a re-analysis, both of which rebuild the engine's context from scratch.
+        pushAnnotationsToEngine()
+    }
+
+    // When true, the per-mutation pushes are held so a bulk import does not
+    // re-serialise and re-send the whole overlay once per row; the bulk caller
+    // pushes once when it is done. See applyIdaAnnotations.
+    private var suppressEnginePush = false
+
+    /**
+     * Serialise the current renames + comments maps and hand them to the engine,
+     * so a rename or comment the analyst made shows up in the engine's OWN output
+     * (the MCP read tools and the whole-binary export), not only in the app views
+     * that already resolve them. The engine REPLACES its overlay on each call, so
+     * this reflects deletions as well as additions.
+     *
+     * The keys are already "0x%08X" strings (see [renameFunction]/[addComment]),
+     * which is exactly what the engine parses. A fast in-memory JNI call — the
+     * surrounding annotation writes already touch SQLite on the caller — so it
+     * runs on the caller and needs no dispatch.
+     */
+    private fun pushAnnotationsToEngine() {
+        if (suppressEnginePush) return
+        val path = currentPath ?: return
+        if (NativeBridge.loadError != null) return   // engine not loaded in this process
+        val json = JSONObject().apply {
+            put("renames", JSONObject().apply { for ((k, v) in renames) put(k, v) })
+            put("comments", JSONObject().apply { for ((k, v) in comments) put(k, v) })
+        }.toString()
+        try {
+            NativeBridge.nativeSetAnnotations(path, json)
+        } catch (t: Throwable) {
+            log("WARN", "Engine annotation sync failed: ${t.message ?: t.javaClass.simpleName}")
+        }
     }
 
     /** Make sure there is a project row to hang annotations off. */
@@ -906,6 +944,7 @@ class StudioViewModel : ViewModel() {
         val old = functionAt(addr)?.name
         d.rename(projectId, key, old, newName)
         renames[key] = newName
+        pushAnnotationsToEngine()
         log("OK", "Renamed ${old ?: key} → $newName")
         // Refresh detail to pick up the new name in pseudo-C. selectFunction
         // deliberately does NOT push navigation history, so renaming in place
@@ -921,6 +960,7 @@ class StudioViewModel : ViewModel() {
         val key = "0x%08X".format(addr)
         if (text.isBlank()) { d.deleteComment(projectId, key); comments.remove(key) }
         else { d.comment(projectId, key, text); comments[key] = text }
+        pushAnnotationsToEngine()
         log("OK", "Comment ${if (text.isBlank()) "removed" else "saved"} @ $key")
     }
 
@@ -943,6 +983,7 @@ class StudioViewModel : ViewModel() {
         val key = "0x%08X".format(addr)
         if (projectId >= 0) database(context).deleteComment(projectId, key)
         comments.remove(key)
+        pushAnnotationsToEngine()
         log("OK", "Comment removed @ $key")
     }
 
@@ -2144,6 +2185,10 @@ class StudioViewModel : ViewModel() {
         // all-or-nothing rather than half-applied if something throws.
         val sql = database(context).writableDatabase
         var committed = false
+        // renameFunction/addComment below each push the whole overlay to the
+        // engine; held here so a symbolised import does not re-send it thousands
+        // of times, then pushed once when the transaction settles.
+        suppressEnginePush = true
         sql.beginTransaction()
         try {
             for ((addr0, name) in p.names) {
@@ -2184,10 +2229,13 @@ class StudioViewModel : ViewModel() {
             committed = true
         } finally {
             sql.endTransaction()
+            suppressEnginePush = false
             // A rollback leaves the in-memory maps ahead of the database, so
             // re-read rather than leave the screen describing rows that are no
-            // longer there.
+            // longer there (syncProjectAnnotations re-pushes the overlay). On a
+            // successful import, one push carries the whole batch to the engine.
             if (!committed) syncProjectAnnotations()
+            else pushAnnotationsToEngine()
         }
 
         log(
@@ -2917,6 +2965,10 @@ class StudioViewModel : ViewModel() {
                         sb.appendLine("  [${fx.op}] ${key} -> ${fx.value}")
                     }
                     bookmarks = d.bookmarks(projectId)
+                    // A plugin's renames/comments went straight into the maps
+                    // above (not through renameFunction/addComment), so push the
+                    // whole overlay once now that the effect loop is done.
+                    pushAnnotationsToEngine()
                     sb.appendLine("=== ${res.effects.size} effects applied ===")
                     applied = priorRenames.size + priorComments.size + addedBookmarks.size
                     if (applied > 0) {
@@ -2981,6 +3033,8 @@ class StudioViewModel : ViewModel() {
         }
         u.bookmarkIds.forEach { d.deleteBookmark(it) }
         if (u.projectId >= 0) bookmarks = d.bookmarks(u.projectId)
+        // The undo put the maps back; sync the restored overlay to the engine.
+        pushAnnotationsToEngine()
         val n = u.renames.size + u.comments.size + u.bookmarkIds.size
         pluginUndo = null
         lastPluginUndoable = false

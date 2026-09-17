@@ -18,6 +18,13 @@ void AddrNames::add(u64 addr, const std::string& name, bool keepExisting) {
 }
 
 std::string AddrNames::lookup(u64 addr) const {
+    // The user overlay wins, but only when it holds something: an empty overlay
+    // (every binary before the analyst renames anything) leaves this function's
+    // result exactly as it was.
+    if (!overrides_.empty()) {
+        auto ov = overrides_.find(addr);
+        if (ov != overrides_.end()) return ov->second;
+    }
     auto exact = map_.find(addr);
     if (exact != map_.end()) return exact->second;
     // nearby (name+off) — search first symbol below addr within 4KB
@@ -26,7 +33,15 @@ std::string AddrNames::lookup(u64 addr) const {
         --it;
         u64 base = it->first;
         if (addr - base <= 4096 && addr >= base) {
-            return it->second + "+0x" + hexAddr(addr - base).substr(2);
+            // If the analyst renamed the function this address falls inside,
+            // the offset suffix hangs off the user name too (foo+0x10 ->
+            // my_foo+0x10). Only checked when the overlay is non-empty.
+            const std::string* nm = &it->second;
+            if (!overrides_.empty()) {
+                auto ov = overrides_.find(base);
+                if (ov != overrides_.end()) nm = &ov->second;
+            }
+            return *nm + "+0x" + hexAddr(addr - base).substr(2);
         }
     }
     return "";

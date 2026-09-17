@@ -15,10 +15,21 @@ public:
     void add(u64 addr, const std::string& name, bool keepExisting = true);
     // resolve with optional offset suffix (name+0x10)
     std::string lookup(u64 addr) const;
-    bool contains(u64 addr) const { return map_.count(addr) != 0; }
+    bool contains(u64 addr) const { return map_.count(addr) != 0 || overrides_.count(addr) != 0; }
     const std::map<u64, std::string>& raw() const { return map_; }
+
+    // User-annotation overlay. A rename the analyst made wins over the name the
+    // engine recovered, in every place that resolves a call target or a
+    // cross-reference through lookup() (disassembly auto-comments, the pseudo-C
+    // call sites, plugin builtins). setOverrides REPLACES the whole overlay, so
+    // a rename the analyst removed disappears again. It is empty by default, and
+    // lookup() below is byte-for-byte unchanged while it stays empty -- the
+    // override is only ever consulted when at least one entry is present.
+    void setOverrides(const std::map<u64, std::string>& ov) { overrides_ = ov; }
+    bool hasOverrides() const { return !overrides_.empty(); }
 private:
     std::map<u64, std::string> map_;
+    std::map<u64, std::string> overrides_;
 };
 
 AddrNames buildAddrNamesElf(const Binary& b, const ElfInfo& e);

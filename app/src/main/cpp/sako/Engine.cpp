@@ -115,16 +115,57 @@ static std::string simStr(double v) {
     return buf;
 }
 
+// ---- user annotation overlay resolvers (see Engine.h Ctx) ----
+// A rename wins; otherwise the exact demangle-if-mangled logic every
+// "displayName"/"demangled"/"funcDisplay" site ran inline before, reproduced
+// here so those sites are unchanged when no rename covers the address. Note
+// the `d != rawName` test (not `!d.empty()`): those sites emitted whatever
+// demangle returned once it differed from the raw name, and this matches that.
+std::string Engine::Ctx::displayNameFor(u64 addr, const std::string& rawName) const {
+    auto it = userNames.find(addr);
+    if (it != userNames.end()) return it->second;
+    if (looksMangled(rawName)) {
+        std::string d = demangle(rawName);
+        if (d != rawName) return d;
+    }
+    return rawName;
+}
+
+// A rename wins; otherwise the raw name verbatim (no demangling), for the sites
+// that never demangled -- call-graph nodes and the pseudo-C / export header.
+std::string Engine::Ctx::overlayName(u64 addr, const std::string& rawName) const {
+    auto it = userNames.find(addr);
+    if (it != userNames.end()) return it->second;
+    return rawName;
+}
+
+// Merge a user comment onto an auto-comment without clobbering it. Rendering:
+// "user: <text>" alone, or "<auto> | user: <text>" when the engine already
+// commented the line. A no-op when the overlay does not cover `addr`, so a line
+// the analyst never annotated keeps its exact auto-comment.
+void Engine::Ctx::mergeUserComment(u64 addr, std::string& comment) const {
+    if (userComments.empty()) return;
+    auto it = userComments.find(addr);
+    if (it == userComments.end()) return;
+    if (comment.empty()) comment = "user: " + it->second;
+    else comment += " | user: " + it->second;
+}
+
 // One row of the function list, for analyze() and for functions(). Both go
 // through here so a paged row and a first-page row stay the same shape.
 void Engine::emitFunctionRow(std::ostringstream& out, const Ctx& c, const FuncInfo& f,
                              size_t& undemangled) const {
     out << "{\"addr\":" << hq(f.addr) << ",\"size\":" << num(f.size)
         << ",\"name\":" << q(f.name) << ",\"from\":" << q(f.from);
-    if (looksMangled(f.name)) {
-        std::string d = demangle(f.name);
-        if (d != f.name) out << ",\"demangled\":" << q(d);
-        else ++undemangled;   // shown as-is; counted, not hidden
+    // The display form: a user rename, else the demangled name. `name` above
+    // stays the raw symbol; the overlay rides in the `demangled` field the app
+    // and MCP already read. Unchanged when no rename covers this address --
+    // displayNameFor then returns the demangle-if-mangled result, and the
+    // `else if` reproduces the old undemangled count exactly.
+    {
+        std::string disp = c.displayNameFor(f.addr, f.name);
+        if (disp != f.name) out << ",\"demangled\":" << q(disp);
+        else if (looksMangled(f.name)) ++undemangled;   // shown as-is; counted, not hidden
     }
     // call edge counts
     auto ce = c.cg.callees.find(f.addr);
@@ -642,7 +683,10 @@ std::string Engine::ghidraPseudo(Ctx& c, const std::string& path, const FuncInfo
     auto it = c.jniEnvArg.find(fn.addr);
     int env = (it != c.jniEnvArg.end()) ? it->second
                                         : detectJniEnvArg(lines, c.arch);
-    std::string text = GhidraDecomp::instance().decompile(fn.addr, fn.name, err, env);
+    // The Ghidra body carries the function's own name; a user rename wins.
+    // overlayName returns fn.name unchanged when no rename covers it.
+    std::string text = GhidraDecomp::instance().decompile(
+        fn.addr, c.overlayName(fn.addr, fn.name), err, env);
     if (text.empty()) ghidraNote_ = err.empty() ? "no output" : err;
     return text;
 }
@@ -1043,9 +1087,14 @@ std::string Engine::analyze(const std::string& path) {
         for (size_t i = 0; i < cap; ++i) {
             if (i) out << ",";
             auto& e = c.cg.edges[i];
+            // A renamed function shows its user name as a node, whether it is the
+            // caller or the callee end of the edge. overlayName returns the baked
+            // name verbatim when no rename covers the address, so this is
+            // unchanged with an empty overlay.
             out << "{\"from\":" << hq(e.from) << ",\"to\":" << hq(e.to)
                 << ",\"site\":" << hq(e.site) << ",\"sites\":" << e.sites
-                << ",\"fromName\":" << q(e.fromName) << ",\"toName\":" << q(e.toName)
+                << ",\"fromName\":" << q(c.overlayName(e.from, e.fromName))
+                << ",\"toName\":" << q(c.overlayName(e.to, e.toName))
                 << ",\"kind\":" << q(e.kind) << "}";
         }
         if (cap < c.cg.edges.size())
@@ -1219,6 +1268,9 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         // bytecode instead of an empty pane.
         dexsmali::MethodCode mc = dexsmali::decodeMethod(
             c.bin.data.data(), c.bin.data.size(), addr, c.dex.idx, kDexSmaliLines);
+        // Merge any user comments onto the smali lines (keyed by unit offset).
+        // A no-op when the overlay holds nothing for this method.
+        for (auto& l : mc.lines) c.mergeUserComment(l.off, l.comment);
         std::string classShort = dexShortClass(m->clazz);
         std::string nm = classShort + "." + m->name;
         u64 insnBytes = u64(mc.insnsUnits) * 2;
@@ -1237,7 +1289,7 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
            << (mc.truncated ? " (decode truncated)\n" : "\n");
 
         out << "{\"ok\":true,\"addr\":" << hq(addr) << ",\"size\":" << num(sz)
-            << ",\"name\":" << q(nm) << ",\"displayName\":" << q(nm)
+            << ",\"name\":" << q(nm) << ",\"displayName\":" << q(c.overlayName(addr, nm))
             << ",\"from\":\"dex\",\"backend\":\"dalvik\",\"arch\":\"DEX\""
             << ",\"pseudoMode\":\"dex\""
             // Same two numbers, from the same maps, as the functions list:
@@ -1327,15 +1379,24 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         }
     }
 
-    // labels for calls
+    // labels for calls. overlayName carries a user rename onto the heuristic
+    // printer's call targets; it returns the raw name when none, so the labels
+    // are unchanged with an empty overlay.
     std::map<u64, std::string> labels;
-    for (auto& f : c.funcs) labels[f.addr] = f.name;
+    for (auto& f : c.funcs) labels[f.addr] = c.overlayName(f.addr, f.name);
 
     size_t nBlocksFound = 0;
     auto blocks = buildCfg(lines, fn->addr, fn->addr + size, c.arch, &nBlocksFound);
 
-    // v2: auto comments
+    // v2: auto comments, then the user's own comments merged onto them. The
+    // merge is a no-op for every line the analyst never annotated, so the asm
+    // listing is byte-identical with an empty overlay.
     autoComment(c.arch, lines, c.names, c.strings, fn->addr, fn->addr + size);
+    for (auto& l : lines) c.mergeUserComment(l.addr, l.comment);
+
+    // The function's own name for the pseudo-C header: a user rename, else the
+    // raw name the decompilers received before (they never demangled it here).
+    std::string fnName = c.overlayName(fn->addr, fn->name);
 
     // Ghidra's p-code decompiler when a specification covers this target,
     // otherwise the built-in IR lifter, otherwise the heuristic printer.
@@ -1345,18 +1406,14 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
     std::string pseudoBackend = pseudo.empty() ? std::string()
                                                : GhidraDecomp::instance().backendName();
     if (pseudo.empty()) {
-        ir = decompileIR(lines, c.arch, fn->addr, fn->name, c.names, c.strings);
-        pseudo = ir.ok ? ir.text : genPseudo(lines, c.arch, fn->addr, fn->name, labels);
+        ir = decompileIR(lines, c.arch, fn->addr, fnName, c.names, c.strings);
+        pseudo = ir.ok ? ir.text : genPseudo(lines, c.arch, fn->addr, fnName, labels);
         pseudoMode = ir.ok ? "IR" : "heuristic";
         pseudoBackend = ghidraNote_;
     }
 
-    // v2: demangled display name
-    std::string displayName = fn->name;
-    if (looksMangled(fn->name)) {
-        std::string d = demangle(fn->name);
-        if (d != fn->name) displayName = d;
-    }
+    // v2: demangled display name, overridden by a user rename when there is one.
+    std::string displayName = c.displayNameFor(fn->addr, fn->name);
 
     out << "{\"ok\":true,\"addr\":" << hq(fn->addr) << ",\"name\":" << q(fn->name)
         << ",\"displayName\":" << q(displayName)
@@ -1557,9 +1614,12 @@ std::string Engine::xrefsTo(const std::string& path, u64 addr) {
             refs << "{\"from\":" << hq(x.from)
                  << ",\"funcAddr\":" << hq(f ? f->addr : 0)
                  << ",\"funcName\":" << q(f ? f->name : std::string());
-            if (f && looksMangled(f->name)) {
-                std::string d = demangle(f->name);
-                if (d != f->name) refs << ",\"funcDisplay\":" << q(d);
+            // funcName stays the raw symbol; the display form (a user rename,
+            // else the demangled name) rides in funcDisplay, emitted only when
+            // it differs -- unchanged when no rename covers this function.
+            if (f) {
+                std::string disp = c.displayNameFor(f->addr, f->name);
+                if (disp != f->name) refs << ",\"funcDisplay\":" << q(disp);
             }
             refs << ",\"type\":" << q(x.type) << "}";
             ++shown;
@@ -1627,9 +1687,12 @@ std::string Engine::detect(const std::string& path) {
              << ",\"confidence\":" << q(detections::confidenceName(d.confidence))
              << ",\"funcAddr\":" << hq(d.funcAddr)
              << ",\"funcName\":" << q(d.funcName);
-        // The one demangle-at-emit rule xrefsTo uses, kept identical here.
-        if (looksMangled(d.funcName)) {
-            std::string disp = demangle(d.funcName);
+        // The one demangle-at-emit rule xrefsTo uses, kept identical here, with
+        // a user rename winning over it. Unchanged when no rename covers the
+        // detection's function (funcAddr is 0x0 for an unattributed hit, which
+        // no rename keys on, so it stays the demangle-if-mangled result).
+        {
+            std::string disp = c.displayNameFor(d.funcAddr, d.funcName);
             if (disp != d.funcName) rows << ",\"funcDisplay\":" << q(disp);
         }
         rows << ",\"evidence\":" << q(d.evidence)
@@ -1650,6 +1713,195 @@ std::string Engine::detect(const std::string& path) {
 
     out << ",\"shown\":" << num(u64(shown))
         << ",\"detections\":[" << rows.str() << "]}";
+    return out.str();
+}
+
+// ------------------------------------------------------ user annotations --
+// Parse {"renames":{"0x..":"name",...},"comments":{"0x..":"text",...}} into two
+// address->string maps. Written for exactly the shape the app serialises, and
+// deliberately forgiving: a member that is not one of the two known objects is
+// skipped, a value that is not a string is skipped, and a key that does not read
+// as hex is dropped rather than failing the whole parse. Address keys go through
+// strtoull base 16, so 0x-prefixed or bare, any case, any zero-padding all land
+// on the same address the emit sites format with hexAddr.
+namespace {
+
+struct AnnParser {
+    const std::string& s;
+    size_t i = 0;
+    explicit AnnParser(const std::string& src) : s(src) {}
+
+    void skipWs() {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+    }
+
+    // Decode a JSON string starting at s[i]=='"'; leaves i past the close quote.
+    // Returns false if the text ends before the closing quote.
+    bool readString(std::string& out) {
+        out.clear();
+        if (i >= s.size() || s[i] != '"') return false;
+        ++i;
+        while (i < s.size()) {
+            char ch = s[i];
+            if (ch == '"') { ++i; return true; }
+            if (ch == '\\' && i + 1 < s.size()) {
+                char e = s[i + 1];
+                i += 2;
+                switch (e) {
+                    case '"':  out += '"';  break;
+                    case '\\': out += '\\'; break;
+                    case '/':  out += '/';  break;
+                    case 'b':  out += '\b'; break;
+                    case 'f':  out += '\f'; break;
+                    case 'n':  out += '\n'; break;
+                    case 'r':  out += '\r'; break;
+                    case 't':  out += '\t'; break;
+                    case 'u': {
+                        // \uXXXX -> UTF-8. The app only escapes control chars this
+                        // way, but a full BMP decode is cheap and keeps a pasted
+                        // non-ASCII comment intact.
+                        if (i + 4 <= s.size()) {
+                            unsigned cp = 0; bool ok = true;
+                            for (int k = 0; k < 4; ++k) {
+                                char h = s[i + k]; unsigned d = 0;
+                                if (h >= '0' && h <= '9') d = unsigned(h - '0');
+                                else if (h >= 'a' && h <= 'f') d = unsigned(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') d = unsigned(h - 'A' + 10);
+                                else { ok = false; break; }
+                                cp = (cp << 4) | d;
+                            }
+                            if (ok) {
+                                i += 4;
+                                if (cp < 0x80) out += char(cp);
+                                else if (cp < 0x800) {
+                                    out += char(0xC0 | (cp >> 6));
+                                    out += char(0x80 | (cp & 0x3F));
+                                } else {
+                                    out += char(0xE0 | (cp >> 12));
+                                    out += char(0x80 | ((cp >> 6) & 0x3F));
+                                    out += char(0x80 | (cp & 0x3F));
+                                }
+                            } else out += 'u';
+                        } else out += 'u';
+                        break;
+                    }
+                    default: out += e;   // unknown escape: keep the character
+                }
+            } else { out += ch; ++i; }
+        }
+        return false;   // unterminated
+    }
+
+    // Skip any JSON value (string, object, array, number, literal), tracking
+    // nested strings so a brace inside a string does not end the skip early.
+    void skipValue() {
+        skipWs();
+        if (i >= s.size()) return;
+        char ch = s[i];
+        if (ch == '"') { std::string t; readString(t); return; }
+        if (ch == '{' || ch == '[') {
+            ++i;
+            int depth = 1;
+            while (i < s.size() && depth) {
+                char d = s[i];
+                if (d == '"') { std::string t; readString(t); continue; }
+                if (d == '{' || d == '[') ++depth;
+                else if (d == '}' || d == ']') --depth;
+                ++i;
+            }
+            return;
+        }
+        while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']') ++i;
+    }
+
+    // Parse an object of "string":"string" pairs into `out`; non-string values
+    // are skipped. Leaves i past the closing brace.
+    void readStringMap(std::map<std::string, std::string>& out) {
+        skipWs();
+        if (i >= s.size() || s[i] != '{') { skipValue(); return; }
+        ++i;
+        while (i < s.size()) {
+            skipWs();
+            if (i < s.size() && s[i] == '}') { ++i; break; }
+            std::string key;
+            if (!readString(key)) break;
+            skipWs();
+            if (i >= s.size() || s[i] != ':') break;
+            ++i;
+            skipWs();
+            if (i < s.size() && s[i] == '"') {
+                std::string val;
+                if (!readString(val)) break;
+                out[key] = val;
+            } else {
+                skipValue();
+            }
+            skipWs();
+            if (i < s.size() && s[i] == ',') { ++i; continue; }
+        }
+    }
+};
+
+void parseAnnotationsJson(const std::string& json,
+                          std::map<u64, std::string>& renames,
+                          std::map<u64, std::string>& comments) {
+    renames.clear();
+    comments.clear();
+    AnnParser p(json);
+    p.skipWs();
+    if (p.i >= json.size() || json[p.i] != '{') return;
+    ++p.i;
+    while (p.i < json.size()) {
+        p.skipWs();
+        if (p.i < json.size() && json[p.i] == '}') { ++p.i; break; }
+        std::string key;
+        if (!p.readString(key)) break;
+        p.skipWs();
+        if (p.i >= json.size() || json[p.i] != ':') break;
+        ++p.i;
+        if (key == "renames" || key == "comments") {
+            std::map<std::string, std::string> m;
+            p.readStringMap(m);
+            auto& dst = (key == "renames") ? renames : comments;
+            for (auto& kv : m) {
+                if (kv.second.empty()) continue;                  // nothing to apply
+                u64 addr = strtoull(kv.first.c_str(), nullptr, 16);
+                if (addr) dst[addr] = kv.second;
+            }
+        } else {
+            p.skipValue();
+        }
+        p.skipWs();
+        if (p.i < json.size() && json[p.i] == ',') { ++p.i; continue; }
+    }
+}
+
+} // namespace
+
+// Install the user annotation overlay for `path`. Same lock and ensureCtx error
+// path as xrefsTo/detect. The overlay REPLACES on every call, so a rename or a
+// comment the analyst removed disappears; an empty overlay (the default) leaves
+// every read tool and the export byte-identical to before this existed.
+std::string Engine::setAnnotations(const std::string& path, const std::string& json) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ensureCtx(path)) {
+        const Ctx& bad = ctx_;
+        std::ostringstream e;
+        e << "{\"ok\":false,\"error\":\""
+          << jsonEscape(bad.notes.empty() ? "Load failed" : bad.notes[0]) << "\"}";
+        return e.str();
+    }
+    Ctx& c = ctx_;
+    parseAnnotationsJson(json, c.userNames, c.userComments);
+    // The call-target / cross-reference names resolved through c.names (the
+    // disassembly auto-comments, the pseudo-C call sites, the plugin builtins)
+    // pick the overlay up from here. setOverrides also REPLACES, so a cleared
+    // rename stops overriding. The call-graph node names are overlaid at emit
+    // time (overlayName), so nothing there needs rebuilding.
+    c.names.setOverrides(c.userNames);
+    std::ostringstream out;
+    out << "{\"ok\":true,\"renames\":" << num(u64(c.userNames.size()))
+        << ",\"comments\":" << num(u64(c.userComments.size())) << "}";
     return out.str();
 }
 
@@ -1712,6 +1964,10 @@ std::string Engine::dexSmali(const std::string& path, u64 addr) {
         return out.str();
     }
 
+    // User comments merged onto the smali lines (keyed by unit offset); a no-op
+    // for every line the analyst never annotated.
+    for (auto& l : mc.lines) c.mergeUserComment(l.off, l.comment);
+
     std::string classShort = dexShortClass(m->clazz);
     std::string name = classShort + "." + m->name;
     auto ce = c.cg.callees.find(addr);
@@ -1720,8 +1976,9 @@ std::string Engine::dexSmali(const std::string& path, u64 addr) {
 
     out << "{\"ok\":true,\"addr\":" << hq(addr)
         << ",\"class\":" << q(m->clazz) << ",\"classShort\":" << q(classShort)
+        // class/classShort/method stay structural; a user rename rides in `name`.
         << ",\"method\":" << q(m->name) << ",\"proto\":" << q(m->proto)
-        << ",\"name\":" << q(name)
+        << ",\"name\":" << q(c.overlayName(addr, name))
         << ",\"registers\":" << num(mc.registersSize)
         << ",\"ins\":" << num(mc.insSize) << ",\"outs\":" << num(mc.outsSize)
         << ",\"tries\":" << num(mc.triesSize)
@@ -1831,7 +2088,7 @@ std::string Engine::dexMethodXrefs(const std::string& path, u64 addr) {
             if (cShown < kDexXrefRows) {
                 if (cShown) callers << ",";
                 std::string nm = e.fromName.empty() ? dexNameForCode(c.dex, e.from) : e.fromName;
-                callers << "{\"addr\":" << hq(e.from) << ",\"name\":" << q(nm)
+                callers << "{\"addr\":" << hq(e.from) << ",\"name\":" << q(c.overlayName(e.from, nm))
                         << ",\"site\":" << hq(e.site) << ",\"sites\":" << num(e.sites) << "}";
                 ++cShown;
             }
@@ -1841,7 +2098,7 @@ std::string Engine::dexMethodXrefs(const std::string& path, u64 addr) {
             if (eShown < kDexXrefRows) {
                 if (eShown) callees << ",";
                 std::string nm = e.toName.empty() ? dexNameForCode(c.dex, e.to) : e.toName;
-                callees << "{\"addr\":" << hq(e.to) << ",\"name\":" << q(nm)
+                callees << "{\"addr\":" << hq(e.to) << ",\"name\":" << q(c.overlayName(e.to, nm))
                         << ",\"site\":" << hq(e.site) << ",\"sites\":" << num(e.sites) << "}";
                 ++eShown;
             }
@@ -1849,7 +2106,7 @@ std::string Engine::dexMethodXrefs(const std::string& path, u64 addr) {
     }
 
     out << "{\"ok\":true,\"addr\":" << hq(addr)
-        << ",\"name\":" << q(dexNameForCode(c.dex, addr))
+        << ",\"name\":" << q(c.overlayName(addr, dexNameForCode(c.dex, addr)))
         << ",\"callersTotal\":" << num(u64(callersTotal))
         << ",\"callersShown\":" << num(u64(cShown))
         << ",\"callers\":[" << callers.str() << "]"
@@ -2106,9 +2363,11 @@ std::string Engine::callGraph(const std::string& path, u64 focus) {
     for (size_t i = 0; i < shown; ++i) {
         if (i) out << ",";
         const CallEdge& e = *keep[i];
+        // Overlay the node names, exactly as analyze()'s call-edge list does.
         out << "{\"from\":" << hq(e.from) << ",\"to\":" << hq(e.to)
             << ",\"site\":" << hq(e.site) << ",\"sites\":" << e.sites
-            << ",\"fromName\":" << q(e.fromName) << ",\"toName\":" << q(e.toName)
+            << ",\"fromName\":" << q(c.overlayName(e.from, e.fromName))
+            << ",\"toName\":" << q(c.overlayName(e.to, e.toName))
             << ",\"kind\":" << q(e.kind) << "}";
     }
     out << "],\"funcs\":[";
@@ -2116,7 +2375,9 @@ std::string Engine::callGraph(const std::string& path, u64 focus) {
     for (size_t i = 0; i < nf; ++i) {
         if (i) out << ",";
         auto& f = c.funcs[i];
-        out << "{\"addr\":" << hq(f.addr) << ",\"name\":" << q(f.name) << "}";
+        // The graph's node list carries the raw name; overlay a user rename onto
+        // it too so a node and its incident edges name the function one way.
+        out << "{\"addr\":" << hq(f.addr) << ",\"name\":" << q(c.overlayName(f.addr, f.name)) << "}";
     }
     out << "]}";
     return out.str();
@@ -2335,12 +2596,14 @@ std::string Engine::emulate(const std::string& path, const std::string& reqJson)
     EmuResult r = GhidraEmu::instance().run(req);
 
     // A name for the entry, so the panel does not have to look it up again.
+    // A user rename wins over the recovered name; unchanged when none.
     std::string fname;
     for (auto& f : c.funcs) if (f.addr == req.entry) { fname = f.name; break; }
     if (fname.empty()) {
         auto it = c.elf.pltNames.find(req.entry);
         if (it != c.elf.pltNames.end()) fname = it->second;
     }
+    fname = c.overlayName(req.entry, fname);
 
     out << "{\"ok\":" << (r.ok ? "true" : "false")
         << ",\"stop\":" << q(emuStopName(r.stop))
@@ -3203,7 +3466,12 @@ struct FnSource {
 // Prototype for the header stub. Taken from the decompiled body so the stub and
 // the exported source agree; a lifter that recovered two parameters should not
 // publish a (void) prototype next to a definition that takes them.
-std::string fnSignature(const FuncInfo& f, const std::string& pseudo) {
+// `userName` is the analyst's rename for this function, or "" when there is
+// none. The primary path lifts the signature out of the decompiled body, which
+// already carries the user name (the decompilers are handed it), so the rename
+// shows there; `userName` only decides the fallback stub, and passing "" keeps
+// that fallback byte-for-byte what it was before the overlay existed.
+std::string fnSignature(const FuncInfo& f, const std::string& pseudo, const std::string& userName) {
     size_t brace = pseudo.find('{');
     if (brace != std::string::npos) {
         std::string sig = pseudo.substr(0, brace);
@@ -3213,7 +3481,8 @@ std::string fnSignature(const FuncInfo& f, const std::string& pseudo) {
             return sig;
     }
     std::string n = f.name;
-    if (looksMangled(n)) {
+    if (!userName.empty()) n = userName;
+    else if (looksMangled(n)) {
         std::string d = demangle(n);
         if (!d.empty()) n = d;
     }
@@ -3334,8 +3603,10 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
         }
     }
 
+    // The heuristic printer's call-target labels; a user rename rides along,
+    // and the raw name is used when there is none (unchanged empty-overlay).
     std::map<u64, std::string> labels;
-    for (auto& fn : c.funcs) labels[fn.addr] = fn.name;
+    for (auto& fn : c.funcs) labels[fn.addr] = c.overlayName(fn.addr, fn.name);
 
     // `why` is filled in on every false return: a function that is missing
     // from the listing has to be able to say what happened to it.
@@ -3366,6 +3637,13 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
         }
 
         autoComment(c.arch, out.lines, c.names, c.strings, fn.addr, fn.addr + sz);
+        // The analyst's own comments merged onto the auto-comments (a no-op for
+        // lines they never annotated), so the exported .asm carries them too.
+        for (auto& l : out.lines) c.mergeUserComment(l.addr, l.comment);
+        // The function's own name in the emitted body: a user rename, else the
+        // raw name the decompilers received before. overlayName returns the raw
+        // name when none, so an empty overlay is byte-identical.
+        std::string fnName = c.overlayName(fn.addr, fn.name);
         // Same backend choice the Pseudo-C tab makes, so an exported listing
         // matches what the user was looking at when they exported it.
         if (useGhidra) {
@@ -3373,7 +3651,7 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
             auto ea = c.jniEnvArg.find(fn.addr);
             int env = (ea != c.jniEnvArg.end()) ? ea->second
                                                 : detectJniEnvArg(out.lines, c.arch);
-            out.pseudo = GhidraDecomp::instance().decompile(fn.addr, fn.name, err, env);
+            out.pseudo = GhidraDecomp::instance().decompile(fn.addr, fnName, err, env);
             if (!out.pseudo.empty()) {
                 out.mode = "Ghidra";
                 out.size = sz;
@@ -3383,8 +3661,8 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
             // this is the reason the reader wants, not "no output".
             why = err;
         }
-        IrResult ir = decompileIR(out.lines, c.arch, fn.addr, fn.name, c.names, c.strings);
-        out.pseudo = ir.ok ? ir.text : genPseudo(out.lines, c.arch, fn.addr, fn.name, labels);
+        IrResult ir = decompileIR(out.lines, c.arch, fn.addr, fnName, c.names, c.strings);
+        out.pseudo = ir.ok ? ir.text : genPseudo(out.lines, c.arch, fn.addr, fnName, labels);
         out.mode = ir.ok ? "IR" : "heuristic";
         out.size = sz;
         if (wantAsm && out.lines.empty()) { why = "no instructions decoded"; return false; }
@@ -3434,7 +3712,8 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
             // A stub whose body could not be read still gets a declaration --
             // with the reason on it, so a reader is not left to guess why this
             // one prototype is the generic one.
-            f << fnSignature(*fn, pseudo) << ";  /* 0x" << std::hex << std::uppercase
+            f << fnSignature(*fn, pseudo, c.overlayName(fn->addr, std::string()))
+              << ";  /* 0x" << std::hex << std::uppercase
               << fn->addr << std::dec << std::nouppercase;
             if (!okFn) f << " — not decompiled: " << (why.empty() ? "no output" : why);
             f << " */\n";
@@ -3466,7 +3745,7 @@ std::string Engine::exportSource(const std::string& path, const std::string& kin
             }
 
             f << "/* ---------------------------------------------------------------\n";
-            f << "   " << fn->name << "\n";
+            f << "   " << c.overlayName(fn->addr, fn->name) << "\n";
             f << "   0x" << std::hex << std::uppercase << fn->addr << std::dec
               << std::nouppercase;
             if (okFn) {

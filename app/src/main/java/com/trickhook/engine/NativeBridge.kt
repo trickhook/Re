@@ -160,6 +160,29 @@ object NativeBridge {
     external fun nativeDetect(path: String): String
 
     /**
+     * Install the user annotation overlay (renames + comments) into the engine's
+     * analysis context for [path], so the engine's OWN output — the read tools
+     * and the whole-binary .c/.asm export — shows the analyst's names and
+     * comments instead of the raw recovered ones.
+     *
+     * [json] is `{"renames":{"0x1234":"my_name",...},"comments":{"0x1234":
+     * "note",...}}`, exactly the shape [com.trickhook.vm.StudioViewModel]
+     * serialises its rename/comment maps to (address keys formatted `0x%08X`).
+     * The engine reads the keys with base-16 strtoull, so any hex spelling is
+     * accepted, and it REPLACES the whole overlay on every call — a rename or
+     * comment the analyst removed disappears on the next push. Empty maps clear
+     * the overlay, and with it cleared the engine's output is byte-identical to
+     * what it produced before any annotation was made.
+     *
+     * Returns `{"ok":true,"renames":N,"comments":M}` or `{"ok":false,
+     * "error":"…"}`. Engine side: Engine::setAnnotations.
+     *
+     * It takes the engine mutex (same as [nativeXrefsTo]); it is a fast
+     * in-memory operation, no re-analysis.
+     */
+    external fun nativeSetAnnotations(path: String, json: String): String
+
+    /**
      * Smali disassembly of ONE DEX method — the Dalvik half of the engine.
      *
      * [address] is a method's codeOff, exactly the value nativeAnalyze emits in
