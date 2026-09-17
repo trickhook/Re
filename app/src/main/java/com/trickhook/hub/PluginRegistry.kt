@@ -219,6 +219,30 @@ object PluginHub {
 
     private fun shortHex(hex: String): String = if (hex.length <= 12) hex else hex.substring(0, 12) + "…"
 
+    /**
+     * Save a plugin the user just authored into their own local list, in the
+     * exact canonical form the registry stores. Publishing opens a GitHub issue
+     * that only becomes a registry entry once the automated check merges it, so
+     * without this a creator's own plugin would not appear in their Plugins
+     * panel until then. Writing it here means it shows up the moment they
+     * publish. Same target and temp-then-rename as [install]; returns false only
+     * on a write error, and the signed submission is unaffected either way.
+     */
+    fun saveLocal(context: Context, plugin: PluginDef): Boolean = try {
+        val bytes = PluginCanonical.canonicalBytes(plugin)
+        val dir = File(context.filesDir, "plugins").apply { mkdirs() }
+        val dest = File(dir, plugin.id + ".nocturneplugin")
+        val part = File(dir, plugin.id + ".nocturneplugin.part")
+        part.writeBytes(bytes)
+        if (!part.renameTo(dest)) {
+            dest.writeBytes(bytes)
+            part.delete()
+        }
+        true
+    } catch (e: Exception) {
+        false
+    }
+
     // ------------------------------------------------------------- publish --
 
     /**

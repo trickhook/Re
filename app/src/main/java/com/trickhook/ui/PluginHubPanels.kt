@@ -446,7 +446,7 @@ private fun HubDetail(
 
 // -------------------------------------------------------------- editor sheet --
 
-private data class PublishInfo(val fingerprint: String, val sha256: String, val prefilled: Boolean)
+private data class PublishInfo(val fingerprint: String, val sha256: String, val prefilled: Boolean, val addedLocally: Boolean)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -455,11 +455,15 @@ fun PluginEditorSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val clip = LocalClipboardManager.current
+    // The author display name is remembered across publishes: the device key is
+    // the identity, and this is its human label, so it is asked once and then
+    // pre-filled from here on rather than re-typed for every plugin.
+    val prefs = remember { ctx.getSharedPreferences("nocturne_hub", android.content.Context.MODE_PRIVATE) }
 
     var name by remember { mutableStateOf("") }
     var id by remember { mutableStateOf("") }
     var idTouched by remember { mutableStateOf(false) }
-    var author by remember { mutableStateOf("") }
+    var author by remember { mutableStateOf(prefs.getString("author", "") ?: "") }
     var version by remember { mutableStateOf("1.0") }
     var description by remember { mutableStateOf("") }
     var script by remember { mutableStateOf("") }
@@ -611,6 +615,14 @@ fun PluginEditorSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                             color = ide.entry, fontSize = Type.label, lineHeight = Type.labelLine,
                             fontWeight = FontWeight.Medium
                         )
+                        if (info.addedLocally) {
+                            Spacer(Modifier.height(Space.s))
+                            Text(
+                                "It is also in your plugins now, so you can run it here while the " +
+                                    "registry review completes.",
+                                color = ide.dim, fontSize = Type.caption, lineHeight = Type.captionLine
+                            )
+                        }
                         Spacer(Modifier.height(Space.s))
                         Text("author ${info.fingerprint}", color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono)
                         Text("sha256 ${info.sha256.take(24)}…", color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono)
@@ -680,8 +692,19 @@ fun PluginEditorSheet(vm: StudioViewModel, onDismiss: () -> Unit) {
                                         "submission is on your clipboard — open the repository's " +
                                         "new-issue page and paste it into a fenced json block."
                                 }
-                                publishInfo = PublishInfo(identity.fingerprint, sha, prefilled)
-                                vm.log("OK", "Plugin signed for submission: ${def.id}")
+                                // Remember the author name and add the plugin to
+                                // this device's own list now, so a creator's work
+                                // shows up in the Plugins panel on publish rather
+                                // than only once the registry merges the issue.
+                                prefs.edit().putString("author", def.author).apply()
+                                val addedLocally = withContext(Dispatchers.IO) { PluginHub.saveLocal(ctx, def) }
+                                if (addedLocally) vm.loadPlugins(ctx)
+                                publishInfo = PublishInfo(identity.fingerprint, sha, prefilled, addedLocally)
+                                vm.log(
+                                    "OK",
+                                    "Plugin signed for submission: ${def.id}" +
+                                        if (addedLocally) " (added to your plugins)" else ""
+                                )
                             } catch (e: Exception) {
                                 publishError =
                                     "Signing failed on this device's keystore: " +
