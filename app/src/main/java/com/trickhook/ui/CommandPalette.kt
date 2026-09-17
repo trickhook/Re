@@ -150,6 +150,10 @@ fun CommandPaletteOverlay(vm: StudioViewModel, openFile: () -> Unit, importIda: 
                             "Open native lib from installed app",
                             "reads an installed app's own split APKs — no root, no reinstall", ""
                         ) { showInstalledApps = true })
+                        if (vm.meta != null && !vm.diffRunning) add(Command(
+                            "Diff against another binary",
+                            "compare the open binary — identical / changed / added / removed", ""
+                        ) { showDiffChooser = true })
                         add(Command(
                             "Load bundled test target",
                             "a crackme to analyse and defeat · running it needs a Shizuku backend",

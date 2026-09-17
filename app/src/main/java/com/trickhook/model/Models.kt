@@ -630,3 +630,116 @@ data class PluginDef(
     val description: String,
     val script: String
 )
+
+// ---------------- binary diff ----------------
+
+/**
+ * One CHANGED function: a pair matched across the two binaries whose normalized
+ * instruction streams differ. [similarity] is the fraction of normalized
+ * instructions the two bodies share (0..1); lower means more changed.
+ */
+data class DiffChangedPair(
+    val nameA: String, val addrA: Long,
+    val nameB: String, val addrB: Long,
+    val similarity: Double
+)
+
+/** One added / removed function: a name and an address in its own binary. */
+data class DiffEntry(val name: String, val addr: Long)
+
+/**
+ * Honest totals beside the capped lists. [changed]/[added]/[removed] are the
+ * true counts; the arrays in [DiffResult] carry the first [DiffResult].counts
+ * `*Shown` of them. [identicalExact] are byte-identical bodies; [identicalFingerprint]
+ * are functions whose bytes differ but whose normalized instruction stream is
+ * unchanged — a relocated-but-unchanged function, NOT a change.
+ */
+data class DiffCounts(
+    val aFuncs: Int, val bFuncs: Int,
+    val identical: Int, val identicalExact: Int, val identicalFingerprint: Int,
+    val changed: Int, val changedShown: Int,
+    val added: Int, val addedShown: Int,
+    val removed: Int, val removedShown: Int,
+    val nameMatched: Int, val fingerprintMatched: Int, val structuralMatched: Int,
+    val listCap: Int
+)
+
+/**
+ * A whole-binary diff, from [com.trickhook.engine.NativeBridge.nativeDiff]. A is
+ * the binary that was open; B the one it was compared against. Every function is
+ * identical, changed, added (B only) or removed (A only).
+ */
+data class DiffResult(
+    val ok: Boolean,
+    val error: String?,
+    val aName: String,
+    val bName: String,
+    val aArch: String,
+    val bArch: String,
+    val identical: Int,
+    val changed: List<DiffChangedPair>,
+    val added: List<DiffEntry>,
+    val removed: List<DiffEntry>,
+    val counts: DiffCounts,
+    val notes: List<String>
+)
+
+fun parseDiff(json: String): DiffResult {
+    val o = JSONObject(json)
+    if (!o.optBoolean("ok", false)) {
+        return DiffResult(
+            false, o.optString("error", "diff failed"), "", "", "", "",
+            0, emptyList(), emptyList(), emptyList(),
+            DiffCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), emptyList()
+        )
+    }
+    val changed = o.optJSONArray("changed")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val e = arr.getJSONObject(i)
+            DiffChangedPair(
+                e.optString("nameA"), hx(e.optString("addrA")),
+                e.optString("nameB"), hx(e.optString("addrB")),
+                e.optDouble("similarity", 0.0)
+            )
+        }
+    } ?: emptyList()
+    val added = o.optJSONArray("added")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val e = arr.getJSONObject(i); DiffEntry(e.optString("name"), hx(e.optString("addr")))
+        }
+    } ?: emptyList()
+    val removed = o.optJSONArray("removed")?.let { arr ->
+        (0 until arr.length()).map { i ->
+            val e = arr.getJSONObject(i); DiffEntry(e.optString("name"), hx(e.optString("addr")))
+        }
+    } ?: emptyList()
+    val c = o.optJSONObject("counts")
+    val counts = DiffCounts(
+        aFuncs = c?.optInt("aFuncs") ?: 0,
+        bFuncs = c?.optInt("bFuncs") ?: 0,
+        identical = c?.optInt("identical") ?: o.optInt("identical"),
+        identicalExact = c?.optInt("identicalExact") ?: 0,
+        identicalFingerprint = c?.optInt("identicalFingerprint") ?: 0,
+        changed = maxOf(c?.optInt("changed") ?: 0, changed.size),
+        changedShown = c?.optInt("changedShown") ?: changed.size,
+        added = maxOf(c?.optInt("added") ?: 0, added.size),
+        addedShown = c?.optInt("addedShown") ?: added.size,
+        removed = maxOf(c?.optInt("removed") ?: 0, removed.size),
+        removedShown = c?.optInt("removedShown") ?: removed.size,
+        nameMatched = c?.optInt("nameMatched") ?: 0,
+        fingerprintMatched = c?.optInt("fingerprintMatched") ?: 0,
+        structuralMatched = c?.optInt("structuralMatched") ?: 0,
+        listCap = c?.optInt("listCap") ?: 0
+    )
+    val notes = o.optJSONArray("notes")?.let { arr ->
+        (0 until arr.length()).map { arr.optString(it) }
+    } ?: emptyList()
+    return DiffResult(
+        ok = true, error = null,
+        aName = o.optString("aName"), bName = o.optString("bName"),
+        aArch = o.optString("aArch"), bArch = o.optString("bArch"),
+        identical = o.optInt("identical"),
+        changed = changed, added = added, removed = removed,
+        counts = counts, notes = notes
+    )
+}

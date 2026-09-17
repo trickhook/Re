@@ -39,6 +39,8 @@ import com.trickhook.model.ExportResult
 import com.trickhook.model.FuncInfo
 import com.trickhook.model.FridaExport
 import com.trickhook.model.FridaTarget
+import com.trickhook.model.DiffResult
+import com.trickhook.model.DiffChangedPair
 import com.trickhook.model.FunctionDetail
 import com.trickhook.model.IdaAnnotations
 import com.trickhook.model.IdaCommentRow
@@ -57,6 +59,7 @@ import com.trickhook.model.parseCallGraph
 import com.trickhook.model.parseDbg
 import com.trickhook.model.parseDebug
 import com.trickhook.model.parseDetail
+import com.trickhook.model.parseDiff
 import com.trickhook.model.parseExportProgress
 import com.trickhook.model.parseExportResult
 import com.trickhook.model.parseFunctionPage
@@ -264,6 +267,24 @@ class StudioViewModel : ViewModel() {
     var detail by mutableStateOf<FunctionDetail?>(null); private set
     var tab by mutableStateOf(Tab.ASSEMBLY)
     var darkTheme by mutableStateOf(true)
+
+    // ---- binary diff (compare the open binary against a second one) ----
+    // All null/false until a diff is invoked, so a normal open changes nothing.
+    /** The results panel is showing (running or done). */
+    var diffOpen by mutableStateOf(false); private set
+    /** A diff is being computed on a background thread. */
+    var diffRunning by mutableStateOf(false); private set
+    /** A one-line phase for the running diff, e.g. "Analysing B". */
+    var diffPhase by mutableStateOf(""); private set
+    var diffError by mutableStateOf<String?>(null); private set
+    var diffResult by mutableStateOf<DiffResult?>(null); private set
+    /** B's on-disk path, kept so a tapped changed row can re-open B for its detail. */
+    private var diffPathB: String? = null
+    /** The changed row the user opened for a side-by-side view, and its two details. */
+    var diffPair by mutableStateOf<DiffChangedPair?>(null); private set
+    var diffPairBusy by mutableStateOf(false); private set
+    var diffDetailA by mutableStateOf<FunctionDetail?>(null); private set
+    var diffDetailB by mutableStateOf<FunctionDetail?>(null); private set
 
     /**
      * What the app as a whole is doing, for the header progress line.
@@ -3160,6 +3181,149 @@ class StudioViewModel : ViewModel() {
             // standing beside a library that came from somewhere else.
             loadFile(dst, "${lib.libName} — $appLabel", fromApk = false)
         }
+    }
+
+    // ---------------------------------------------------------------- diff --
+
+    /**
+     * Diff the OPEN binary (A = [currentPath]) against a binary picked from the
+     * document picker (B). B is copied out of its content URI into cacheDir and
+     * handed to the engine by path; A's own analysis context is untouched by the
+     * comparison, so the open binary is exactly as it was afterwards.
+     */
+    fun diffAgainstUri(context: Context, uri: Uri) = viewModelScope.launch {
+        val a = currentPath
+        if (a == null) { log("WARN", "Open a binary first, then diff another against it"); return@launch }
+        diffOpen = true
+        diffRunning = true
+        diffError = null
+        diffResult = null
+        clearDiffPair()
+        val app = context.applicationContext
+        try {
+            val bPath = withContext(Dispatchers.IO) {
+                val name = queryName(context, uri) ?: "binary_b.bin"
+                val dst = File(app.cacheDir, "diff_${name.replace(Regex("[^A-Za-z0-9._-]"), "_")}")
+                context.contentResolver.openInputStream(uri)?.use { ins ->
+                    dst.outputStream().use { ins.copyTo(it) }
+                } ?: throw IllegalStateException("Cannot open input stream")
+                dst.absolutePath
+            }
+            runDiff(a, bPath)
+        } catch (e: Exception) {
+            diffError = e.message ?: "could not read the second binary"
+            log("ERROR", diffError!!)
+        } finally {
+            diffRunning = false
+            diffPhase = ""
+        }
+    }
+
+    /**
+     * Diff the open binary against a native library chosen from an installed
+     * app. The single .so is extracted out of its split APK — exactly as
+     * [openInstalledLib] does — but routed into the diff instead of replacing
+     * the open binary.
+     */
+    fun diffAgainstInstalledLib(context: Context, lib: AppNativeLib, appLabel: String) = viewModelScope.launch {
+        val a = currentPath
+        if (a == null) { log("WARN", "Open a binary first, then diff another against it"); return@launch }
+        diffOpen = true
+        diffRunning = true
+        diffError = null
+        diffResult = null
+        clearDiffPair()
+        val app = context.applicationContext
+        try {
+            val bPath = withContext(Dispatchers.IO) {
+                val src = File(lib.splitPath)
+                if (!src.canRead()) throw IllegalStateException("Cannot read ${lib.splitName}")
+                ZipFile(src).use { zf ->
+                    val zentry = zf.getEntry(lib.entryName)
+                        ?: throw IllegalStateException("Entry not found: ${lib.entryName}")
+                    val safePkg = lib.pkg.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    val safeAbi = lib.abi.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    val dir = File(app.cacheDir, "diff/$safePkg/$safeAbi").apply { mkdirs() }
+                    val dst = File(dir, lib.libName)
+                    zf.getInputStream(zentry).use { ins -> dst.outputStream().use { ins.copyTo(it) } }
+                    dst.absolutePath
+                }
+            }
+            runDiff(a, bPath, "${lib.libName} — $appLabel")
+        } catch (e: Exception) {
+            diffError = e.message ?: "could not extract ${lib.libName}"
+            log("ERROR", diffError!!)
+        } finally {
+            diffRunning = false
+            diffPhase = ""
+        }
+    }
+
+    /**
+     * Run the engine diff of A against B and publish the result. Called on the
+     * viewModel scope; the native call itself takes the engine mutex and
+     * analyses B in full, so it is dispatched to IO.
+     */
+    private suspend fun runDiff(aPath: String, bPath: String, bLabel: String? = null) {
+        diffPhase = "Comparing"
+        val json = withContext(Dispatchers.IO) { NativeBridge.nativeDiff(aPath, bPath) }
+        val r = parseDiff(json)
+        if (!r.ok) {
+            diffError = r.error ?: "diff failed"
+            log("ERROR", "Diff: ${diffError}")
+            return
+        }
+        diffPathB = bPath
+        diffResult = r
+        val c = r.counts
+        log(
+            "OK",
+            "Diff ${r.aName} vs ${bLabel ?: r.bName}: ${c.identical} identical, " +
+                "${c.changed} changed, ${c.added} added, ${c.removed} removed"
+        )
+        r.notes.forEach { log("INFO", "Diff: $it") }
+    }
+
+    /**
+     * Open a changed row for a side-by-side view: load the function detail for A
+     * and for B. B's detail needs B's analysis context, so the engine is asked
+     * for B's function — which re-analyses B (its context is not kept warm the
+     * way A's is). Both fetches take the engine mutex, so they run in sequence on
+     * IO; A is fetched last so the engine is left warm on the open binary.
+     */
+    fun openDiffPair(pair: DiffChangedPair) = viewModelScope.launch {
+        val a = currentPath ?: return@launch
+        val b = diffPathB ?: return@launch
+        diffPair = pair
+        diffPairBusy = true
+        diffDetailA = null
+        diffDetailB = null
+        try {
+            val db = withContext(Dispatchers.IO) { parseDetail(NativeBridge.nativeFunction(b, pair.addrB)) }
+            val da = withContext(Dispatchers.IO) { parseDetail(NativeBridge.nativeFunction(a, pair.addrA)) }
+            diffDetailB = db
+            diffDetailA = da
+        } catch (e: Exception) {
+            log("ERROR", e.message ?: "could not load the two functions")
+        } finally {
+            diffPairBusy = false
+        }
+    }
+
+    fun clearDiffPair() {
+        diffPair = null
+        diffDetailA = null
+        diffDetailB = null
+        diffPairBusy = false
+    }
+
+    /** Close the diff panel and drop its results. */
+    fun closeDiff() {
+        diffOpen = false
+        diffResult = null
+        diffError = null
+        diffPathB = null
+        clearDiffPair()
     }
 
     // -------------------------------------------------------------- helpers --

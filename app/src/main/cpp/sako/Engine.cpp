@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "LibSig.h"
+#include "BinDiff.h"
 #include "GhidraArch.h"
 #include "GhidraEmu.h"
 #include "JniTypes.h"
@@ -72,6 +73,10 @@ static const size_t kXrefRowsInJson = 64;
 // listing that stopped early cannot be read as a function that ends there.
 static const size_t kAsmWindowBytes = 65536;
 static const size_t kAsmInstrsInDetail = 4096;
+// Rows of each diff list (changed/added/removed) carried in one diff answer.
+// The lists can each be tens of thousands of functions on a large library, so
+// they are capped for the UI; counts{} carries the honest totals beside them.
+static const size_t kDiffListCap = 500;
 
 
 Engine& Engine::instance() {
@@ -84,6 +89,14 @@ static std::string q(const std::string& s) { return "\"" + jsonEscape(s) + "\"";
 static std::string hq(u64 v) { return q(hexAddr(v)); }
 static std::string num(u64 v) {
     std::ostringstream os; os << v; return os.str();
+}
+// A similarity in [0,1] as a fixed-precision JSON number (never quoted).
+static std::string simStr(double v) {
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%.3f", v);
+    return buf;
 }
 
 // One row of the function list, for analyze() and for functions(). Both go
@@ -660,21 +673,15 @@ static void noteStringScanCap(std::vector<std::string>& notes, size_t have, size
                     + " strings; the file may hold more");
 }
 
-bool Engine::ensureCtx(const std::string& path) {
-    if (ctxPath_ == path && !ctx_.bin.data.empty()) return true;
-
-    Ctx c;
+// Build a fresh context into `c` without touching the engine's open context.
+// ensureCtx (below) wraps this with the one-slot cache and the failure note;
+// diff() calls it directly to analyse binary B into a scratch context while
+// binary A stays loaded in ctx_.
+bool Engine::buildCtx(const std::string& path, Ctx& c) {
     auto t0 = std::chrono::steady_clock::now();
     c.bin = loadBinaryFile(path);
     auto t1 = std::chrono::steady_clock::now();
-    if (c.bin.data.empty()) {
-        // keep note; report via analyze()
-        ctx_ = Ctx{};
-        ctx_.bin.path = path;
-        ctx_.notes.push_back("Could not read file (missing or empty)");
-        ctxPath_.clear();
-        return false;
-    }
+    if (c.bin.data.empty()) return false;
     c.loadMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     const u8* p = c.bin.data.data();
@@ -868,6 +875,21 @@ bool Engine::ensureCtx(const std::string& path) {
             c.notes.push_back("Disassembler unavailable for arch " + c.arch);
     }
 
+    return true;
+}
+
+bool Engine::ensureCtx(const std::string& path) {
+    if (ctxPath_ == path && !ctx_.bin.data.empty()) return true;
+
+    Ctx c;
+    if (!buildCtx(path, c)) {
+        // keep note; report via analyze()
+        ctx_ = Ctx{};
+        ctx_.bin.path = path;
+        ctx_.notes.push_back("Could not read file (missing or empty)");
+        ctxPath_.clear();
+        return false;
+    }
     ctx_ = std::move(c);
     ctxPath_ = path;
     return true;
@@ -1405,6 +1427,191 @@ std::string Engine::functionDetail(const std::string& path, u64 addr) {
         }
         out << "]";
     }
+    out << "}";
+    return out.str();
+}
+
+// -------------------------------------------------------------------- diff --
+// Reduce every function in a context to the descriptor the matcher compares
+// (BinDiff.h): address, name, a hash of the raw function bytes, and the
+// NORMALIZED instruction stream — mnemonics with operands/immediates/branch
+// targets masked. Only the disassembly the engine already produces is used, so
+// nothing here needs relocation tables and it works on two LINKED binaries.
+void Engine::buildDiffFuncs(Ctx& c, std::vector<bindiff::Func>& out) {
+    out.clear();
+    out.reserve(c.funcs.size());
+    const u8* base = c.bin.data.data();
+    const size_t total = c.bin.data.size();
+    const bool canDis = !c.backend.empty() && (c.fmt == Fmt::ELF || c.fmt == Fmt::PE);
+    for (auto& f : c.funcs) {
+        bindiff::Func d;
+        d.addr = f.addr;
+        d.name = f.name;
+        d.from = f.from;
+        // "SUB_xxxx" is exactly discovery's marker for an unnamed function; a
+        // real symbol or user rename is anything else. Empty counts as no name.
+        d.hasName = !f.name.empty() && f.name.rfind("SUB_", 0) != 0;
+
+        u64 off = vaToOff(c, f.addr);
+        const u8* code = nullptr;
+        size_t avail = 0;
+        if (off != ~u64(0) && off < total) {
+            code = base + off;
+            avail = total - size_t(off);
+        }
+        // Raw-byte hash over the function body — the exact-match detector. A
+        // symbol size is exact; a discovered SUB_ size is a gap estimate, but it
+        // is the same estimate on both versions, so it is a stable window.
+        if (code && f.size) {
+            size_t blen = size_t(std::min<u64>(f.size, u64(avail)));
+            blen = std::min<size_t>(blen, kAsmWindowBytes);
+            if (blen) {
+                d.byteHash = bindiff::fnv1a(code, blen);
+                d.byteLen = blen;
+            }
+        }
+        // Normalized instruction stream over the same window functionDetail
+        // would disassemble; for ARM the enclosing function's Thumb bit picks
+        // the decode mode wherever the mapping table is silent.
+        if (canDis && code) {
+            u64 win = f.size ? f.size : 512;
+            win = std::min<u64>(win, kAsmWindowBytes);
+            win = std::min<u64>(win, u64(avail));
+            if (win) {
+                if (c.dis.armDualMode()) c.dis.setDefaultThumb(f.thumb);
+                auto lines = c.dis.disassemble(code, size_t(win), f.addr, kAsmInstrsInDetail);
+                d.tokens.reserve(lines.size());
+                for (auto& l : lines) {
+                    if (l.mnem.empty()) continue;   // undecodable-byte gap, no token
+                    d.tokens.push_back(bindiff::tokenHash(l.mnem, l.ops));
+                }
+                size_t nb = 0;
+                auto blocks = buildCfg(lines, f.addr, f.addr + win, c.arch, &nb);
+                d.cfgBlocks = int(std::max<size_t>(nb, blocks.size()));
+            }
+        }
+        d.finish();
+        out.push_back(std::move(d));
+    }
+}
+
+std::string Engine::diff(const std::string& pathA, const std::string& pathB) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ostringstream out;
+
+    // A is the binary already open/analysed. ensureCtx keeps it in ctx_ (a
+    // no-op when it is already the open one); B is analysed into a SCRATCH
+    // context so A's ctx_ is never disturbed — a diff leaves the open binary
+    // exactly as it was.
+    if (!ensureCtx(pathA)) {
+        out << "{\"ok\":false,\"error\":" << q("Could not analyse A: " + pathA) << "}";
+        return out.str();
+    }
+    std::string aName = ctx_.bin.name.empty() ? pathA : ctx_.bin.name;
+    std::string aArch = ctx_.arch;
+    bool aHasBackend = !ctx_.backend.empty();
+    std::vector<bindiff::Func> fa;
+    buildDiffFuncs(ctx_, fa);
+
+    Ctx bctx;
+    if (!buildCtx(pathB, bctx)) {
+        out << "{\"ok\":false,\"error\":" << q("Could not read B: " + pathB) << "}";
+        return out.str();
+    }
+    std::string bName = bctx.bin.name.empty() ? pathB : bctx.bin.name;
+    std::string bArch = bctx.arch;
+    bool bHasBackend = !bctx.backend.empty();
+    std::vector<bindiff::Func> fb;
+    buildDiffFuncs(bctx, fb);
+
+    bindiff::Result r = bindiff::diffFunctions(fa, fb);
+
+    // Changed rows most-changed first (ascending similarity) — the rows a patch
+    // analyst looks at first; ties by A's address. added/removed by address.
+    std::sort(r.changed.begin(), r.changed.end(),
+              [](const bindiff::ChangedPair& x, const bindiff::ChangedPair& y) {
+                  if (x.similarity != y.similarity) return x.similarity < y.similarity;
+                  return x.ia < y.ia;
+              });
+    std::sort(r.added.begin(), r.added.end(),
+              [&](size_t x, size_t y) { return fb[x].addr < fb[y].addr; });
+    std::sort(r.removed.begin(), r.removed.end(),
+              [&](size_t x, size_t y) { return fa[x].addr < fa[y].addr; });
+
+    const size_t cap = kDiffListCap;
+
+    out << "{\"ok\":true"
+        << ",\"aName\":" << q(aName) << ",\"bName\":" << q(bName)
+        << ",\"aArch\":" << q(aArch.empty() ? "-" : aArch)
+        << ",\"bArch\":" << q(bArch.empty() ? "-" : bArch)
+        << ",\"identical\":" << num(r.identical);
+
+    out << ",\"changed\":[";
+    for (size_t i = 0; i < r.changed.size() && i < cap; ++i) {
+        if (i) out << ",";
+        const auto& p = r.changed[i];
+        out << "{\"nameA\":" << q(fa[p.ia].name) << ",\"addrA\":" << hq(fa[p.ia].addr)
+            << ",\"nameB\":" << q(fb[p.ib].name) << ",\"addrB\":" << hq(fb[p.ib].addr)
+            << ",\"similarity\":" << simStr(p.similarity) << "}";
+    }
+    out << "]";
+
+    out << ",\"added\":[";
+    for (size_t i = 0; i < r.added.size() && i < cap; ++i) {
+        if (i) out << ",";
+        const auto& f = fb[r.added[i]];
+        out << "{\"name\":" << q(f.name) << ",\"addr\":" << hq(f.addr) << "}";
+    }
+    out << "]";
+
+    out << ",\"removed\":[";
+    for (size_t i = 0; i < r.removed.size() && i < cap; ++i) {
+        if (i) out << ",";
+        const auto& f = fa[r.removed[i]];
+        out << "{\"name\":" << q(f.name) << ",\"addr\":" << hq(f.addr) << "}";
+    }
+    out << "]";
+
+    // Honest totals beside the capped arrays. `changed`/`added`/`removed` are
+    // the true totals; `*Shown` is how many rows the arrays above carry.
+    out << ",\"counts\":{"
+        << "\"aFuncs\":" << num(fa.size())
+        << ",\"bFuncs\":" << num(fb.size())
+        << ",\"identical\":" << num(r.identical)
+        << ",\"identicalExact\":" << num(r.identicalExact)
+        << ",\"identicalFingerprint\":" << num(r.identicalFingerprint)
+        << ",\"changed\":" << num(r.changed.size())
+        << ",\"changedShown\":" << num(std::min<size_t>(r.changed.size(), cap))
+        << ",\"added\":" << num(r.added.size())
+        << ",\"addedShown\":" << num(std::min<size_t>(r.added.size(), cap))
+        << ",\"removed\":" << num(r.removed.size())
+        << ",\"removedShown\":" << num(std::min<size_t>(r.removed.size(), cap))
+        << ",\"nameMatched\":" << num(r.nameMatched)
+        << ",\"fingerprintMatched\":" << num(r.fpMatched)
+        << ",\"structuralMatched\":" << num(r.structMatched)
+        << ",\"listCap\":" << num(cap)
+        << "}";
+
+    out << ",\"notes\":[";
+    {
+        std::vector<std::string> notes;
+        if (aArch != bArch)
+            notes.push_back("Architectures differ (A " + (aArch.empty() ? std::string("-") : aArch) +
+                            ", B " + (bArch.empty() ? std::string("-") : bArch) +
+                            "); functions are matched by name and bytes where the instruction streams cannot be compared");
+        if (!aHasBackend)
+            notes.push_back("No disassembler for A's architecture; normalized-fingerprint matching is unavailable, so only exact bytes and symbol names pair functions");
+        if (!bHasBackend)
+            notes.push_back("No disassembler for B's architecture; normalized-fingerprint matching is unavailable, so only exact bytes and symbol names pair functions");
+        if (!r.structuralRun)
+            notes.push_back("Structural pass skipped: too many unmatched functions to pair pairwise; the remainder is reported as added/removed");
+        for (size_t i = 0; i < notes.size(); ++i) {
+            if (i) out << ",";
+            out << q(notes[i]);
+        }
+    }
+    out << "]";
+
     out << "}";
     return out.str();
 }

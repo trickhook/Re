@@ -55,6 +55,13 @@ import com.trickhook.vm.StudioViewModel
  */
 var showInstalledApps by mutableStateOf(false)
 
+/**
+ * When true, the sheet picks binary B for a DIFF against the open binary rather
+ * than opening the chosen library. Set beside [showInstalledApps] by the "Diff
+ * against an installed lib…" action; cleared when the sheet closes.
+ */
+var installedAppsDiffMode by mutableStateOf(false)
+
 /** How tall either list is allowed to grow before it scrolls inside the sheet. */
 private val InstalledListHeight = 380.dp
 
@@ -85,8 +92,10 @@ fun InstalledAppsSheet(vm: StudioViewModel) {
     // Enumerate once when the sheet opens; drop both lists when it closes so a
     // stale set never flashes on the next open.
     LaunchedEffect(Unit) { vm.listInstalledApps(ctx) }
+    val diffMode = installedAppsDiffMode
     val close = {
         showInstalledApps = false
+        installedAppsDiffMode = false
         vm.clearInstalledApps()
     }
 
@@ -112,7 +121,7 @@ fun InstalledAppsSheet(vm: StudioViewModel) {
             Column(Modifier.padding(Space.l)) {
                 val app = selected
                 if (app == null) {
-                    AppPickHeader()
+                    AppPickHeader(diffMode)
                     Spacer(Modifier.height(Space.m))
                     AppPickStep(
                         vm = vm,
@@ -123,10 +132,11 @@ fun InstalledAppsSheet(vm: StudioViewModel) {
                         onPick = { selected = it }
                     )
                 } else {
-                    LibPickHeader(app) { selected = null }
+                    LibPickHeader(app, diffMode) { selected = null }
                     Spacer(Modifier.height(Space.m))
-                    LibPickStep(vm, app) { lib ->
-                        vm.openInstalledLib(ctx, lib, app.label)
+                    LibPickStep(vm, app, diffMode) { lib ->
+                        if (diffMode) vm.diffAgainstInstalledLib(ctx, lib, app.label)
+                        else vm.openInstalledLib(ctx, lib, app.label)
                         close()
                     }
                 }
@@ -138,16 +148,19 @@ fun InstalledAppsSheet(vm: StudioViewModel) {
 // ---------------------------------------------------------------- step one ==
 
 @Composable
-private fun AppPickHeader() {
+private fun AppPickHeader(diffMode: Boolean) {
     val ide = LocalIde.current
     Text(
-        "Open from an installed app",
+        if (diffMode) "Diff against an installed library" else "Open from an installed app",
         color = ide.accent, fontSize = Type.section, fontFamily = Mono,
         fontWeight = FontWeight.Bold
     )
     Spacer(Modifier.height(Space.xs))
     Text(
-        "Reads an installed app's own APK splits for their native libraries — no root, no reinstall.",
+        if (diffMode)
+            "Pick an installed app's native library to compare against the open binary — no root, no reinstall."
+        else
+            "Reads an installed app's own APK splits for their native libraries — no root, no reinstall.",
         color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
     )
 }
@@ -268,7 +281,7 @@ private fun AppRow(app: InstalledApp, onPick: (InstalledApp) -> Unit) {
 // ---------------------------------------------------------------- step two ==
 
 @Composable
-private fun LibPickHeader(app: InstalledApp, onBack: () -> Unit) {
+private fun LibPickHeader(app: InstalledApp, diffMode: Boolean, onBack: () -> Unit) {
     val ide = LocalIde.current
     Row(verticalAlignment = Alignment.CenterVertically) {
         Row(
@@ -291,7 +304,8 @@ private fun LibPickHeader(app: InstalledApp, onBack: () -> Unit) {
                 fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             Text(
-                "native libraries · ${app.pkg}", color = ide.dim2,
+                (if (diffMode) "library to diff · " else "native libraries · ") + app.pkg,
+                color = ide.dim2,
                 fontSize = Type.caption, fontFamily = Mono,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
@@ -303,6 +317,7 @@ private fun LibPickHeader(app: InstalledApp, onBack: () -> Unit) {
 private fun LibPickStep(
     vm: StudioViewModel,
     app: InstalledApp,
+    diffMode: Boolean,
     onOpen: (AppNativeLib) -> Unit
 ) {
     val ide = LocalIde.current
@@ -350,14 +365,14 @@ private fun LibPickStep(
                         modifier = Modifier.padding(horizontal = Space.s, vertical = Space.s)
                     )
                 }
-                items(rows.size) { i -> LibRow(rows[i], primaryAbi, onOpen) }
+                items(rows.size) { i -> LibRow(rows[i], primaryAbi, diffMode, onOpen) }
             }
         }
     }
 }
 
 @Composable
-private fun LibRow(lib: AppNativeLib, primaryAbi: String, onOpen: (AppNativeLib) -> Unit) {
+private fun LibRow(lib: AppNativeLib, primaryAbi: String, diffMode: Boolean, onOpen: (AppNativeLib) -> Unit) {
     val ide = LocalIde.current
     val isPrimary = lib.abi == primaryAbi && primaryAbi.isNotBlank()
     Row(
@@ -365,7 +380,8 @@ private fun LibRow(lib: AppNativeLib, primaryAbi: String, onOpen: (AppNativeLib)
             .fillMaxWidth()
             .clickable(
                 role = Role.Button,
-                onClickLabel = "Extract and analyse ${lib.libName} (${lib.abi})"
+                onClickLabel = if (diffMode) "Diff against ${lib.libName} (${lib.abi})"
+                else "Extract and analyse ${lib.libName} (${lib.abi})"
             ) { onOpen(lib) }
             .heightIn(min = 48.dp)
             .padding(horizontal = Space.s, vertical = Space.s),

@@ -63,6 +63,17 @@ Java_com_trickhook_engine_NativeBridge_nativeFunction(JNIEnv* env, jobject, jstr
     return toJString(env, sako::Engine::instance().functionDetail(path, u64(addr)));
 }
 
+// Binary diff: classify every function of A vs B (identical/changed/added/
+// removed). pathA is the open/analysed binary, pathB the one to compare it to;
+// B is analysed into a scratch context, so A's analysis is left untouched.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_trickhook_engine_NativeBridge_nativeDiff(JNIEnv* env, jobject, jstring jpathA,
+                                                  jstring jpathB) {
+    std::string a = toStdString(env, jpathA);
+    std::string b = toStdString(env, jpathB);
+    return toJString(env, sako::Engine::instance().diff(a, b));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_trickhook_engine_NativeBridge_nativeCallGraph(JNIEnv* env, jobject, jstring jpath,
                                                            jlong focus) {

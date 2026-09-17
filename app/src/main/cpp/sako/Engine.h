@@ -9,6 +9,8 @@
 #include <iosfwd>
 #include <mutex>
 
+namespace bindiff { struct Func; }   // BinDiff.h — the diff matcher's descriptor
+
 namespace sako {
 
 class Engine {
@@ -57,6 +59,23 @@ public:
 
     // Per-function detail (asm + comments + IR pseudo-C + CFG + xrefs) → JSON
     std::string functionDetail(const std::string& path, u64 addr);
+
+    // Binary diff — compare two LINKED binaries (typically two versions of the
+    // same library) and classify every function identical / changed / added /
+    // removed, with a similarity score for the changed ones. `pathA` is the
+    // binary already open/analysed (A); `pathB` is a second path the caller
+    // supplies (B). A's analysis context is NOT disturbed: B is analysed into a
+    // scratch context, compared, and thrown away, so a diff leaves the open
+    // binary exactly as it was. Matching (see BinDiff.h) is by exact bytes, then
+    // symbol name, then a normalized-instruction fingerprint that masks
+    // addresses/immediates so relocation noise is not read as a change, then a
+    // structural fallback. Returns JSON:
+    //   {ok, aName, bName, aArch, bArch, identical:N,
+    //    changed:[{nameA,addrA,nameB,addrB,similarity}],
+    //    added:[{name,addr}], removed:[{name,addr}],
+    //    counts:{...}, notes:[...]}
+    // The three lists are capped for the UI; counts carries the honest totals.
+    std::string diff(const std::string& pathA, const std::string& pathB);
 
     // Call graph (optionally centered on one function) → JSON
     std::string callGraph(const std::string& path, u64 focus);
@@ -143,6 +162,14 @@ private:
     };
 
     bool ensureCtx(const std::string& path);
+    // Build a fresh analysis context for `path` into `c` WITHOUT touching the
+    // engine's open context (ctx_/ctxPath_). ensureCtx is this plus the one-slot
+    // cache; diff() calls it directly to analyse binary B into a scratch context
+    // while binary A stays loaded. Returns false when the file cannot be read.
+    bool buildCtx(const std::string& path, Ctx& c);
+    // Reduce a context's functions to bindiff::Func descriptors — a raw-byte
+    // hash plus the normalized instruction stream — for the diff matcher.
+    void buildDiffFuncs(Ctx& c, std::vector<bindiff::Func>& out);
     u64 vaToOff(const Ctx& c, u64 va);
 
     // One row of the function list. analyze() and functions() both go through

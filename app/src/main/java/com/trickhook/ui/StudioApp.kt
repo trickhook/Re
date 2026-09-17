@@ -69,6 +69,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Close
@@ -208,6 +209,12 @@ fun StudioApp(vm: StudioViewModel) {
         uri?.let { vm.openUri(ctx, it) }
     }
     val openFile = { openLauncher.launch(arrayOf("*/*")) }
+
+    // Picks binary B for a diff against the open binary. Registered up here with
+    // the other launchers so it survives the chooser dialog being dismissed.
+    val diffLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.diffAgainstUri(ctx, it) }
+    }
 
     // The return leg of the IDA bridge. Registered up here beside openLauncher,
     // not down in the menu that raises it: a launcher created inside a
@@ -481,6 +488,23 @@ fun StudioApp(vm: StudioViewModel) {
                                 onClick = { showOverflow = false; showInstalledApps = true }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("Diff against…", color = ide.text, fontSize = Type.body)
+                                        Text(
+                                            "compare the open binary with another version — identical / changed / added / removed",
+                                            color = ide.dim, fontSize = Type.caption
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.CompareArrows, null, tint = ide.dim,
+                                        modifier = Modifier.size(18.dp))
+                                },
+                                enabled = vm.meta != null && !vm.diffRunning,
+                                onClick = { showOverflow = false; showDiffChooser = true }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Bookmarks & notes", color = ide.text, fontSize = Type.body) },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Star, null, tint = ide.dim,
@@ -706,6 +730,19 @@ fun StudioApp(vm: StudioViewModel) {
     CommandPaletteOverlay(vm, openFile, importIda = { importIdaLauncher.launch(arrayOf("*/*")) })
 
     InstalledAppsSheet(vm)
+
+    DiffPanel(vm)
+    if (showDiffChooser) {
+        DiffChooserDialog(
+            onFile = { showDiffChooser = false; diffLauncher.launch(arrayOf("*/*")) },
+            onInstalled = {
+                showDiffChooser = false
+                installedAppsDiffMode = true
+                showInstalledApps = true
+            },
+            onDismiss = { showDiffChooser = false }
+        )
+    }
 
     if (showAbout) AboutDialog(onDismiss = { showAbout = false })
     if (showAnnotations) AnnotationsSheet(vm, onDismiss = { showAnnotations = false })

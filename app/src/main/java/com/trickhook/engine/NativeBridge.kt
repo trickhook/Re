@@ -107,6 +107,34 @@ object NativeBridge {
     external fun nativeAnalyze(path: String): String
     external fun nativeFunction(path: String, addr: Long): String
     external fun nativeCallGraph(path: String, focus: Long): String
+
+    /**
+     * Binary diff — compare two LINKED binaries (typically two versions of the
+     * same library) and classify every function as identical, changed, added
+     * (in B only) or removed (in A only), with a similarity score for the
+     * changed ones. [pathA] is the binary already open/analysed; [pathB] is the
+     * second one to compare against. B is analysed into a scratch context, so
+     * A's open analysis is not disturbed and a normal decompile of A still hits
+     * the warm context after a diff.
+     *
+     * Matching (engine side, BinDiff.h) is ordered so a confident match wins
+     * first: exact function bytes, then symbol name, then a NORMALIZED
+     * instruction fingerprint (mnemonics with operands/immediates/branch targets
+     * masked, so a relocated-but-unchanged function is recognised rather than
+     * mis-reported as changed), then a structural fallback. `similarity` is the
+     * fraction of normalized instructions the two bodies share (Dice over the
+     * instruction multiset), 0..1.
+     *
+     * Returns `{"ok":true,"aName":…,"bName":…,"aArch":…,"bArch":…,
+     * "identical":N,"changed":[{nameA,addrA,nameB,addrB,similarity}],
+     * "added":[{name,addr}],"removed":[{name,addr}],"counts":{…},"notes":[…]}`.
+     * The three lists are capped for the UI; `counts` carries the honest totals
+     * (`changed`/`added`/`removed` are the true counts, `*Shown` how many rows
+     * the arrays hold). Addresses are hex strings.
+     *
+     * BACKGROUND THREAD: it takes the engine mutex and analyses B in full.
+     */
+    external fun nativeDiff(pathA: String, pathB: String): String
     /**
      * Produce a source listing from the current analysis, the equivalent of
      * IDA's "produce file". Writes to [outPath] on the filesystem rather than
