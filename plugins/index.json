@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "updated": "2026-09-17T00:00:00Z",
+  "plugins": [
+    {
+      "id": "crypto-finder",
+      "name": "Crypto Finder",
+      "version": "1.0",
+      "author": "Nocturne",
+      "authorKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElQ/QhvplWWkWKsiefhAI19p1LEVMzSQTcfbq2I1cmwPVeXvTHKQhxYXvpC6GfyN6hz7u+cVQJLmGxZTIzLKXZw==",
+      "authorFingerprint": "b5bf9c80badd46f1",
+      "description": "Finds cipher and hash routines by symbol and constant-string evidence, then bookmarks each one.",
+      "path": "plugins/community/crypto-finder.nocturneplugin",
+      "sha256": "f7c0b9fca157a844619370b589b166dff59d9fa0fcc41cd6ce2810d0598b052e",
+      "signature": "MEUCIHP6Dyh6I7m/b7iQ+uQhOzsuIcEKLo+kfhOPZsGKgz2zAiEAsUbAhEewmETFeT8+qRVCGWxHCQrc8H+YcouaYlO+4wY=",
+      "submittedAt": "2026-09-17T00:00:00Z"
+    },
+    {
+      "id": "xref-hotspots",
+      "name": "Xref Hotspots",
+      "version": "1.0",
+      "author": "Nocturne",
+      "authorKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElQ/QhvplWWkWKsiefhAI19p1LEVMzSQTcfbq2I1cmwPVeXvTHKQhxYXvpC6GfyN6hz7u+cVQJLmGxZTIzLKXZw==",
+      "authorFingerprint": "b5bf9c80badd46f1",
+      "description": "Ranks functions by how often they are referenced and bookmarks the most-called ones.",
+      "path": "plugins/community/xref-hotspots.nocturneplugin",
+      "sha256": "2ee718922e2aec1f0cf05a3b72616988c08b40c7d2609ba7decc9edfda087187",
+      "signature": "MEUCIGMQNasoeRj9kP/kMc/NCwkmmhzatwX4kq090m334tvXAiEAwL87DHAxOKp3xubSi9so2TC2y9irQiYcRO1sed8EtOc=",
+      "submittedAt": "2026-09-17T00:00:00Z"
+    }
+  ]
+}

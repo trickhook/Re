@@ -1,0 +1,50 @@
+name: Plugin submission
+description: Submit a NocturneScript plugin to the community Plugin Hub.
+title: "[plugin] "
+labels: ["plugin-submission"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The easiest way to submit is from the app: build your plugin in the
+        editor and tap **Publish** — it signs the plugin with your device key
+        and opens this issue prefilled for you.
+
+        Submitting by hand? Paste the exact submission JSON below. It must be one
+        JSON object with these three fields, and the `signature` must be your
+        device's ECDSA-P256-SHA256 signature over the canonical plugin bytes
+        (see `docs/PLUGIN-HUB.md`). CI verifies the signature and sha256 and, on
+        success, opens a pull request. CI does **not** run your script — it only
+        checks structure. The script runs only in the on-device sandbox.
+
+        Expected shape:
+
+        ```json
+        {
+          "plugin": {
+            "id": "my-plugin",
+            "name": "My Plugin",
+            "version": "1.0",
+            "author": "Your name",
+            "description": "One line about what it does.",
+            "script": "log(\"hello\")\n"
+          },
+          "authorKey": "<base64 SPKI DER of your P-256 public key>",
+          "signature": "<base64 DER ECDSA-SHA256 over the canonical plugin bytes>"
+        }
+        ```
+  - type: textarea
+    id: submission
+    attributes:
+      label: Submission JSON
+      description: Paste the single submission object here. It is stored in a ```json block that CI reads.
+      render: json
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        The device signature proves authorship and integrity. It is **not** a
+        GitHub credential and **not** a proof that the script is safe. An id is
+        owned by the first device key that publishes it; a later submission of
+        the same id must come from that same key with a higher version.

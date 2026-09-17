@@ -1,0 +1,151 @@
+# Community Plugin Hub — submission pipeline.
+#
+# A plugin author uses the app's "Publish" button, which opens a prefilled issue
+# labelled `plugin-submission` whose body carries ONE fenced ```json block:
+#     { "plugin": <the .nocturneplugin object>, "authorKey": "<b64 SPKI>", "signature": "<b64>" }
+# (A human can submit by hand with the issue form; see ISSUE_TEMPLATE/plugin-submission.yml.)
+#
+# This workflow validates the submission (schema, id/version regex, size caps,
+# structural NocturneScript sanity, sha256 + ECDSA-P256-SHA256 signature over the
+# canonical bytes, and the first-key-owns-the-id anti-hijack rule) and, on
+# success, writes plugins/community/<id>.nocturneplugin + updates
+# plugins/index.json on a per-issue branch and opens a PR for a maintainer to
+# merge. On failure it comments why and changes nothing. It NEVER runs the
+# submitted script — the real safety guard is the on-device sandbox.
+#
+# Why a PR and not a direct commit to main: the submitted script is arbitrary
+# third-party code. The signature proves authorship + integrity, not safety, so a
+# human merge gate on the live (main) registry is prudent and gives an auditable
+# diff. To switch to fully-automated direct commits, push to `main` instead of
+# opening a PR in the "publish" step below.
+#
+# REQUIRED REPO SETTINGS (Settings -> Actions -> General):
+#   * Workflow permissions = "Read and write permissions"
+#     (otherwise the GITHUB_TOKEN cannot push the branch / comment — 403).
+#   * "Allow GitHub Actions to create and approve pull requests" = enabled
+#     (otherwise `gh pr create` fails).
+# The `issues` trigger runs with the base-repo token even for issues opened by
+# outside contributors (unlike fork pull_request events), so third-party
+# submissions do get a writable token here.
+
+name: Plugin submission
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+# Only ever touch the token scopes we need.
+permissions:
+  contents: write        # push the per-submission branch
+  issues: write          # comment the result on the issue
+  pull-requests: write   # open / update the PR
+
+# One run per issue; a re-edit supersedes an in-flight run.
+concurrency:
+  group: plugin-submission-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  submit:
+    # Act only on issues that currently carry the label.
+    if: contains(github.event.issue.labels.*.name, 'plugin-submission')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch (main)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate submission
+        id: validate
+        env:
+          # Untrusted issue body passed via env ONLY — never inlined into a
+          # shell command (avoids script injection).
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_DIR: ${{ github.workspace }}
+        run: node .github/scripts/validate-submission.mjs
+
+      - name: Open / update the pull request
+        if: steps.validate.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PLUGIN_ID: ${{ steps.validate.outputs.id }}
+          PLUGIN_VERSION: ${{ steps.validate.outputs.version }}
+          IS_UPDATE: ${{ steps.validate.outputs.is_update }}
+          FINGERPRINT: ${{ steps.validate.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          BRANCH="plugin-submission/issue-${ISSUE_NUMBER}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Reset the per-issue branch to current main + this one change.
+          git switch -C "$BRANCH"
+          git add plugins/community plugins/index.json
+          if git diff --cached --quiet; then
+            echo "No registry change to publish (already up to date)."
+            echo "PR_URL=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          VERB=$([ "$IS_UPDATE" = "true" ] && echo "Update" || echo "Add")
+          git commit -m "${VERB} community plugin ${PLUGIN_ID} v${PLUGIN_VERSION} (#${ISSUE_NUMBER})"
+          # This branch is owned solely by this workflow (one per issue) and the
+          # concurrency group serializes runs, so a plain force-push is safe and
+          # is required to re-run cleanly on a fresh checkout that never fetched
+          # the branch (force-with-lease would refuse without a local lease ref).
+          git push --force origin "$BRANCH"
+          # Open the PR if one is not already open for this branch.
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)" ]; then
+            printf '%s\n\n%s\n\n%s\n' \
+              "Automated from issue #${ISSUE_NUMBER}. Author device fingerprint \`${FINGERPRINT}\`." \
+              "Signature and sha256 verified in CI over the canonical plugin bytes. The script is **not** executed in CI; it runs only in the on-device sandbox. Review the diff, then merge to publish to the live registry." \
+              "Closes #${ISSUE_NUMBER}" > /tmp/pr-body.md
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+              --title "${VERB} community plugin: ${PLUGIN_ID} v${PLUGIN_VERSION}" \
+              --body-file /tmp/pr-body.md
+          fi
+          PR_URL="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url' 2>/dev/null || true)"
+          echo "PR_URL=${PR_URL}" >> "$GITHUB_ENV"
+
+      - name: Comment success on the issue
+        if: steps.validate.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          MESSAGE: ${{ steps.validate.outputs.message }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Validation passed. ${MESSAGE}"
+            echo
+            if [ -n "${PR_URL:-}" ]; then
+              echo "A pull request is open for maintainer review: ${PR_URL}"
+              echo "Your plugin goes live once it is merged."
+            else
+              echo "No change was needed — the registry already has this exact entry."
+            fi
+          } > /tmp/comment.md
+          gh issue comment "$ISSUE_NUMBER" --body-file /tmp/comment.md
+
+      - name: Comment failure on the issue
+        if: steps.validate.outputs.ok != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          MESSAGE: ${{ steps.validate.outputs.message }}
+        run: |
+          set -euo pipefail
+          {
+            echo "This submission was **not** accepted:"
+            echo
+            echo "> ${MESSAGE:-The submission could not be read.}"
+            echo
+            echo "Fix the issue and edit this issue's body to re-run the check, or ask a maintainer to re-apply the \`plugin-submission\` label."
+          } > /tmp/comment.md
+          gh issue comment "$ISSUE_NUMBER" --body-file /tmp/comment.md
