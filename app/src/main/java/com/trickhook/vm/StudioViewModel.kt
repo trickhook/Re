@@ -33,6 +33,8 @@ import com.trickhook.model.DebugResult
 import com.trickhook.model.ExportProgress
 import com.trickhook.model.ExportResult
 import com.trickhook.model.FuncInfo
+import com.trickhook.model.FridaExport
+import com.trickhook.model.FridaTarget
 import com.trickhook.model.FunctionDetail
 import com.trickhook.model.IdaAnnotations
 import com.trickhook.model.IdaCommentRow
@@ -43,6 +45,8 @@ import com.trickhook.model.ManifestInfo
 import com.trickhook.model.PluginDef
 import com.trickhook.model.Section
 import com.trickhook.model.ApkAnalyzer
+import com.trickhook.model.FRIDA_EXPORTS_CAP
+import com.trickhook.model.fridaScript
 import com.trickhook.model.idaIdcScript
 import com.trickhook.model.idaPythonScript
 import com.trickhook.model.parseCallGraph
@@ -1388,6 +1392,8 @@ class StudioViewModel : ViewModel() {
             "asm-all" -> "$stem.asm"
             "ida-py" -> "$stem-nocturne.py"
             "ida-idc" -> "$stem-nocturne.idc"
+            "frida-one" -> (detail?.name?.takeIf { it.isNotBlank() } ?: "function") + "-hook.js"
+            "frida-exports" -> "$stem-hooks.js"
             else -> "$stem.c"
         }
     }
@@ -1398,6 +1404,7 @@ class StudioViewModel : ViewModel() {
         // No registered type for IDC, and text/plain is what makes a picker
         // offer every folder rather than none.
         "ida-idc" -> "text/plain"
+        "frida-one", "frida-exports" -> "application/javascript"
         else -> "text/x-c"
     }
 
@@ -1422,6 +1429,22 @@ class StudioViewModel : ViewModel() {
                 return
             }
             exportIdaScript(context, uri, kind, model)
+            return
+        }
+        // The Frida kinds are written here too: they carry addresses and symbol
+        // names the engine already found, turned into a hook script rather than
+        // a decompiled listing. Same picker, same busy flag, same phase line.
+        if (kind == "frida-one" || kind == "frida-exports") {
+            val model = fridaExportModel(kind)
+            if (model == null || model.total == 0) {
+                log(
+                    "WARN",
+                    if (kind == "frida-one") "Open a function first — nothing to hook"
+                    else "This binary exports nothing to hook"
+                )
+                return
+            }
+            exportFridaScript(context, uri, kind, model)
             return
         }
         exportBusy = true
@@ -1578,6 +1601,148 @@ class StudioViewModel : ViewModel() {
                     "Exported " + (if (idc) "IDC" else "IDAPython") + " script · " +
                         "${model.names.size} names · ${model.comments.size} comments · " +
                         "${model.marks.size} bookmarks · ${humanBytes(bytes.size.toLong())}"
+                )
+            } catch (e: Exception) {
+                log("ERROR", "export failed: ${e.message}")
+            } finally {
+                exportBusy = false
+                withContext(Dispatchers.Main) {
+                    decompilePhase = ""
+                    decompileTargetName = ""
+                    decompileStartMs = 0L
+                    globalPhase = ""
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------- Frida bridge --
+    // Static analysis on the phone, dynamic instrumentation on the device. What
+    // crosses is a text JavaScript the user runs in their own Frida: it hooks the
+    // function(s) picked here to trace arguments and return, and can patch a
+    // return at runtime. Frida itself is nowhere near this app.
+
+    /**
+     * How many argument slots the generated trace logs by default. Frida cannot
+     * know a function's arity, and neither can the engine's FunctionDetail, so a
+     * fixed sensible number is offered and the script exposes ARG_COUNT to edit.
+     */
+    private val fridaDefaultArgs = 4
+
+    /**
+     * The functions to hook, ready for the generator. Built on the caller's
+     * thread because [detail], [meta] and [manifest] are Compose state the UI
+     * thread owns; [fridaScript] itself is pure and runs on IO.
+     *
+     * The addresses are the engine's own: for an ELF they are image-space
+     * virtual addresses based at [AnalysisMeta.base], which is exactly what the
+     * generator turns into a runtime module-base offset. An exported function is
+     * hooked by its dynamic-symbol name, so a target that matches an export
+     * carries that raw name rather than the demangled display name.
+     */
+    private fun fridaExportModel(kind: String): FridaExport? {
+        val m = meta ?: return null
+        val fileName = m.name.substringAfterLast('/')
+        val moduleName = m.soName.takeIf { it.isNotBlank() } ?: fileName
+        // ELF and PE addresses are virtual; DEX/Mach-O/raw are file offsets, and
+        // the generator warns loudly for those — same split as the IDA export.
+        val virtual = m.format == "ELF" || m.format == "PE"
+        val pkg = manifest?.takeIf { it.ok && it.packageName.isNotBlank() }?.packageName
+        val exportsByAddr = m.exports.associateBy { it.addr }
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+            .format(java.util.Date())
+
+        val targets: List<FridaTarget>
+        val exportsTotal: Int
+        when (kind) {
+            "frida-one" -> {
+                val d = detail
+                val addr = d?.addr ?: selectedFunc ?: return null
+                val exp = exportsByAddr[addr]
+                val friendly = d?.name?.takeIf { it.isNotBlank() }
+                    ?: functionAt(addr)?.name?.takeIf { it.isNotBlank() }
+                // For an export, hook by the raw symbol name; otherwise label with
+                // the friendly name and hook by offset. A stripped, non-exported
+                // function falls back to a sub_ADDR label.
+                val hookName = exp?.name
+                    ?: friendly
+                    ?: ("sub_" + java.lang.Long.toHexString(addr))
+                targets = listOf(
+                    FridaTarget(
+                        addr = addr,
+                        name = hookName,
+                        engineName = friendly,
+                        exported = exp != null,
+                        size = d?.size ?: functionAt(addr)?.size ?: 0L
+                    )
+                )
+                exportsTotal = 0
+            }
+            "frida-exports" -> {
+                val all = m.exports.sortedBy { it.addr xor Long.MIN_VALUE }
+                if (all.isEmpty()) return null
+                // Bounded on purpose: hooking thousands of exports floods the log
+                // and slows the target. The header says how many were dropped.
+                targets = all.take(FRIDA_EXPORTS_CAP).map {
+                    FridaTarget(
+                        addr = it.addr,
+                        name = it.name,
+                        engineName = functionAt(it.addr)?.name?.takeIf { n -> n.isNotBlank() && n != it.name },
+                        exported = true,
+                        size = functionAt(it.addr)?.size ?: 0L
+                    )
+                }
+                exportsTotal = all.size
+            }
+            else -> return null
+        }
+
+        return FridaExport(
+            binaryName = fileName,
+            moduleName = moduleName,
+            format = m.format,
+            arch = m.arch,
+            base = m.base,
+            fileOffsets = !virtual,
+            packageName = pkg,
+            argCount = fridaDefaultArgs,
+            targets = targets,
+            mode = if (kind == "frida-exports") "exports" else "one",
+            exportsTotal = exportsTotal,
+            scriptName = suggestedExportName(kind),
+            stamp = stamp
+        )
+    }
+
+    private fun exportFridaScript(context: Context, uri: Uri, kind: String, model: FridaExport) {
+        exportBusy = true
+        decompilePhase = "Writing Frida script"
+        globalPhase = "Exporting"
+        decompileTargetName = model.moduleName
+        decompileStartMs = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val text = fridaScript(model)
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                var written = false
+                context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                    out.write(bytes)
+                    out.flush()
+                    written = true
+                }
+                if (!written) {
+                    log("ERROR", "Could not open the chosen file for writing")
+                    return@launch
+                }
+                val what = if (model.mode == "exports") {
+                    "${model.targets.size} export hooks" +
+                        (if (model.exportsTotal > model.targets.size) " (of ${model.exportsTotal}, capped)" else "")
+                } else {
+                    "trace" + (if (model.targets.firstOrNull()?.exported == true) " (export hook)" else "")
+                }
+                log(
+                    "OK",
+                    "Exported Frida script · $what · ${humanBytes(bytes.size.toLong())}"
                 )
             } catch (e: Exception) {
                 log("ERROR", "export failed: ${e.message}")

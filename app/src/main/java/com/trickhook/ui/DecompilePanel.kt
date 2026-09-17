@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.CompareArrows
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Subject
 import androidx.compose.material.icons.filled.Terminal
@@ -814,6 +816,7 @@ private fun ExportBar(vm: StudioViewModel) {
 
 private const val SRC_GROUP = "Decompiled output"
 private const val IDA_GROUP = "Take it to IDA Pro"
+private const val FRIDA_GROUP = "Hook it with Frida"
 
 /**
  * The heading over one group of export kinds. Two groups sit in this sheet and
@@ -835,10 +838,11 @@ private fun ExportGroupLabel(group: String) {
             fontWeight = FontWeight.Medium, letterSpacing = Type.upperTracking
         )
         Text(
-            if (group == SRC_GROUP)
-                "reconstructed from machine code — it will not recompile as-is"
-            else
-                "runs in your own IDA and applies what you named here",
+            when (group) {
+                SRC_GROUP -> "reconstructed from machine code — it will not recompile as-is"
+                IDA_GROUP -> "runs in your own IDA and applies what you named here"
+                else -> "a Frida script to trace, dump and (optionally) patch on a live device"
+            },
             color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
         )
     }
@@ -870,6 +874,8 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
     // library promised 12,000 and delivered 98,022.
     val m = vm.meta
     val exportFns = maxOf(m?.functionsTotal ?: 0, m?.functions?.size ?: 0)
+    // Exported symbols are what the "hook the exports" Frida script targets.
+    val exportCount = m?.exports?.size ?: 0
     val kinds = listOf(
         ExportKind("c-all", Icons.Filled.Code, "Whole binary",
             "$exportFns functions decompiled to pseudo-C" +
@@ -884,7 +890,16 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
         ExportKind("ida-py", Icons.Filled.Terminal, "IDAPython script",
             authoredLine, IDA_GROUP),
         ExportKind("ida-idc", Icons.Filled.DesktopWindows, "IDC script",
-            if (authored == 0) authoredLine else "the same, for any IDA back to 7.0", IDA_GROUP)
+            if (authored == 0) authoredLine else "the same, for any IDA back to 7.0", IDA_GROUP),
+        ExportKind("frida-one", Icons.Filled.BugReport, "Hook this function",
+            vm.detail?.name?.ifBlank { "the selected function" } ?: "no function selected",
+            FRIDA_GROUP),
+        ExportKind("frida-exports", Icons.Filled.Hub, "Hook the exports",
+            if (exportCount == 0) "no exported symbols"
+            else "$exportCount exported symbol" + (if (exportCount == 1) "" else "s") +
+                (if (exportCount > com.trickhook.model.FRIDA_EXPORTS_CAP)
+                    " · capped at ${com.trickhook.model.FRIDA_EXPORTS_CAP}" else ""),
+            FRIDA_GROUP)
     )
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -931,8 +946,9 @@ fun ExportSheet(vm: StudioViewModel, onPick: (String) -> Unit, onDismiss: () -> 
                 // file picker has already created an empty document — so the
                 // gate belongs here, where the picker has not been opened yet.
                 val enabled = !vm.exportBusy && when (k.id) {
-                    "c-one" -> vm.detail != null
+                    "c-one", "frida-one" -> vm.detail != null
                     "ida-py", "ida-idc" -> authored > 0
+                    "frida-exports" -> exportCount > 0
                     else -> true
                 }
                 Row(

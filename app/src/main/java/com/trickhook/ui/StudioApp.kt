@@ -730,6 +730,9 @@ fun StudioApp(vm: StudioViewModel) {
     val savePython = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/x-python")
     ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
+    val saveFrida = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/javascript")
+    ) { uri -> if (uri != null) vm.exportSource(ctx, uri, exportKind) }
 
     if (showExportSheet && vm.meta != null) {
         ExportSheet(
@@ -741,6 +744,7 @@ fun StudioApp(vm: StudioViewModel) {
                 when (vm.mimeForExport(k)) {
                     "text/plain" -> saveText.launch(name)
                     "text/x-python" -> savePython.launch(name)
+                    "application/javascript" -> saveFrida.launch(name)
                     else -> saveSource.launch(name)
                 }
             },
