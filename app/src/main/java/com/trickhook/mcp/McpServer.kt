@@ -38,9 +38,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * specification names as the correct reply from a server that does not offer
  * one.
  *
- * SECURITY. This binds a real network interface by default (see [McpRuntime]
- * for why that changes everything), so the controls here are the only thing
- * between an attacker on the same Wi-Fi and the analysis engine:
+ * SECURITY. This can be asked to bind a real network interface — [McpRuntime]
+ * defaults to loopback but [McpRuntime.MODE_LAN] is one tap away, and in that
+ * mode the controls here are the only thing between an attacker on the same
+ * Wi-Fi and the analysis engine. So none of them is conditional on the mode:
  *
  *  - one bound address, never 0.0.0.0, chosen by [McpNetwork]
  *  - a 256-bit bearer token on every single request, compared in constant time

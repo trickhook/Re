@@ -16,9 +16,12 @@ a string assembled at runtime that is nowhere in the file. On the obfuscated
 sample this project is tested against it recovers eleven such strings,
 including an MD5 of the empty string that identifies its own function.
 
-An MCP server, so an assistant can drive the engine over your network with no
+An MCP server, so an assistant on your computer can drive the engine with no
 cable: fourteen tools, read-only by default, a 256-bit token, and a QR to
-pair. Not an AI feature in the app — there is no model client in here.
+pair. By default the port is bound to 127.0.0.1 and is on no network at all —
+Android 11's wireless debugging carries your computer to it over Wi-Fi, and
+the sheet walks you through the pairing with the ports filled in. Not an AI
+feature in the app — there is no model client in here.
 
 IDA Pro interoperability. Renames, comments and bookmarks export as an
 IDAPython or IDC script that measures the right rebase instead of guessing,
@@ -38,6 +41,7 @@ had never once run on a device, because an escaped dollar sign made the
 SLEIGH specifications fail to install, silently, since the day it landed.
 
 Known: the debugger needs a rooted or debuggable device. An emulator result
-marked approximate is plausible, not certain. MCP traffic is unencrypted on
-your network — use the loopback mode and adb forward if that matters.
+marked approximate is plausible, not certain. MCP traffic is plain HTTP, so
+the mode that puts the port on your Wi-Fi puts all of it there in the clear —
+the default mode does not, and adb's own connection carries it encrypted.
 

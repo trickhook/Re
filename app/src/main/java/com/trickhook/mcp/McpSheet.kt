@@ -35,7 +35,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -78,6 +82,14 @@ private val time = SimpleDateFormat("HH:mm:ss", Locale.US)
 
 /** Log rows the sheet draws inline before it stops and says how many more. */
 private const val LOG_ROWS_SHOWN = 40
+
+/**
+ * "The mDNS scan has not answered yet", as a value [McpWireless.connectPort]
+ * can never return. It reports its own two outcomes as numbers already
+ * ([McpWireless.PORT_NONE], [McpWireless.PORT_UNSUPPORTED]), and a nullable Int
+ * on top of that would make every read of it a two-step question.
+ */
+private const val SCANNING = -2
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -130,7 +142,7 @@ fun McpSheet(vm: StudioViewModel, requestNotifications: () -> Unit, onDismiss: (
 
             Box(Modifier.fillMaxWidth().animateContentSize(tween(motionMs()))) {
                 Column {
-                    if (!running) StoppedBody() else RunningBody(copy)
+                    if (!running) StoppedBody(copy) else RunningBody(copy)
                 }
             }
 
@@ -237,7 +249,7 @@ private fun RunRow(vm: StudioViewModel, requestNotifications: () -> Unit) {
 // ----------------------------------------------------------------- stopped --
 
 @Composable
-private fun StoppedBody() {
+private fun StoppedBody(copy: (String, String) -> Unit) {
     val ide = LocalIde.current
     Column {
         if (McpRuntime.failure.isNotEmpty()) {
@@ -245,19 +257,27 @@ private fun StoppedBody() {
         } else if (McpRuntime.stopReason.isNotEmpty()) {
             Notice(McpRuntime.stopReason, ide.amber)
         }
-        SectionTitle("Reachable from")
+        SectionTitle("Who can reach the port")
+        // Loopback first and recommended, because since Android 11 its one
+        // real cost — a USB cable — is optional. The titles say what happens
+        // rather than which address gets bound: "loopback" and "LAN" are the
+        // implementation, and nobody picks a security posture by interface name.
         ModeRow(
-            McpRuntime.MODE_LAN, "This network",
-            "Binds one interface — the Wi-Fi address this phone already has. Any device " +
-                "on the same network can reach the port, so the token is the only thing " +
-                "protecting it."
+            McpRuntime.MODE_LOOPBACK, "Nobody — recommended",
+            "The port is never on the network. It binds 127.0.0.1, so no other device " +
+                "can reach it at all, and your computer gets in through adb: a cable, or " +
+                "a one-time pairing over Wi-Fi. Set either up below."
         )
         ModeRow(
-            McpRuntime.MODE_LOOPBACK, "This device only (adb forward)",
-            "Binds 127.0.0.1. Nothing off the phone can reach it; a desktop gets in " +
-                "through a USB cable with adb forward. Slower to set up, and the right " +
-                "answer for a sample you care about or a network you do not trust."
+            McpRuntime.MODE_LAN, "Anyone on this Wi-Fi",
+            "The port binds the address this phone already has, and nothing needs setting " +
+                "up — but every device on the network can open it, the token is the only " +
+                "thing stopping them, and the traffic is not encrypted."
         )
+        if (McpRuntime.bindMode == McpRuntime.MODE_LOOPBACK) {
+            HorizontalDivider(color = ide.border)
+            ReachIn(copy)
+        }
         HorizontalDivider(color = ide.border)
         WriteRow()
     }
@@ -357,11 +377,10 @@ private fun RunningBody(copy: (String, String) -> Unit) {
 
         if (loopback) {
             Notice(
-                "Loopback only. Nothing off this device can reach the port. Run this on the " +
-                    "computer first, over USB:",
+                "Bound to 127.0.0.1. Nothing off this device can reach the port — not on " +
+                    "this Wi-Fi, not anywhere. Your computer gets in through adb.",
                 ide.dim2
             )
-            CodeBlock(McpRuntime.adbForward, "The adb command", copy)
         } else if (!McpRuntime.privateNetwork) {
             Notice(
                 "This address is a public one, not a private network address. The port may be " +
@@ -378,6 +397,8 @@ private fun RunningBody(copy: (String, String) -> Unit) {
                 ide.amber
             )
         }
+
+        if (loopback) ReachIn(copy)
 
         SectionTitle("Pair a client")
         PairingBlock(copy)
@@ -475,6 +496,215 @@ private fun PairingBlock(copy: (String, String) -> Unit) {
         }
     }
     CodeBlock(pairing, "The address and token", copy)
+}
+
+// ------------------------------------------------------------- reaching in --
+
+/**
+ * How a computer reaches a port that is bound to 127.0.0.1: the `adb forward`
+ * line, and — since Android 11 — the pairing that attaches adb over Wi-Fi with
+ * no cable at all.
+ *
+ * [McpWireless] holds the mechanism, including why only one of the two ports in
+ * this flow can usefully be filled in and why AP client isolation is not
+ * something this page can talk anyone out of.
+ */
+@Composable
+private fun ReachIn(copy: (String, String) -> Unit) {
+    val ide = LocalIde.current
+    val ctx = LocalContext.current
+
+    // Walking the interfaces is a syscall walk, so it happens off the
+    // composition thread. Null means still looking; "" means no network.
+    val lan by produceState<String?>(initialValue = null) {
+        value = withContext(Dispatchers.Default) { McpNetwork.preferred()?.host ?: "" }
+    }
+    // Bumped by the status row to run the scan again — the connect port changes
+    // every time wireless debugging is switched off and on.
+    var attempt by remember { mutableIntStateOf(0) }
+    val debugging by produceState<Boolean?>(initialValue = null, attempt) {
+        value = withContext(Dispatchers.IO) { McpWireless.wirelessDebuggingOn(ctx) }
+    }
+    // [SCANNING] for as long as the scan is running, then whatever it found.
+    // Reset first so a repeat scan shows itself working rather than sitting on
+    // a stale number.
+    val scanned by produceState(initialValue = SCANNING, attempt) {
+        value = SCANNING
+        value = McpWireless.connectPort(ctx)
+    }
+    var noScreen by remember { mutableStateOf(false) }
+
+    val address = lan
+    val port = scanned
+    val on = debugging
+    val host = address.orEmpty().ifEmpty { "<phone-ip>" }
+
+    SectionTitle("Getting your computer in")
+    Column(Modifier.padding(horizontal = Space.xl)) {
+        Text(
+            "adb forward carries port " + McpRuntime.PORT + " on your computer through to " +
+                "this one. Over a USB cable that is the last command below, on its own. " +
+                "Over Wi-Fi it is a one-time pairing first — after which adb behaves " +
+                "exactly as it does on a cable, and this port still is not on the network.",
+            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+        )
+    }
+
+    if (address != null && address.isEmpty()) {
+        Notice(
+            "This phone is not on a network right now, so there is no address to put in " +
+                "these commands. Join the Wi-Fi your computer is on, or use the cable.",
+            ide.amber
+        )
+    }
+
+    if (!McpWireless.supported) {
+        Notice(
+            "Wireless debugging arrived in Android 11 and this phone is older than that, " +
+                "so the cable is the way in here: plug it in, turn USB debugging on, run " +
+                "this.",
+            ide.dim2
+        )
+        CodeBlock(McpRuntime.adbForward, "The adb forward command", copy)
+        return
+    }
+
+    Spacer(Modifier.height(Space.s))
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button) { attempt += 1 }
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = Space.xl, vertical = Space.m),
+        horizontalArrangement = Arrangement.spacedBy(Space.m),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        StatChip(
+            "wireless debugging",
+            when (on) {
+                true -> "on"
+                false -> "off"
+                else -> "unknown"
+            },
+            if (on == true) ide.entry else ide.dim2
+        )
+        StatChip(
+            "connect port",
+            when {
+                port == SCANNING -> "looking"
+                port > 0 -> port.toString()
+                else -> "not found"
+            },
+            if (port > 0) ide.cyan else ide.dim2
+        )
+        // Tapping anywhere in the row scans again; the accent chip is what says
+        // so, and it is last because the two it follows are the answer.
+        StatChip("rescan", ide.accent)
+    }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button) {
+                noScreen = !McpWireless.openWirelessDebugging(ctx)
+            }
+            .sizeIn(minHeight = Touch)
+            .padding(horizontal = Space.xl, vertical = Space.m),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Open wireless debugging",
+                color = ide.accent, fontSize = Type.body, lineHeight = Type.bodyLine
+            )
+            Text(
+                if (noScreen) {
+                    "Nothing on this device answered. Settings > System > Developer " +
+                        "options > Wireless debugging, by hand."
+                } else {
+                    "Settings > System > Developer options > Wireless debugging. Turn it " +
+                        "on there, then use Pair device with pairing code."
+                },
+                color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+            )
+        }
+    }
+
+    Step(
+        "1",
+        "Tap Pair device with pairing code. Run this with the port THAT dialog shows — it " +
+            "is a different port from the one on the screen behind it — and type the " +
+            "six-digit code when adb asks. Leave the dialog up until it says paired: " +
+            "closing it ends the pairing server, and the port with it.",
+        pairCommand(host), "The adb pair command", copy
+    )
+    Step(
+        "2",
+        if (port > 0) {
+            "Paired once, connected every session. This port came from the phone itself, " +
+                "and it changes every time wireless debugging is switched off and on."
+        } else {
+            "Paired once, connected every session. Nocturne could not see the port this " +
+                "time — the Wireless debugging screen shows it under the device name."
+        },
+        connectCommand(host, port), "The adb connect command", copy
+    )
+    Step(
+        "3",
+        "The forward itself, and the only one of the three you run again: it is gone when " +
+            "adb restarts, when the phone reboots and when the connection drops. If a cable " +
+            "is plugged in as well, adb will ask which device you mean — put the address " +
+            "from step 2 after adb -s.",
+        McpRuntime.adbForward, "The adb forward command", copy
+    )
+
+    Column(Modifier.padding(horizontal = Space.xl)) {
+        Text(
+            "What crosses the Wi-Fi is adb's own connection: TLS, and openable only by a " +
+                "computer that has paired. This server's port stays on 127.0.0.1 the whole " +
+                "time. One thing this does not get past is client isolation on the router " +
+                "— that blocks computer-to-phone traffic whichever port it is aimed at, and " +
+                "the answers there are the cable or this phone's own hotspot.",
+            color = ide.dim2, fontSize = Type.caption, lineHeight = Type.captionLine
+        )
+    }
+}
+
+@Composable
+private fun Step(
+    number: String,
+    detail: String,
+    code: String,
+    what: String,
+    copy: (String, String) -> Unit
+) {
+    val ide = LocalIde.current
+    // The gap belongs to the step, not between the steps: CodeBlock's own
+    // vertical padding is Space.s, and four device-independent pixels between
+    // one command and the next instruction reads as one block of text.
+    Spacer(Modifier.height(Space.m))
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Space.xl),
+        verticalAlignment = Alignment.Top
+    ) {
+        // The number takes the CAPTION line height rather than its own mono
+        // one: it has to sit on the same baseline as the sentence beside it,
+        // and the two rungs are close enough that matching the neighbour is
+        // what the eye reads, not matching the family.
+        Text(
+            number, color = ide.accent, fontFamily = Mono,
+            fontSize = Type.monoSmall, lineHeight = Type.captionLine,
+            modifier = Modifier.width(Space.xl)
+        )
+        Text(
+            detail, color = ide.dim2,
+            fontSize = Type.caption, lineHeight = Type.captionLine,
+            modifier = Modifier.weight(1f)
+        )
+    }
+    CodeBlock(code, what, copy)
 }
 
 // ------------------------------------------------------------------ pieces --
@@ -610,6 +840,20 @@ private fun CallLogList() {
  * dollar is the documented escape for a literal dollar sign.
  */
 private const val AUTH_VAR = "\${AUTH}"
+
+/**
+ * `adb pair IP:PORT`, with the port left as a placeholder on purpose.
+ *
+ * That port belongs to the Settings app's pairing dialog, exists only while the
+ * dialog is on screen, and is printed there next to the six-digit code the user
+ * has to read anyway. Anything this app captured would be dead by the time the
+ * sheet was back in front of them — see [McpWireless].
+ */
+private fun pairCommand(host: String): String = "adb pair $host:<pairing-port>"
+
+/** `adb connect IP:PORT`, with the port filled in when the mDNS scan found it. */
+private fun connectCommand(host: String, port: Int): String =
+    "adb connect " + host + ":" + (if (port > 0) port.toString() else "<port>")
 
 private fun claudeCodeCommand(): String =
     "claude mcp add --transport http nocturne " + McpRuntime.url +

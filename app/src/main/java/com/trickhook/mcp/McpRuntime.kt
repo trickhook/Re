@@ -31,20 +31,26 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * THE THREAT MODEL, because everything below follows from it.
  *
- * This listener binds a real network address by default, so that a desktop can
- * reach it over Wi-Fi with no cable and no platform-tools. That is a different
- * world from a loopback port. On loopback an attacker needed code already
- * running on the device, and the token was a second lock behind that. On a
- * network the token is the ONLY lock, and anyone on the same Wi-Fi can reach
- * the port and start guessing.
+ * The default is [MODE_LOOPBACK]: 127.0.0.1, nothing off the device can reach
+ * the port, and a computer gets in through `adb forward`. That used to cost a
+ * USB cable, which is why it was not the default; Android 11's Wireless
+ * debugging removed the cable, so it is (see [McpWireless]).
+ *
+ * [MODE_LAN] remains, because it needs nothing set up at all, and it is a
+ * different world. On loopback an attacker needed code already running on the
+ * device, and the token was a second lock behind that. On a network the token
+ * is the ONLY lock, and anyone on the same Wi-Fi can reach the port and start
+ * guessing.
  *
  * So: the token is 256 bits from [SecureRandom], minted per start, compared in
- * constant time, never written to disk. Bad tokens are answered slowly, counted
- * and — past [BAD_TOKEN_LIMIT] — the listener shuts itself down, because a
- * sustained run of them means the network is hostile and there is nothing else
- * between an attacker and this port. The traffic itself is plaintext HTTP; see
- * docs/MCP.md for exactly what that means and when to use [MODE_LOOPBACK]
- * instead.
+ * constant time, never written to disk — in both modes, because a mode is a
+ * choice a person can change and the lock should not be. Bad tokens are
+ * answered slowly, counted and — past [BAD_TOKEN_LIMIT] — the listener shuts
+ * itself down, because a sustained run of them means the network is hostile and
+ * there is nothing else between an attacker and this port. The traffic itself
+ * is plaintext HTTP; see docs/MCP.md for exactly what that means, and note that
+ * over [MODE_LOOPBACK] it never leaves the device — what crosses the Wi-Fi is
+ * adb's own TLS connection.
  *
  * ---------------------------------------------------------------------------
  *
@@ -131,8 +137,15 @@ object McpRuntime {
      */
     var token by mutableStateOf(""); private set
 
-    /** [MODE_LAN] or [MODE_LOOPBACK]. Settable only while stopped. */
-    var bindMode by mutableStateOf(MODE_LAN); private set
+    /**
+     * [MODE_LAN] or [MODE_LOOPBACK]. Settable only while stopped.
+     *
+     * Loopback by default. It is the mode that puts nothing on the network, and
+     * since Android 11 the setup it costs is a pairing rather than a cable, so
+     * the safe answer is no longer the inconvenient one. A person who wants the
+     * other trade still gets it in one tap, having read what it means.
+     */
+    var bindMode by mutableStateOf(MODE_LOOPBACK); private set
 
     /** The address actually bound, once running. */
     var host by mutableStateOf(""); private set

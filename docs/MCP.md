@@ -13,12 +13,22 @@ the tools listed at the bottom of this page.
 
 ---
 
-## Read this before you turn it on
+## The two modes, and why the default is the quiet one
 
-By default the server binds **one real network interface** — the Wi-Fi address
-the phone already has — so a laptop on the same network can reach it with no
-cable and no platform-tools. That is convenient, and it is a genuinely different
-security position from a loopback port:
+The sheet asks one question: **who can reach the port**.
+
+**Nobody** is the default. The listener binds `127.0.0.1`, so the port is not on
+the network at all — not on your Wi-Fi, not anywhere — and your computer reaches
+it through `adb forward`. That used to mean a USB cable, which is why it was not
+the default. Since Android 11 it does not: *Wireless debugging* attaches adb
+over Wi-Fi after a one-time pairing, and `adb forward` then works exactly as it
+does on a cable. See **Getting your computer in** below; it is three commands,
+once.
+
+**Anyone on this Wi-Fi** is the other answer, and it is there because it needs
+nothing set up at all. It binds **one real network interface** — the Wi-Fi
+address the phone already has — so a laptop on the same network can reach it
+with no platform-tools. That is a genuinely different security position:
 
 * Anyone on the same network can reach the port.
 * **The bearer token is the only thing stopping them.** It is 256 random bits,
@@ -33,9 +43,9 @@ security position from a loopback port:
   self-signed certificate — see *Why not HTTPS* below.
 
 **On a network you do not control — a café, a hotel, an office guest VLAN, a
-conference — use the loopback mode instead.** It binds `127.0.0.1`, nothing off
-the phone can reach it, and a USB cable plus `adb forward` gets your desktop in.
-It is two extra commands and it removes the entire network exposure.
+conference — do not use it.** Nothing on the phone can make a plaintext port on
+a hostile network safe, and the mode that puts nothing on the network costs one
+pairing.
 
 What is on your side either way:
 
@@ -62,7 +72,8 @@ the one who knows whether that network is yours.
 1. Open the binary you want to work on, on the phone. The server only ever
    exposes what is already open; it cannot open a file for you.
 2. Overflow menu (or the command palette, Ctrl+K) → **MCP server**.
-3. Choose **This network** or **This device only**, and decide whether to allow
+3. Choose who can reach the port — **Nobody** (the default; the port stays on
+   `127.0.0.1`) or **Anyone on this Wi-Fi** — and decide whether to allow
    writes. Both are fixed for the life of the session — a client caches the tool
    list, so they cannot move underneath it.
 4. Turn **Run the server** on. Allow the notification when asked; refusing it
@@ -77,13 +88,95 @@ your client needs, nothing more.
 
 ---
 
+## Getting your computer in
+
+In the default mode the port is on `127.0.0.1`, so something has to carry port
+8765 on your computer through to port 8765 on the phone. That something is
+`adb forward` — and since Android 11 it does not need a cable.
+
+`adb forward` is a **host-side** command. The adb server on your computer opens
+a local listening socket and proxies each accepted connection over whichever
+transport that device is attached on; `adbd` opens the matching connection on
+the device. Nothing in it is USB-specific. Attach the device over Wi-Fi and the
+forward behaves exactly as it does on a cable.
+
+### Over Wi-Fi, with no cable
+
+On the phone: **Settings > System > Developer options > Wireless debugging**,
+on. The MCP sheet has an **Open wireless debugging** row that goes straight
+there.
+
+Then, on your computer, three commands — the sheet has each of them with the
+real numbers filled in and a copy button:
+
+```
+adb pair 192.168.1.42:41234       # the PAIRING dialog's port, then its code
+adb connect 192.168.1.42:37129    # the Wireless debugging screen's port
+adb forward tcp:8765 tcp:8765
+```
+
+**The two ports are different and neither is fixed.** This is the thing people
+get wrong, and it is worth being precise about:
+
+* The **pairing** port belongs to the *Pair device with pairing code* dialog,
+  not to `adbd`. It appears when you open that dialog, beside a six-digit code,
+  and both die when you close it. Run `adb pair` while the dialog is still on
+  screen, and type the code when adb asks.
+* The **connect** port belongs to `adbd`, is printed on the Wireless debugging
+  screen under this device's name, and lasts as long as wireless debugging is
+  on. It changes whenever wireless debugging is switched off and on, and across
+  reboots. **The sheet finds this one for you**: `adbd` advertises an
+  `_adb-tls-connect._tcp` service on the device, and reading it needs no
+  permission, no root and no Shizuku.
+
+Nocturne deliberately does *not* try to show the pairing port. It exists only
+while a dialog that covers this app is on screen, so any number captured would
+already be dead by the time you were looking at it — and the dialog prints it
+next to the code you have to read from there anyway.
+
+Pairing is once per computer. `adb connect` is once per session, or after a
+reboot or a change of network. `adb forward` is the one you re-run most: it is
+gone when adb restarts, when the phone reboots and when the connection drops.
+`adb forward --list` says whether it is there.
+
+### What that buys
+
+Against **Anyone on this Wi-Fi**, this is better on every axis but one.
+
+* The MCP port is never bound to a network address at all. Nothing but this
+  device can open it, whatever else is on the Wi-Fi and whoever else is on it.
+* What crosses the network is adb's own connection, and that is **TLS**. The
+  six-digit code is a SPAKE2 password: it authenticates the pairing and is never
+  itself sent over the wire, and what it establishes is a mutually-authenticated
+  channel only a computer you have paired can open. The traffic that is plain
+  HTTP in the other mode is encrypted here.
+* Everything else is unchanged: the 256-bit token, the constant-time compare,
+  the backoff, the twenty-failure shutdown, the read-only default.
+
+The one axis it loses on: you need `adb` on your computer — Android
+platform-tools — and the other mode needs nothing at all.
+
+### Over a cable instead
+
+With a USB cable and USB debugging on, skip the first two commands:
+
+```
+adb forward tcp:8765 tcp:8765
+```
+
+If a cable and a wireless connection are both attached, adb will ask which
+device you mean. Name it — `adb -s 192.168.1.42:37129 forward tcp:8765 tcp:8765`
+— or `adb -d` for the USB one.
+
+---
+
 ## Claude Code
 
 Claude Code speaks Streamable HTTP natively. One command, with the address and
 token from the sheet:
 
 ```
-claude mcp add --transport http nocturne http://192.168.1.42:8765/mcp \
+claude mcp add --transport http nocturne http://127.0.0.1:8765/mcp \
   --header "Authorization: Bearer PASTE_THE_TOKEN_HERE"
 ```
 
@@ -94,12 +187,16 @@ Or, as a block in `.mcp.json` (project scope) or `~/.claude.json` (user scope):
   "mcpServers": {
     "nocturne": {
       "type": "http",
-      "url": "http://192.168.1.42:8765/mcp",
+      "url": "http://127.0.0.1:8765/mcp",
       "headers": { "Authorization": "Bearer PASTE_THE_TOKEN_HERE" }
     }
   }
 }
 ```
+
+The host is `127.0.0.1` because `adb forward` put the port on your own machine.
+In **Anyone on this Wi-Fi** mode, substitute the phone's address instead —
+`http://192.168.1.42:8765/mcp`. The sheet always prints the right one.
 
 Check it with `/mcp` inside Claude Code, or `claude mcp list` outside it.
 
@@ -123,7 +220,7 @@ In `claude_desktop_config.json` (Settings → Developer → Edit Config):
     "nocturne": {
       "command": "npx",
       "args": [
-        "-y", "mcp-remote", "http://192.168.1.42:8765/mcp",
+        "-y", "mcp-remote", "http://127.0.0.1:8765/mcp",
         "--allow-http", "--transport", "http-only",
         "--header", "Authorization:${AUTH}"
       ],
@@ -136,7 +233,9 @@ In `claude_desktop_config.json` (Settings → Developer → Edit Config):
 Three details in there are load-bearing:
 
 * `--allow-http` — mcp-remote refuses a plain-HTTP URL that is not localhost
-  unless you say this.
+  unless you say this. With the default mode the URL *is* localhost, so this
+  one is only strictly needed in **Anyone on this Wi-Fi** mode; leaving it in
+  costs nothing and means the block works either way.
 * `--transport http-only` — stops it probing first for the deprecated HTTP+SSE
   transport, which this server does not offer.
 * `Authorization:${AUTH}` with the value in `env`, and **no space after the
@@ -148,31 +247,13 @@ Restart Claude Desktop completely after editing the file.
 
 ---
 
-## Loopback mode, over a cable
-
-Pick **This device only** in the sheet before starting. The address becomes
-`127.0.0.1`, and nothing on the network can reach the port at all. Then, on the
-computer, with the phone connected by USB and USB debugging on:
-
-```
-adb forward tcp:8765 tcp:8765
-```
-
-Every config block above stays exactly the same except the host:
-
-```
-http://127.0.0.1:8765/mcp
-```
-
-The forward is per-connection: it is gone when you unplug the phone, when adb
-restarts, and when the phone reboots. Re-run it after any of those.
-
----
-
 ## Why not HTTPS
 
 Short version: **there is no HTTPS path that current MCP clients will accept
-from this device, so the traffic is plaintext and the token is the protection.**
+from this device, so in *Anyone on this Wi-Fi* mode the traffic is plaintext and
+the token is the protection.** In the default mode the question does not arise:
+the HTTP never leaves the device, and what does cross the network is adb's own
+TLS connection.
 
 The reasons, since it matters:
 
@@ -189,7 +270,8 @@ The reasons, since it matters:
 
 Shipping a setup that looks encrypted and fails at connection time would be
 worse than saying this plainly. If your threat model includes anyone watching
-the network, use loopback mode and the cable.
+the network, use the default mode — `adb` brings the encryption that this
+server cannot.
 
 The app's `res/xml/network_security_config.xml` keeps
 `cleartextTrafficPermitted="false"` for the whole app, and that is unchanged:
@@ -209,19 +291,60 @@ Work down this list:
 1. **Is the server actually running?** The sheet says `listening` and there is a
    notification in the status bar. If it stopped by itself the sheet says why —
    idle timeout, bad tokens, or the app's main screen being closed.
-2. **Is the address still right?** The phone's Wi-Fi address changes when it
-   changes network and can change on its own DHCP lease. Re-read it from the
-   sheet; if it differs from your config, update the config.
-3. **Are you on the same network?** Not just "both on Wi-Fi" — a guest network,
-   a second SSID, or a VPN on the laptop puts you somewhere else.
-4. **Client isolation.** Many public and some home access points block traffic
-   between clients ("AP isolation", "client isolation"). Nothing on the phone
-   can fix this. Use loopback mode and a cable.
-5. **Loopback mode without the forward.** In loopback mode, `adb forward
-   tcp:8765 tcp:8765` must have been run in the current adb session. Check with
-   `adb forward --list`; you should see `tcp:8765 tcp:8765`. If it is empty, run
-   it again. `adb devices` should show your phone as `device`, not
-   `unauthorized`.
+2. **The forward is not there.** In the default mode this is nearly always it.
+   `adb forward tcp:8765 tcp:8765` must have been run in the *current* adb
+   session; check with `adb forward --list` and look for `tcp:8765 tcp:8765`.
+   If it is empty, run it again. `adb devices` should show the phone as
+   `device`, not `unauthorized` and not `offline` — an `offline` wireless
+   device needs `adb connect` again, with the port re-read from the Wireless
+   debugging screen, because it will have changed.
+3. **Is the address still right?** *Anyone on this Wi-Fi* mode only. The
+   phone's Wi-Fi address changes when it changes network and can change on its
+   own DHCP lease. Re-read it from the sheet; if it differs from your config,
+   update the config.
+4. **Are you on the same network?** Not just "both on Wi-Fi" — a guest network,
+   a second SSID, or a VPN on the laptop puts you somewhere else. This applies
+   to the wireless-debugging route too: `adb connect` has to reach the phone.
+5. **Client isolation.** Many public and some home access points block traffic
+   between their clients ("AP isolation", "client isolation"). **Wireless
+   debugging does not get past this** — `adb connect` is computer-to-phone
+   traffic like any other, so it is blocked exactly as the MCP port was.
+   Nothing on the phone can change it. What does work:
+   * a **USB cable**, which is not on that network at all; or
+   * the **phone's own hotspot**, joined from the computer. Traffic to the
+     access point is not traffic between its clients, so isolation does not
+     apply — and Nocturne will name the interface `Hotspot` in the sheet.
+   * failing both, a network you control.
+
+### `adb pair` fails, or the pairing dialog gives up
+
+1. **The dialog was closed.** The pairing server lives inside the *Pair device
+   with pairing code* dialog. Close it and the port and the code are both gone,
+   and `adb pair` gets a connection refused. Open the dialog, then run the
+   command, and leave it up until adb prints `Successfully paired`.
+2. **The wrong port.** The pairing port and the connect port are different
+   numbers on the same address. `adb pair` wants the one printed *in the
+   dialog*; the one on the screen behind it is for `adb connect`.
+3. **The code expired.** The dialog rotates the code. Re-open it and use what
+   it shows now.
+4. **Old platform-tools.** `adb pair` arrived in platform-tools 30.0.0. `adb
+   --version` below that has no `pair` subcommand at all.
+
+### The sheet says the connect port was `not found`
+
+The sheet asks the device for the `_adb-tls-connect._tcp` service `adbd`
+advertises. Not finding it is not an error you have to fix — the number is
+printed on the Wireless debugging screen, and typing it in is all the sheet
+would have saved you. It happens when:
+
+* wireless debugging is off (the chip beside it usually says so);
+* the scan ran before `adbd` had advertised — tap **rescan**;
+* this build's mDNS stack does not report locally-registered services, which
+  varies by manufacturer and by Android release.
+
+The **wireless debugging** chip is read from a system setting that is not part
+of the public SDK, so a device that does not carry it says `unknown` rather
+than guessing.
 
 ### 401 Unauthorized
 
