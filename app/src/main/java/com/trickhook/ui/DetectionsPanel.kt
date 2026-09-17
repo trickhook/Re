@@ -177,8 +177,13 @@ private fun DetectionRow(vm: StudioViewModel, d: Detection) {
     val hexReachable = d.funcAddr == 0L && d.stringAddr != 0L && vm.fileOffsetOf(d.stringAddr) != null
     val canJump = d.funcAddr != 0L || hexReachable
     val label = when {
+        // A guard the engine attributed to a loaded function resolves through the
+        // shared overlay helper (renames first), so a renamed guard shows its
+        // user name. When the function is not in the loaded page, the same
+        // overlay is still consulted by address before the engine's name.
         known -> vm.effectiveFuncName(d.funcAddr)
-        d.funcAddr != 0L -> d.funcDisplay.ifBlank { d.funcName }.ifBlank { hexFmt(d.funcAddr) }
+        d.funcAddr != 0L -> vm.renames["0x%08X".format(d.funcAddr)]
+            ?: d.funcDisplay.ifBlank { d.funcName }.ifBlank { hexFmt(d.funcAddr) }
         else -> (d.value ?: "").ifBlank { "unattributed string" }
     }
     val where = if (d.funcAddr != 0L) hexFmt(d.funcAddr) else hexFmt(d.stringAddr)

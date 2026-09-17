@@ -297,7 +297,10 @@ fun DecompilePanel(vm: StudioViewModel) {
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    d?.let { it.displayName.ifEmpty { it.name } } ?: "—",
+                    // The engine's re-fetched detail is not overlay-aware, so
+                    // resolve the rename first — otherwise a renamed function keeps
+                    // its old name here while Assembly already shows the new one.
+                    d?.let { vm.renames["0x%08X".format(it.addr)] ?: it.displayName.ifEmpty { it.name } } ?: "—",
                     color = ide.text, fontSize = Type.body, lineHeight = Type.bodyLine,
                     fontWeight = FontWeight.Medium, fontFamily = Mono,
                     maxLines = 1, overflow = TextOverflow.Ellipsis

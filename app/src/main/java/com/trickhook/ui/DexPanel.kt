@@ -22,13 +22,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -225,6 +229,10 @@ private fun DexClassHeader(clazz: String, count: Int) {
 private fun DexMethodRow(vm: StudioViewModel, m: DexMethodInfo) {
     val ide = LocalIde.current
     val hasCode = m.codeOff != 0L
+    // A DEX method is addressed by its codeOff — the same key the call graph and
+    // smali detail use — so a rename recorded against that address (from here, an
+    // MCP tool or a plugin) shows the user's name, keeping the signature.
+    val methodName = vm.renames["0x%08X".format(m.codeOff)] ?: m.name
     Row(
         Modifier
             .fillMaxWidth()
@@ -240,7 +248,7 @@ private fun DexMethodRow(vm: StudioViewModel, m: DexMethodInfo) {
         RowIcon(Icons.Filled.Code, if (hasCode) ide.violet else ide.dim2, 14.dp)
         Column(Modifier.weight(1f)) {
             Text(
-                m.name + m.proto,
+                methodName + m.proto,
                 color = if (hasCode) ide.text else ide.dim,
                 fontSize = Type.mono, lineHeight = Type.monoLine, fontFamily = Mono,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -319,6 +327,13 @@ private fun DexSmaliDetail(vm: StudioViewModel, target: Long) {
     val ide = LocalIde.current
     val s = vm.dexSmali
     val busy = vm.dexSmaliBusy
+    // The address annotate is aimed at: the method (target/codeOff) from the
+    // header button, or one instruction (its off) from a tapped smali line. This
+    // reuses the Assembly panel's AnnotateDialog verbatim — one rename/comment
+    // mechanism, so a DEX-only binary can still be annotated where it has no
+    // native Assembly view. Keyed on `target` so moving methods resets it.
+    var annotateAddr by remember(target) { mutableStateOf<Long?>(null) }
+    val methodComment = vm.comments["0x%08X".format(target)]
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().surface2(RectangleShape).padding(horizontal = Space.s, vertical = Space.s),
@@ -332,7 +347,8 @@ private fun DexSmaliDetail(vm: StudioViewModel, target: Long) {
             }
             Column(Modifier.weight(1f)) {
                 Text(
-                    s?.let { it.classShort + "." + it.method } ?: hexFmt(target),
+                    vm.renames["0x%08X".format(target)]
+                        ?: (s?.let { it.classShort + "." + it.method } ?: hexFmt(target)),
                     color = ide.accent, fontSize = Type.section, fontFamily = Mono,
                     fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
@@ -343,6 +359,22 @@ private fun DexSmaliDetail(vm: StudioViewModel, target: Long) {
                         maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
                 }
+                // A user comment on the method address shows here, in the accent
+                // tint, so a comment set on this method in any view surfaces too.
+                if (methodComment != null) {
+                    Text(
+                        "; $methodComment", color = ide.accent, fontSize = Type.caption,
+                        lineHeight = Type.captionLine, fontFamily = Mono,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            IconButton(onClick = { annotateAddr = target }) {
+                Icon(
+                    Icons.Filled.DriveFileRenameOutline,
+                    contentDescription = "Rename or comment this method",
+                    tint = ide.accent, modifier = Modifier.size(18.dp)
+                )
             }
         }
         when {
@@ -354,7 +386,14 @@ private fun DexSmaliDetail(vm: StudioViewModel, target: Long) {
             else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = bottomInset(Space.l)) {
                 item(key = "meta") { DexMethodMeta(s) }
                 item(key = "callers") { DexCallers(vm, target) }
-                items(s.lines.size, key = { "l:${s.lines[it].unit}" }) { i -> SmaliRow(s.lines[i]) }
+                items(s.lines.size, key = { "l:${s.lines[it].unit}" }) { i ->
+                    val ln = s.lines[i]
+                    SmaliRow(
+                        ln,
+                        userComment = vm.comments["0x%08X".format(ln.off)],
+                        onClick = { annotateAddr = ln.off }
+                    )
+                }
                 if (s.truncated) item(key = "trunc") {
                     TruncationNote(
                         "The decode stopped early — this listing is not the whole method.",
@@ -363,6 +402,20 @@ private fun DexSmaliDetail(vm: StudioViewModel, target: Long) {
                 }
             }
         }
+    }
+
+    // The Assembly panel's dialog, reused. When the target is the method itself
+    // its name seeds the rename field; a tapped instruction passes an empty name
+    // so only its comment/bookmark are offered — no second mechanism is invented.
+    annotateAddr?.let { addr ->
+        AnnotateDialog(
+            vm = vm,
+            addr = addr,
+            funcName = if (addr == target)
+                (vm.renames["0x%08X".format(target)] ?: s?.let { it.classShort + "." + it.method } ?: hexFmt(target))
+            else "",
+            onDismiss = { annotateAddr = null }
+        )
     }
 }
 
@@ -407,7 +460,12 @@ private fun DexCallers(vm: StudioViewModel, target: Long) {
         }
         callers.take(20).forEach { e ->
             val owner = vm.functionAt(e.from)
-            val label = owner?.let { vm.effectiveFuncName(it.addr) } ?: e.fromName.ifEmpty { hexFmt(e.from) }
+            // A known caller resolves through the overlay helper (renames first);
+            // an unknown one still consults the rename overlay by address before
+            // falling back to the engine's raw name.
+            val label = owner?.let { vm.effectiveFuncName(it.addr) }
+                ?: vm.renames["0x%08X".format(e.from)]
+                ?: e.fromName.ifEmpty { hexFmt(e.from) }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -432,9 +490,18 @@ private fun DexCallers(vm: StudioViewModel, target: Long) {
 }
 
 @Composable
-private fun SmaliRow(l: SmaliLine) {
+private fun SmaliRow(l: SmaliLine, userComment: String? = null, onClick: (() -> Unit)? = null) {
     val ide = LocalIde.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = Space.l, vertical = Space.xs)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick != null)
+                    Modifier.clickable(role = Role.Button, onClickLabel = "Annotate this instruction", onClick = onClick)
+                else Modifier
+            )
+            .padding(horizontal = Space.l, vertical = Space.xs)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 hexFmt(l.off), color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
@@ -451,10 +518,20 @@ private fun SmaliRow(l: SmaliLine) {
                 )
             }
         }
+        // The engine's auto-comment (pool tag or branch target) stays dim.
         if (l.comment.isNotEmpty()) {
             Text(
                 l.comment, color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 84.dp)
+            )
+        }
+        // The user's own comment rides its own accent line — never merged into the
+        // auto-comment — so a comment set in any view reads distinctly here.
+        if (userComment != null) {
+            Text(
+                "; $userComment", color = ide.accent, fontSize = Type.monoSmall, fontFamily = Mono,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 84.dp)
             )
         }

@@ -309,7 +309,10 @@ fun GraphPanel(vm: StudioViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "CFG " + (d?.displayName?.ifEmpty { d.name } ?: "no function"),
+                // Resolve the rename overlay first, so the CFG header agrees with
+                // the Assembly and Functions views for a renamed function rather
+                // than showing the engine's now-stale name.
+                "CFG " + (d?.let { vm.renames["0x%08X".format(it.addr)] ?: it.displayName.ifEmpty { it.name } } ?: "no function"),
                 color = ide.text, fontSize = Type.label, fontFamily = Mono,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)

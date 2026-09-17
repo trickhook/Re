@@ -662,7 +662,8 @@ private fun buildHits(vm: StudioViewModel, q: String, ide: IdeColors): List<HitG
     val asmHits = detail?.asm.orEmpty().filter {
         it.mnem.contains(q, true) || it.ops.contains(q, true) || it.comment.contains(q, true)
     }
-    val scope = detail?.displayName?.takeIf { it.isNotBlank() }
+    val scope = detail?.let { vm.renames["0x%08X".format(it.addr)] }
+        ?: detail?.displayName?.takeIf { it.isNotBlank() }
         ?: detail?.name?.takeIf { it.isNotBlank() }
     group(
         "DISASSEMBLY",

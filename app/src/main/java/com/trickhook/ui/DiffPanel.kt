@@ -417,8 +417,15 @@ private fun DiffPairView(vm: StudioViewModel, pair: DiffChangedPair) {
     val a = vm.diffDetailA
     val b = vm.diffDetailB
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = DiffPairHeight)) {
-        item { SideHeader("A", vm.diffResult?.aName ?: "", pair.addrA, a, ide.entry) }
-        if (a != null && a.ok) items(a.asm.size) { i -> AsmRow(a.asm[i]) }
+        // A is the OPEN binary, so the open project's renames and comments — keyed
+        // to A's addresses — belong on this side. B is the second binary the diff
+        // was run against; its addresses are a different space, so it falls back
+        // to the engine's names honestly and shows no overlay.
+        item { SideHeader("A", vm.diffResult?.aName ?: "", pair.addrA, a, ide.entry, vm.renames["0x%08X".format(pair.addrA)]) }
+        if (a != null && a.ok) items(a.asm.size) { i ->
+            val ln = a.asm[i]
+            AsmRow(ln, vm.comments["0x%08X".format(ln.addr)])
+        }
         else item { EmptyPanel("No disassembly for A", a?.error) }
 
         item { Spacer(Modifier.height(Space.l)) }
@@ -430,9 +437,12 @@ private fun DiffPairView(vm: StudioViewModel, pair: DiffChangedPair) {
 }
 
 @Composable
-private fun SideHeader(side: String, binName: String, addr: Long, d: FunctionDetail?, tint: Color) {
+private fun SideHeader(side: String, binName: String, addr: Long, d: FunctionDetail?, tint: Color, renamed: String? = null) {
     val ide = LocalIde.current
-    val display = d?.let { if (it.displayName.isNotEmpty()) it.displayName else it.name } ?: hexFmt(addr)
+    // `renamed` is the open project's rename overlay for this address, resolved by
+    // the caller and passed only for the A side: renames are keyed to the OPEN
+    // binary's addresses, so B (the compared-against binary) has none to apply.
+    val display = renamed ?: (d?.let { if (it.displayName.isNotEmpty()) it.displayName else it.name } ?: hexFmt(addr))
     Column(Modifier.fillMaxWidth().padding(vertical = Space.s)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -460,32 +470,44 @@ private fun SideHeader(side: String, binName: String, addr: Long, d: FunctionDet
 }
 
 @Composable
-private fun AsmRow(line: com.trickhook.model.AsmLine) {
+private fun AsmRow(line: com.trickhook.model.AsmLine, userComment: String? = null) {
     val ide = LocalIde.current
     val hScroll = rememberScrollState()
-    Row(
+    Column(
         Modifier.fillMaxWidth().heightIn(min = 20.dp).padding(horizontal = Space.xs, vertical = Space.xs)
     ) {
-        Text(
-            hexFmt(line.addr), color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
-            maxLines = 1, modifier = Modifier.widthIn(min = 78.dp)
-        )
-        Row(Modifier.weight(1f).horizontalScroll(hScroll)) {
+        Row(Modifier.fillMaxWidth()) {
             Text(
-                line.mnem, color = mnemonicColor(line.mnem, ide), fontSize = Type.monoSmall,
-                fontFamily = Mono, fontWeight = FontWeight.Medium, maxLines = 1,
-                modifier = Modifier.widthIn(min = 56.dp)
+                hexFmt(line.addr), color = ide.dim2, fontSize = Type.monoSmall, fontFamily = Mono,
+                maxLines = 1, modifier = Modifier.widthIn(min = 78.dp)
             )
-            Text(
-                line.ops, color = ide.text, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1
-            )
-            if (line.comment.isNotEmpty()) {
-                Spacer(Modifier.width(Space.m))
+            Row(Modifier.weight(1f).horizontalScroll(hScroll)) {
                 Text(
-                    "; ${line.comment}", color = ide.dim2, fontSize = Type.monoSmall,
-                    fontFamily = Mono, maxLines = 1
+                    line.mnem, color = mnemonicColor(line.mnem, ide), fontSize = Type.monoSmall,
+                    fontFamily = Mono, fontWeight = FontWeight.Medium, maxLines = 1,
+                    modifier = Modifier.widthIn(min = 56.dp)
                 )
+                Text(
+                    line.ops, color = ide.text, fontSize = Type.monoSmall, fontFamily = Mono, maxLines = 1
+                )
+                // The engine's auto-comment stays dim and inline.
+                if (line.comment.isNotEmpty()) {
+                    Spacer(Modifier.width(Space.m))
+                    Text(
+                        "; ${line.comment}", color = ide.dim2, fontSize = Type.monoSmall,
+                        fontFamily = Mono, maxLines = 1
+                    )
+                }
             }
+        }
+        // The user's own comment (open project overlay, A side only) rides its own
+        // line in the accent tint, so it is never confused with the auto-comment.
+        if (userComment != null) {
+            Text(
+                "; $userComment", color = ide.accent, fontSize = Type.monoSmall, fontFamily = Mono,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 78.dp)
+            )
         }
     }
 }
